@@ -72,6 +72,13 @@ mcp = FastMCP(
 )
 
 
+# Import tool modules to register them with the MCP server
+import musicmind.tools.catalog  # noqa: F401, E402
+import musicmind.tools.library  # noqa: F401, E402
+import musicmind.tools.manage  # noqa: F401, E402
+import musicmind.tools.playback  # noqa: F401, E402
+
+
 @mcp.tool()
 async def musicmind_health() -> str:
     """Check MusicMind server status, auth, and configuration.

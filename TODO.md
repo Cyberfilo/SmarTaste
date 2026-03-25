@@ -12,6 +12,7 @@
 - [x] Phase 1: Project scaffold + auth + setup wizard
 - [x] Phase 2: Apple Music API client (25+ endpoints)
 - [x] Phase 3: SQLite persistence layer
+- [x] Phase 4: Library & catalog MCP tools (21 tools)
 
 ## Blocked / Known Issues
 [Empty]
