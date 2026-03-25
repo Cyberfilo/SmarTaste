@@ -77,6 +77,8 @@ import musicmind.tools.catalog  # noqa: F401, E402
 import musicmind.tools.library  # noqa: F401, E402
 import musicmind.tools.manage  # noqa: F401, E402
 import musicmind.tools.playback  # noqa: F401, E402
+import musicmind.tools.recommend  # noqa: F401, E402
+import musicmind.tools.taste  # noqa: F401, E402
 
 
 @mcp.tool()

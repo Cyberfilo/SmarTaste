@@ -9,7 +9,12 @@
 - **numpy for vectors**: genre affinity is a sparse vector, cosine similarity for matching. Simple and fast.
 
 ## Current Phase
-Phase 2: Apple Music API Client
+Phase 7: Polish & Ship
 
 ## Progress Notes
 - **Phase 1 complete**: Project scaffold with uv, config loading, ES256 JWT auth, setup wizard, FastMCP server with health tool, 16 tests passing, ruff clean.
+- **Phase 2 complete**: AppleMusicClient with 25+ endpoints, pagination, 429 retry, Pydantic models.
+- **Phase 3 complete**: SQLite persistence with 5 tables, async queries, server lifespan DB init.
+- **Phase 4 complete**: 21 MCP tools across library, catalog, playback, and management domains.
+- **Phase 5 complete**: Taste engine with genre vectors, artist affinity, similarity scoring, 4 discovery strategies.
+- **Phase 6 complete**: 7 new tools (taste_profile, taste_compare, listening_stats, discover, smart_playlist, refresh_cache, why_this_song). Total: 28 tools.

@@ -14,6 +14,7 @@
 - [x] Phase 3: SQLite persistence layer
 - [x] Phase 4: Library & catalog MCP tools (21 tools)
 - [x] Phase 5: Taste engine (profile builder + scorer + discovery)
+- [x] Phase 6: Smart recommendation tools (28 tools total)
 
 ## Blocked / Known Issues
 [Empty]
