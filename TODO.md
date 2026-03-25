@@ -10,6 +10,7 @@
 
 ## Completed
 - [x] Phase 1: Project scaffold + auth + setup wizard
+- [x] Phase 2: Apple Music API client (25+ endpoints)
 
 ## Blocked / Known Issues
 [Empty]
