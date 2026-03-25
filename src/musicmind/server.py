@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
 
@@ -90,6 +90,8 @@ async def musicmind_health() -> str:
         lines.append("\n> Configure your Apple Developer credentials in "
                       "`~/.config/musicmind/config.json`")
     if not has_user:
-        lines.append("\n> Run `uv run python -m musicmind.setup` to authorize your Apple Music account")
+        lines.append(
+            "\n> Run `uv run python -m musicmind.setup` to authorize your Apple Music account"
+        )
 
     return "\n".join(lines)

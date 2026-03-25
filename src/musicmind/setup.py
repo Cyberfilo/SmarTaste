@@ -13,7 +13,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from musicmind.config import CONFIG_DIR, CONFIG_FILE, save_config
+from musicmind.config import CONFIG_FILE, save_config
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.StreamHandler(sys.stderr))

@@ -11,13 +11,12 @@ import pytest
 from musicmind.auth import AuthManager, TOKEN_EXPIRY_SECONDS
 from musicmind.config import MusicMindConfig
 
-# Test ES256 key pair (DO NOT use in production)
-TEST_PRIVATE_KEY = """-----BEGIN EC PRIVATE KEY-----
-MHQCAQEEIOBxhGiaDGOo6LMGV6GxOUJjPVMEV86FdnDLBfXRsmMNoAcGBSuBBAAi
-oWQDYgAEY1GlPyRPrzIhfA97EEdMVvMFq/VPuBKB62J9hHIvamJADHaJL8A5UXKH
-EMKi7MnOFHGHGtrf0vWTdjiTOoNivunEE8F4oFrJJHPONaVLSGfD2MSwKn72GWjQ
-AYwqGUYn
------END EC PRIVATE KEY-----"""
+# Test ES256 key pair — P-256 / PKCS8 format (DO NOT use in production)
+TEST_PRIVATE_KEY = """-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgYPl/uVchiF+q/y39
+eKZGVJUt4U2E7zwR0q/TFVJoTgGhRANCAAR11w5DMXuEIm+ByrJ/nE6l7qo7Ln0w
+Ie22tgn21jFF7iqS1Zvh5Sk2Ku8p6jnCuraYmGNcpmeJGsKo8LmdgWTh
+-----END PRIVATE KEY-----"""
 
 
 @pytest.fixture

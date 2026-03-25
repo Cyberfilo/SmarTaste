@@ -9,7 +9,7 @@
 - **numpy for vectors**: genre affinity is a sparse vector, cosine similarity for matching. Simple and fast.
 
 ## Current Phase
-Phase 1: Project Scaffold
+Phase 2: Apple Music API Client
 
 ## Progress Notes
-[Claude updates this as work progresses]
+- **Phase 1 complete**: Project scaffold with uv, config loading, ES256 JWT auth, setup wizard, FastMCP server with health tool, 16 tests passing, ruff clean.
