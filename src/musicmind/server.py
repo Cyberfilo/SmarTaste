@@ -11,7 +11,10 @@ from mcp.server.fastmcp import FastMCP
 
 from musicmind import __version__
 from musicmind.auth import AuthManager
-from musicmind.config import load_config
+from musicmind.client import AppleMusicClient
+from musicmind.config import DB_FILE, load_config
+from musicmind.db.manager import DatabaseManager
+from musicmind.db.queries import QueryExecutor
 
 # All logging to stderr (MCP stdio transport requirement)
 logging.basicConfig(
@@ -24,25 +27,42 @@ logger = logging.getLogger("musicmind")
 
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[dict]:
-    """Server lifespan: initialize config and auth on startup."""
+    """Server lifespan: initialize config, auth, DB, and API client on startup."""
     logger.info("MusicMind MCP v%s starting up", __version__)
+
+    # Initialize database (always — even without API config)
+    db_manager = DatabaseManager(DB_FILE)
+    await db_manager.initialize()
+    queries = QueryExecutor(db_manager.engine)
+
     try:
         config = load_config()
         auth = AuthManager(config)
-        # Verify developer token can be generated
         _ = auth.developer_token
         logger.info("Developer token OK, storefront=%s", config.storefront)
     except FileNotFoundError as e:
         logger.warning("Config not loaded: %s", e)
         logger.warning("Server starting in limited mode — run setup first")
-        yield {"config": None, "auth": None}
+        yield {"config": None, "auth": None, "client": None, "db": db_manager, "queries": queries}
+        await db_manager.close()
         return
     except Exception as e:
         logger.error("Startup error: %s", e)
-        yield {"config": None, "auth": None}
+        yield {"config": None, "auth": None, "client": None, "db": db_manager, "queries": queries}
+        await db_manager.close()
         return
 
-    yield {"config": config, "auth": auth}
+    client = AppleMusicClient(auth, storefront=config.storefront)
+    async with client:
+        yield {
+            "config": config,
+            "auth": auth,
+            "client": client,
+            "db": db_manager,
+            "queries": queries,
+        }
+
+    await db_manager.close()
     logger.info("MusicMind MCP shutting down")
 
 

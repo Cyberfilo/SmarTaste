@@ -11,6 +11,7 @@
 ## Completed
 - [x] Phase 1: Project scaffold + auth + setup wizard
 - [x] Phase 2: Apple Music API client (25+ endpoints)
+- [x] Phase 3: SQLite persistence layer
 
 ## Blocked / Known Issues
 [Empty]
