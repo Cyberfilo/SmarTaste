@@ -20,15 +20,33 @@ def _genre_cosine(
     song_genres: list[str],
     genre_vector: dict[str, float],
 ) -> float:
-    """Cosine similarity between a song's genres and the taste profile genre vector."""
+    """Cosine similarity between a song's genres and the taste profile genre vector.
+
+    Regional genre prioritization: original genre names get full weight (1.0),
+    expanded parent genres get reduced weight (0.3). This ensures a song tagged
+    "Italian Hip-Hop/Rap" scores much higher against a profile dominated by
+    "Italian Hip-Hop/Rap" than a song tagged just "Hip-Hop/Rap".
+    """
     if not song_genres or not genre_vector:
         return 0.0
 
+    originals = set(song_genres)
     expanded = expand_genres(song_genres)
     all_genres = set(genre_vector.keys()) | set(expanded)
     profile_vec = np.array([genre_vector.get(g, 0.0) for g in all_genres])
-    song_weight = 1.0 / len(expanded) if expanded else 0.0
-    song_vec = np.array([song_weight if g in expanded else 0.0 for g in all_genres])
+
+    # Build song vector: original genres get 1.0, expanded parents get 0.3
+    raw_weights = {}
+    for g in expanded:
+        if g in originals:
+            raw_weights[g] = 1.0
+        else:
+            raw_weights[g] = 0.3
+    total_w = sum(raw_weights.values())
+    song_vec = np.array([
+        raw_weights.get(g, 0.0) / total_w if total_w > 0 else 0.0
+        for g in all_genres
+    ])
 
     dot = np.dot(profile_vec, song_vec)
     norm_a = np.linalg.norm(profile_vec)
@@ -100,10 +118,13 @@ def score_candidate(
         candidate.get("genre_names", []), genre_vector
     )
 
-    # 2. Artist match
+    # 2. Artist match — penalized if known artist but wrong genre
     artist_name = candidate.get("artist_name", "").lower()
     artist_scores = {a["name"].lower(): a["score"] for a in top_artists}
     artist_match = artist_scores.get(artist_name, 0.0)
+    if artist_match > 0 and genre_score < 0.2:
+        # Known artist in the wrong genre should NOT get a boost
+        artist_match *= 0.3
 
     # 3. Audio similarity (Tier 2)
     audio_sim = 0.5  # neutral default

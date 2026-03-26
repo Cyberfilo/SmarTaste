@@ -16,7 +16,30 @@ Python FastMCP server connecting Claude to Apple Music API. Three layers:
 Tools are organized by domain: library, catalog, playback, manage, taste, recommend.
 
 ## Adaptive Recommendation Engine
-The scorer uses 7 weighted dimensions (genre, artist, audio, novelty, freshness, diversity, staleness) with adaptive weights learned from user feedback. Additional bonuses: cross-strategy convergence, mood filtering, optional SoundAnalysis labels.
+The scorer uses 7 weighted dimensions with adaptive weights learned from user feedback. Additional bonuses: cross-strategy convergence, mood filtering, optional SoundAnalysis labels.
+
+### Default Weight Distribution (genre-first)
+- **genre: 0.35** — most important signal; uses regional genre prioritization
+- **audio: 0.20** — beat/style similarity from audio features
+- **novelty: 0.12** — rewards new artists in familiar genres (Gaussian bell curve)
+- **freshness: 0.10** — matches user's release year preferences
+- **diversity: 0.08** — MMR penalty to avoid echo chambers
+- **artist: 0.08** — deliberately low; style matters more than specific artist
+- **staleness: 0.07** — cooldown on recently recommended songs
+
+### Regional Genre Prioritization
+When building genre vectors and computing cosine similarity:
+- Original genre names (e.g., "Italian Hip-Hop/Rap") get **full weight (1.0)**
+- Expanded parent genres (e.g., "Hip-Hop/Rap") get **reduced weight (0.3)**
+- This ensures a user who listens to 90% Italian music gets Italian recommendations, not generic American equivalents that happen to share the parent genre
+
+### Artist-in-Wrong-Genre Penalty
+If a known artist appears in a genre with cosine score < 0.2, their artist_match is penalized to 30%. This prevents "you listen to Artist X" from recommending their one country song to a drill listener.
+
+### Discovery Strategy Noise Reduction
+- **similar_artist_crawl**: default depth=1 (was 2) — two hops drifts too far
+- **chart_filter**: passes user's #1 genre to API + pre-filters by top-5 genre overlap
+- **genre_adjacent_explore**: uses full regional genre names for search, filters out zero-overlap results
 
 ### Audio Analysis Tiers
 - **Tier 1** (always): Metadata-only scoring (genres, artists, editorial notes)

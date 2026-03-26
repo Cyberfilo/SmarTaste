@@ -30,7 +30,7 @@ class TestRecommendationFeedback:
             "catalog_id": "1234",
             "feedback_type": "thumbs_up",
             "predicted_score": 0.85,
-            "weight_snapshot": {"genre": 0.25, "artist": 0.15},
+            "weight_snapshot": {"genre": 0.35, "artist": 0.08},
         })
         assert fid >= 1
 
@@ -38,7 +38,7 @@ class TestRecommendationFeedback:
         assert len(all_fb) == 1
         assert all_fb[0]["catalog_id"] == "1234"
         assert all_fb[0]["feedback_type"] == "thumbs_up"
-        assert all_fb[0]["weight_snapshot"]["genre"] == 0.25
+        assert all_fb[0]["weight_snapshot"]["genre"] == 0.35
 
     async def test_get_feedback_since(self, queries: QueryExecutor) -> None:
         old_time = datetime.now(tz=UTC) - timedelta(days=10)

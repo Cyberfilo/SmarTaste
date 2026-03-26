@@ -79,6 +79,8 @@ def build_genre_vector(
     now = datetime.now(tz=UTC)
 
     # Library songs: 1x weight (optionally decayed)
+    # Regional genre prioritization: original genre gets full weight,
+    # expanded parent gets 0.3x to preserve regional preference signal
     for song in songs:
         genres = song.get("genre_names") or []
         if isinstance(genres, str):
@@ -89,8 +91,12 @@ def build_genre_vector(
             ts = song.get("date_added_to_library") or song.get("fetched_at")
             base_weight *= temporal_decay_weight(ts, now, half_life_days)
 
+        originals = set(genres)
         for g in expand_genres(genres):
-            counter[g] += base_weight
+            if g in originals:
+                counter[g] += base_weight
+            else:
+                counter[g] += base_weight * 0.3
 
     # Recent plays: 2x weight (recency bias)
     seen_song_ids = set()
@@ -109,8 +115,12 @@ def build_genre_vector(
         genres = entry.get("genre_names") or []
         if isinstance(genres, str):
             genres = [genres]
+        originals = set(genres)
         for g in expand_genres(genres):
-            counter[g] += weight
+            if g in originals:
+                counter[g] += weight
+            else:
+                counter[g] += weight * 0.3
 
     # Normalize to sum=1.0
     total = sum(counter.values())
