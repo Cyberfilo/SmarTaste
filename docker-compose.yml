@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: musicmind
+      POSTGRES_PASSWORD: musicmind
+      POSTGRES_DB: musicmind
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U musicmind -d musicmind"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      MUSICMIND_DATABASE_URL: postgresql+asyncpg://musicmind:musicmind@db:5432/musicmind
+      MUSICMIND_FERNET_KEY: ${MUSICMIND_FERNET_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
