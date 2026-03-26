@@ -1,6 +1,6 @@
 # MusicMind MCP
 
-**V2.10** | **30 tools** | **150 tests** | **Adaptive scoring** | **Audio analysis** | **Mood filtering**
+**V2.20** | **32 tools** | **150 tests** | **Adaptive scoring** | **Audio analysis** | **Mood filtering**
 
 > An MCP server that gives Claude deep, intelligent access to your Apple Music account — not just CRUD operations, but a full taste-understanding engine that analyzes listening patterns, builds genre/artist/mood profiles, and generates genuinely personalized recommendations and playlists.
 
@@ -193,7 +193,7 @@ In Claude, ask: **"Check MusicMind health"** — it should show server version, 
 
 ---
 
-## Tools (30)
+## Tools (32)
 
 ### Library Browsing
 | Tool | Description |
@@ -238,12 +238,14 @@ In Claude, ask: **"Check MusicMind health"** — it should show server version, 
 | `musicmind_taste_compare` | Score how well a song matches your taste |
 | `musicmind_listening_stats` | Aggregate stats from your cached data |
 | `musicmind_why_this_song` | Explain per-dimension taste match for a song |
+| `musicmind_taste_deep` | Comprehensive taste briefing (profile + recent + patterns) in one call |
 
 ### Smart Recommendations
 | Tool | Description |
 |------|-------------|
 | `musicmind_discover` | Find new songs with optional mood and strategy selection |
 | `musicmind_smart_playlist` | Create a vibe-based playlist from natural language |
+| `musicmind_curate_playlist` | Claude-as-DJ: resolve "artist - title" queries to IDs + create playlist |
 | `musicmind_feedback` | Train the engine with thumbs up/down feedback |
 | `musicmind_refresh_cache` | Re-fetch data and rebuild taste profile |
 
@@ -270,6 +272,8 @@ Once connected, try these in Claude:
 "Give thumbs up to song 1234567890" (after a recommendation)
 "What are the top charts right now?"
 "Compare my taste to this album's tracks"
+"Fammi una playlist estiva tipo drill milanese" (uses curate_playlist for regional scenes)
+"Give me a deep taste briefing" (uses taste_deep for max context)
 ```
 
 ---
@@ -288,8 +292,8 @@ src/musicmind/
 │   ├── catalog.py     # 7 catalog search/lookup tools
 │   ├── playback.py    # 3 listening history tools
 │   ├── manage.py      # 4 library management tools
-│   ├── taste.py       # 4 taste analysis tools
-│   └── recommend.py   # 4 recommendation tools (discover, playlist, feedback, refresh)
+│   ├── taste.py       # 5 taste analysis tools (+ taste_deep)
+│   └── recommend.py   # 5 recommendation tools (+ curate_playlist)
 ├── engine/
 │   ├── profile.py     # Taste profile builder (genre vectors, artist affinity, temporal decay)
 │   ├── similarity.py  # Song/artist/audio similarity scoring

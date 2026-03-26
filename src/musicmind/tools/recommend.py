@@ -268,6 +268,102 @@ async def musicmind_feedback(
 
 
 @mcp.tool()
+async def musicmind_curate_playlist(
+    name: str,
+    description: str = "",
+    tracks: list[str] | None = None,
+) -> str:
+    """Create a curated playlist from specific track queries.
+
+    Claude picks the tracks, this tool resolves them to catalog IDs and creates
+    the playlist. Each track query should be "artist - title" format for best matching.
+
+    This is for Claude-curated playlists where Claude (not the algorithm) selects
+    every track based on its music knowledge + the user's taste profile.
+
+    Args:
+        name: Playlist name
+        description: Optional playlist description
+        tracks: List of track queries in "artist - title" format
+            (e.g., ["Seven 7oo - GANGSTA", "Baby Gang - Casablanca", "Neima Ezza - Gang"])
+    """
+    client, queries = _ctx()
+    track_list = tracks or []
+
+    if not track_list:
+        return "No tracks provided. Pass a list of 'artist - title' queries."
+
+    found_ids = []
+    not_found = []
+    track_details = []
+
+    for track_query in track_list:
+        try:
+            result = await client.search_catalog(track_query, types="songs", limit=3)
+            if result.songs.data:
+                best = result.songs.data[0]
+                catalog_id = best.id
+                attrs = best.attributes
+                found_ids.append(catalog_id)
+                track_details.append({
+                    "query": track_query,
+                    "matched": f"{attrs.get('name', '')} — {attrs.get('artistName', '')}",
+                    "id": catalog_id,
+                })
+                cache = extract_song_cache_data(best)
+                if cache:
+                    await queries.upsert_song_metadata([cache])
+            else:
+                not_found.append(track_query)
+        except Exception as e:
+            logger.warning("Search for '%s' failed: %s", track_query, e)
+            not_found.append(track_query)
+
+    if not found_ids:
+        return f"Could not find any of the {len(track_list)} tracks. Try different queries."
+
+    try:
+        playlist_resource = await client.create_playlist(name, description, found_ids)
+        apple_id = playlist_resource.id or "(pending)"
+    except Exception as e:
+        logger.error("Failed to create playlist: %s", e)
+        return f"Found {len(found_ids)} tracks but playlist creation failed: {e}"
+
+    snapshot = await queries.get_latest_taste_snapshot()
+    snapshot_id = snapshot.get("id") if snapshot else None
+    await queries.save_generated_playlist({
+        "apple_playlist_id": apple_id,
+        "name": name,
+        "description": description,
+        "vibe_prompt": f"Curated: {description}",
+        "track_ids": found_ids,
+        "taste_snapshot_id": snapshot_id,
+    })
+
+    lines = [
+        f"## Playlist Created: {name}",
+        f"**Apple Music ID:** `{apple_id}`",
+        f"**Tracks found:** {len(found_ids)}/{len(track_list)}\n",
+        "### Matched Tracks",
+    ]
+    for i, td in enumerate(track_details, start=1):
+        lines.append(
+            f"{i}. \"{td['query']}\" → **{td['matched']}** (ID: `{td['id']}`)"
+        )
+
+    if not_found:
+        lines.append("\n### Not Found")
+        for nf in not_found:
+            lines.append(f"- \"{nf}\"")
+        lines.append(
+            f"\n*{len(not_found)} tracks not found — search manually "
+            f"and add with `musicmind_add_to_playlist`*"
+        )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
 async def musicmind_smart_playlist(
     name: str,
     vibe: str,
@@ -277,6 +373,10 @@ async def musicmind_smart_playlist(
 
     Describe the mood, energy, or scenario and it will find matching songs,
     score them against your taste profile, and create a real Apple Music playlist.
+
+    Note: For underground or regional scenes (drill milanese, rap italiano, etc.),
+    smart_playlist may not find the right tracks. Use musicmind_curate_playlist instead —
+    it lets Claude pick specific tracks by name based on its music knowledge.
 
     Args:
         name: Playlist name
@@ -294,7 +394,7 @@ async def musicmind_smart_playlist(
             "`musicmind_library_songs` and `musicmind_recently_played`."
         )
 
-    search_terms = _parse_vibe(vibe)
+    search_terms = _parse_vibe(vibe, profile=profile)
 
     candidates: list[dict[str, Any]] = []
     for term in search_terms:
@@ -390,8 +490,12 @@ async def musicmind_smart_playlist(
     return "\n".join(lines)
 
 
-def _parse_vibe(vibe: str) -> list[str]:
-    """Parse a natural language vibe into search terms."""
+def _parse_vibe(vibe: str, profile: dict[str, Any] | None = None) -> list[str]:
+    """Parse a natural language vibe into search terms.
+
+    Supports regional scene keywords (Italian, UK, French, etc.) and uses
+    the user's taste profile genres as additional search seeds.
+    """
     terms = [vibe]
 
     stop_words = {
@@ -399,6 +503,10 @@ def _parse_vibe(vibe: str) -> list[str]:
         "songs", "music", "tracks", "playlist", "vibes", "vibe",
         "with", "and", "or", "but", "to", "of", "in", "on", "at",
         "that", "this", "something", "good", "great", "best", "new",
+        # Italian stop words
+        "per", "una", "un", "il", "la", "le", "che", "con", "di",
+        "da", "del", "della", "delle", "dei", "degli", "tipo", "roba",
+        "cose", "bella", "bello", "brutta", "brutto",
     }
     words = [w.lower().strip(".,!?\"'") for w in vibe.split()]
     keywords = [w for w in words if w not in stop_words and len(w) > 2]
@@ -408,7 +516,9 @@ def _parse_vibe(vibe: str) -> list[str]:
     if len(keywords) >= 3:
         terms.append(" ".join(keywords[1:4]))
 
+    # Extended genre hints with regional scenes
     genre_hints = {
+        # Macro genres
         "drill": "drill rap", "trap": "trap music", "lofi": "lo-fi hip hop",
         "lo-fi": "lo-fi hip hop", "chill": "chill vibes",
         "ambient": "ambient electronic", "rock": "rock", "pop": "pop hits",
@@ -418,12 +528,38 @@ def _parse_vibe(vibe: str) -> list[str]:
         "latin": "latin music", "indie": "indie alternative",
         "metal": "metal", "punk": "punk rock", "country": "country",
         "folk": "folk acoustic",
+        # Italian scene
+        "italiano": "rap italiano", "italiana": "musica italiana",
+        "milanese": "drill milanese rap italiano",
+        "napoletano": "rap napoletano", "napoletana": "musica napoletana",
+        "romano": "rap romano",
+        "street": "street rap italiano",
+        "gasa": "drill italiano beat pesante",
+        "gasare": "drill italiano aggressivo",
+        # UK scene
+        "grime": "grime uk", "ukdrill": "uk drill",
+        # French scene
+        "francese": "rap français",
+        # Afro / Latin
+        "afrobeats": "afrobeats", "afro": "afrobeats",
+        "dembow": "dembow reggaeton",
+        # Mood-based (Italian)
+        "carica": "energetic aggressive rap",
+        "malinconica": "sad melancholic rap",
+        "estate": "summer hits",
     }
     for word in keywords:
         if word in genre_hints:
             terms.append(genre_hints[word])
 
-    return terms[:5]
+    # Use profile's top genres as additional search seeds
+    if profile and profile.get("genre_vector"):
+        top_genres = list(profile["genre_vector"].keys())[:3]
+        for genre in top_genres:
+            if keywords:
+                terms.append(f"{keywords[0]} {genre}")
+
+    return terms[:8]
 
 
 @mcp.tool()

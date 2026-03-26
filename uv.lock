@@ -666,7 +666,7 @@ wheels = [
 
 [[package]]
 name = "musicmind-mcp"
-version = "0.1.0"
+version = "2.10"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

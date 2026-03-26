@@ -4,6 +4,24 @@ All notable changes to MusicMind MCP are documented here.
 
 Versioning: **VX.YZ** — X = major change, Y = minor logic change, Z = bug fix.
 
+## [V2.20] - 2026-03-26
+
+### Added
+- **`musicmind_curate_playlist` tool** — Claude-as-DJ workflow: pass a list of "artist - title" queries, the tool resolves each to a catalog ID via search, creates the playlist in one call. Eliminates the 20+ tool-call loop for curated playlists
+- **`musicmind_taste_deep` tool** — comprehensive taste briefing combining profile + recent listening + genre/artist patterns + familiarity score + era preference + feedback history in a single call. Designed to give Claude maximum context before curating
+- **Regional scene keywords in `_parse_vibe()`** — Italian (milanese, napoletano, romano, street, gasa), UK (grime, ukdrill), French (francese), Afro/Latin (afrobeats, dembow), mood-based Italian (carica, malinconica, estate), plus Italian stop words
+- **Profile-seeded search terms** — `_parse_vibe()` now accepts the user's taste profile and uses top 3 genres as additional search seeds, combining them with vibe keywords
+
+### Fixed
+- **`format_song_md()` now includes catalog IDs** — all tool outputs (search, library, recently_played, lookup_artist top songs, lookup_album tracklist, charts) now show `ID: \`catalog_id\`` so Claude can collect IDs without extra tool calls. This was the root cause of playlist creation failing in loops
+- **`format_album_md()` and `format_artist_md()`** also include resource IDs
+
+### Changed
+- `musicmind_smart_playlist` docstring updated to recommend `musicmind_curate_playlist` for underground/regional scenes
+- `musicmind_taste_profile` docstring updated to recommend `musicmind_taste_deep` for comprehensive briefing
+- `_parse_vibe()` search term limit increased from 5 to 8 for better coverage
+- 32 tools total (was 30), 150 tests passing
+
 ## [V2.10] - 2026-03-26
 
 ### Changed

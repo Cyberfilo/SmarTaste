@@ -100,7 +100,7 @@ def extract_artist_cache_data(resource: Resource) -> dict:
 
 
 def format_song_md(resource: Resource, index: int | None = None) -> str:
-    """Format a song Resource as a markdown line."""
+    """Format a song Resource as a markdown line, always including the catalog ID."""
     attrs = resource.attributes
     name = attrs.get("name", "Unknown")
     artist = attrs.get("artistName", "Unknown")
@@ -108,6 +108,15 @@ def format_song_md(resource: Resource, index: int | None = None) -> str:
     genres = ", ".join(attrs.get("genreNames", []))
     duration_ms = attrs.get("durationInMillis", 0) or 0
     duration = f"{duration_ms // 60000}:{(duration_ms % 60000) // 1000:02d}" if duration_ms else ""
+
+    # Determine catalog ID — works for both catalog songs and library songs
+    catalog_id = ""
+    if resource.type == "songs":
+        catalog_id = resource.id
+    elif resource.type == "library-songs":
+        catalog_data = resource.relationships.get("catalog", {}).get("data", [])
+        if catalog_data:
+            catalog_id = catalog_data[0].get("id", "")
 
     prefix = f"{index}. " if index is not None else "- "
     line = f"{prefix}**{name}** — {artist}"
@@ -117,11 +126,13 @@ def format_song_md(resource: Resource, index: int | None = None) -> str:
         line += f" [{duration}]"
     if genres:
         line += f"\n  Genres: {genres}"
+    if catalog_id:
+        line += f"\n  ID: `{catalog_id}`"
     return line
 
 
 def format_album_md(resource: Resource, index: int | None = None) -> str:
-    """Format an album Resource as a markdown line."""
+    """Format an album Resource as a markdown line, including the album ID."""
     attrs = resource.attributes
     name = attrs.get("name", "Unknown")
     artist = attrs.get("artistName", "Unknown")
@@ -130,11 +141,13 @@ def format_album_md(resource: Resource, index: int | None = None) -> str:
     line = f"{prefix}**{name}** — {artist}"
     if tracks:
         line += f" ({tracks} tracks)"
+    if resource.id:
+        line += f"\n  ID: `{resource.id}`"
     return line
 
 
 def format_artist_md(resource: Resource, index: int | None = None) -> str:
-    """Format an artist Resource as a markdown line."""
+    """Format an artist Resource as a markdown line, including the artist ID."""
     attrs = resource.attributes
     name = attrs.get("name", "Unknown")
     genres = ", ".join(attrs.get("genreNames", []))
@@ -142,6 +155,8 @@ def format_artist_md(resource: Resource, index: int | None = None) -> str:
     line = f"{prefix}**{name}**"
     if genres:
         line += f" — {genres}"
+    if resource.id:
+        line += f"\n  ID: `{resource.id}`"
     return line
 
 

@@ -28,6 +28,9 @@ async def musicmind_taste_profile() -> str:
     - Familiarity score (how adventurous your taste is)
 
     Call musicmind_recently_played and musicmind_library_songs first to populate the cache.
+
+    For a more comprehensive briefing (profile + recent listening + patterns in one call),
+    use musicmind_taste_deep instead.
     """
     _, queries = _ctx()
 
@@ -196,5 +199,136 @@ async def musicmind_listening_stats() -> str:
         lines.append("\n### Top Genres (from library)")
         for genre, count in genre_counts.most_common(10):
             lines.append(f"- **{genre}**: {count} songs")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def musicmind_taste_deep() -> str:
+    """Get a comprehensive taste briefing in one call.
+
+    Combines: full taste profile, recent listening, top genres, top artists,
+    listening patterns, and familiarity score. Use this FIRST before creating
+    curated playlists — it gives Claude maximum context about the user's taste.
+
+    Returns a structured briefing designed for Claude to understand the user's
+    musical identity: what scenes they're into, what artists define their taste,
+    how adventurous they are, and what they've been playing lately.
+    """
+    _, queries = _ctx()
+
+    songs = await queries.get_all_cached_songs()
+    history = await queries.get_listening_history()
+
+    if not songs:
+        return (
+            "No data cached yet. Run `musicmind_recently_played` and "
+            "`musicmind_library_songs` first to populate the cache."
+        )
+
+    profile = build_taste_profile(songs, history, use_temporal_decay=True)
+    await queries.save_taste_snapshot(profile)
+
+    stats = await queries.get_cache_stats()
+
+    # Recent tracks from history (no API call needed)
+    recent = sorted(
+        history, key=lambda h: h.get("observed_at", ""), reverse=True
+    )[:30]
+
+    recent_artists: Counter[str] = Counter()
+    recent_genres: Counter[str] = Counter()
+    for h in recent:
+        artist = h.get("artist_name", "")
+        if artist:
+            recent_artists[artist] += 1
+        for g in h.get("genre_names") or []:
+            recent_genres[g] += 1
+
+    lib_genres: Counter[str] = Counter()
+    for s in songs:
+        for g in s.get("genre_names") or []:
+            lib_genres[g] += 1
+
+    lines = ["## Deep Taste Briefing"]
+    lines.append(
+        f"*{profile['total_songs_analyzed']} songs analyzed, "
+        f"~{profile['listening_hours_estimated']}h estimated, "
+        f"{stats['listening_history_entries']} history entries*\n"
+    )
+
+    # Genre identity
+    gv = profile["genre_vector"]
+    if gv:
+        lines.append("### Genre Identity (weighted by recency)")
+        for genre, weight in list(gv.items())[:15]:
+            bar = "\u2588" * int(weight * 40)
+            count = lib_genres.get(genre, 0)
+            lines.append(f"- **{genre}**: {weight:.1%} {bar} ({count} songs)")
+
+    # Top artists with context
+    ta = profile["top_artists"]
+    if ta:
+        lines.append("\n### Core Artists (by affinity)")
+        for i, a in enumerate(ta[:15], start=1):
+            recent_count = recent_artists.get(a["name"], 0)
+            recent_tag = (
+                f" — {recent_count}x in recent" if recent_count > 0 else ""
+            )
+            lines.append(
+                f"{i}. **{a['name']}** — affinity {a['score']:.0%} "
+                f"({a['song_count']} songs){recent_tag}"
+            )
+
+    # Recent listening pattern
+    if recent:
+        lines.append("\n### Recent Listening (last 30 tracks)")
+        for artist, count in recent_artists.most_common(10):
+            lines.append(f"- **{artist}**: {count} plays")
+
+        lines.append("\n### Recent Genres")
+        for genre, count in recent_genres.most_common(10):
+            lines.append(f"- **{genre}**: {count} tracks")
+
+    # Recent specific tracks (last 10)
+    if recent:
+        lines.append("\n### Last 10 Tracks Played")
+        for i, h in enumerate(recent[:10], start=1):
+            lines.append(
+                f"{i}. **{h.get('song_name', '?')}** — "
+                f"{h.get('artist_name', '?')}"
+            )
+
+    # Familiarity and exploration tendency
+    fam = profile["familiarity_score"]
+    if fam < 0.3:
+        fam_desc = (
+            "very focused — knows exactly what they like, stick to known scenes"
+        )
+    elif fam < 0.6:
+        fam_desc = "moderate — open to discovery within familiar territory"
+    else:
+        fam_desc = "explorer — wide taste, open to anything"
+    lines.append(f"\n### Taste Profile: {fam:.0%} ({fam_desc})")
+
+    # Release year preference
+    ryd = profile["release_year_distribution"]
+    if ryd:
+        lines.append("\n### Era Preference")
+        for year, pct in list(ryd.items())[:5]:
+            lines.append(f"- **{year}**: {pct:.0%}")
+
+    # Feedback summary if available
+    all_feedback = await queries.get_all_feedback()
+    if all_feedback:
+        thumbs_up = sum(
+            1 for f in all_feedback if f.get("feedback_type") == "thumbs_up"
+        )
+        thumbs_down = sum(
+            1 for f in all_feedback if f.get("feedback_type") == "thumbs_down"
+        )
+        lines.append(
+            f"\n### Feedback History: {thumbs_up} up / {thumbs_down} down"
+        )
 
     return "\n".join(lines)
