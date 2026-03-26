@@ -2,7 +2,20 @@
 
 All notable changes to MusicMind MCP are documented here.
 
-## [0.2.0] - 2026-03-26
+Versioning: **VX.YZ** — X = major change, Y = minor logic change, Z = bug fix.
+
+## [V2.10] - 2026-03-26
+
+### Changed
+- **Regional genre prioritization** — original genre names (e.g., "Italian Hip-Hop/Rap") now get full weight (1.0) in genre vectors and cosine scoring, while expanded parents ("Hip-Hop/Rap") get 0.3. This ensures a user who listens to 90% Italian music gets Italian recommendations, not generic American equivalents matching the parent genre
+- **Weight rebalance (genre-first)** — genre: 0.35 (was 0.25), audio: 0.20 (was 0.15), artist: 0.08 (was 0.15). Style/beat matters more than specific artist
+- **Artist-in-wrong-genre penalty** — known artist with genre cosine < 0.2 gets artist_match reduced to 30%. Prevents "you like Artist X" from recommending their one country song to a drill listener
+- **similar_artist_crawl** default depth reduced to 1 (was 2) — two hops drifts too far from original style
+- **chart_filter** now passes user's #1 genre to API and pre-filters candidates by top-5 genre overlap — no more random global pop polluting results
+- **genre_adjacent_explore** uses full regional genre names in searches, increased limit from 10 to 15, filters out candidates with zero genre overlap
+- **editorial_mining** uses full regional genre names in search queries and increased limit from 10 to 15
+
+## [V2.00] - 2026-03-26
 
 ### Added
 - **Adaptive recommendation engine** — scoring weights that learn from user feedback
@@ -27,7 +40,7 @@ All notable changes to MusicMind MCP are documented here.
 - `musicmind_recently_played` now tracks play count observations
 - `musicmind_why_this_song` shows audio similarity breakdown when features available
 
-## [0.1.0] - 2026-03-26
+## [V1.00] - 2026-03-26
 
 ### Added
 - **Project scaffold** — uv project, FastMCP server, ES256 JWT auth, browser-based OAuth setup wizard

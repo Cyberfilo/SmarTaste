@@ -1,8 +1,8 @@
 # MusicMind MCP
 
-> An MCP server that gives Claude deep, intelligent access to your Apple Music account — not just CRUD operations, but a full taste-understanding engine that analyzes listening patterns, builds genre/artist/mood profiles, and generates genuinely personalized recommendations and playlists.
+**V2.10** | **30 tools** | **150 tests** | **Adaptive scoring** | **Audio analysis** | **Mood filtering**
 
-**30 tools** | **150 tests** | **Adaptive scoring** | **Audio analysis** | **Mood filtering**
+> An MCP server that gives Claude deep, intelligent access to your Apple Music account — not just CRUD operations, but a full taste-understanding engine that analyzes listening patterns, builds genre/artist/mood profiles, and generates genuinely personalized recommendations and playlists.
 
 ---
 
@@ -34,27 +34,27 @@ Algorithmic profile built from your cached data:
 - **Familiarity score** — Shannon entropy measure of how adventurous your taste is
 
 ### Smart Recommendations
-Four discovery strategies combined with MMR-diversity selection:
-- **Similar artist crawl** — traverse Apple Music's artist graph
-- **Genre-adjacent exploration** — search your top genres for new songs
-- **Editorial mining** — extract songs from editorial playlists
-- **Chart filtering** — score chart songs against your taste
+Four discovery strategies combined with MMR-diversity selection, all using full regional genre names and pre-filtering by genre overlap:
+- **Similar artist crawl** — 1-hop traversal of Apple Music's artist graph (tight, no drift)
+- **Genre-adjacent exploration** — search your top regional genres, filter out zero-overlap results
+- **Editorial mining** — extract songs from editorial playlists using full genre names
+- **Chart filtering** — genre-filtered charts with mandatory genre overlap check
 
 ### Adaptive Scoring Engine
 10 scoring dimensions with weights that learn from your feedback:
 
-| Dimension | Description |
-|-----------|-------------|
-| Genre Match | Cosine similarity against your genre vector |
-| Artist Affinity | How much you listen to this artist |
-| Audio Similarity | Cosine on audio feature vectors (when available) |
-| Novelty | Graduated bell curve — rewards familiar-genre, new-artist combos |
-| Freshness | Matches your release year preferences |
-| Diversity | MMR penalty to avoid echo chambers |
-| Staleness | Cooldown on recently recommended songs |
-| Cross-Strategy | Bonus when multiple strategies find the same song |
-| Mood Boost | Contextual filtering (workout, chill, focus, party, sad, driving) |
-| Classification | Bonus from SoundAnalysis labels (macOS, optional) |
+| Dimension | Weight | Description |
+|-----------|--------|-------------|
+| Genre Match | **35%** | Cosine similarity with regional genre prioritization (full genre 1.0, parent 0.3) |
+| Audio Similarity | **20%** | Cosine on audio feature vectors — beat/style matters (when available) |
+| Novelty | **12%** | Gaussian bell curve — rewards familiar-genre, new-artist combos |
+| Freshness | **10%** | Matches your release year preferences |
+| Diversity | **8%** | MMR penalty to avoid echo chambers |
+| Artist Affinity | **8%** | How much you listen to this artist (penalized if wrong genre) |
+| Staleness | **7%** | Cooldown on recently recommended songs |
+| Cross-Strategy | bonus | +5% per additional strategy that found the same song |
+| Mood Boost | bonus | Contextual filtering (workout, chill, focus, party, sad, driving) |
+| Classification | bonus | From SoundAnalysis labels (macOS, optional) |
 
 ### Audio Analysis (3-tier, graceful degradation)
 - **Tier 1** (always available): Metadata-only scoring
