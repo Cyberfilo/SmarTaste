@@ -11,8 +11,23 @@ Python FastMCP server connecting Claude to Apple Music API. Three layers:
 1. **API Client** (client.py) — async httpx client for api.music.apple.com, 25+ endpoints
 2. **Persistence** (db/) — SQLite cache for listening history, song metadata, taste profiles
 3. **Taste Engine** (engine/) — algorithmic profile building + candidate scoring from metadata
+4. **Audio Analysis** (engine/audio.py, engine/classifier.py) — optional librosa-based feature extraction + macOS SoundAnalysis
 
 Tools are organized by domain: library, catalog, playback, manage, taste, recommend.
+
+## Adaptive Recommendation Engine
+The scorer uses 7 weighted dimensions (genre, artist, audio, novelty, freshness, diversity, staleness) with adaptive weights learned from user feedback. Additional bonuses: cross-strategy convergence, mood filtering, optional SoundAnalysis labels.
+
+### Audio Analysis Tiers
+- **Tier 1** (always): Metadata-only scoring (genres, artists, editorial notes)
+- **Tier 2** (requires `ffmpeg` + `librosa`): 7-dimension audio feature extraction from 30s previews
+- **Tier 3** (macOS only): SoundAnalysis classification labels via Swift CLI helper
+
+### New DB Tables (adaptive engine)
+- `recommendation_feedback` — user feedback on recommendations (thumbs_up/down, skipped, added_to_library)
+- `audio_features_cache` — extracted audio features (tempo, energy, brightness, danceability, acousticness, valence_proxy, beat_strength)
+- `sound_classification_cache` — optional SoundAnalysis labels
+- `play_count_proxy` — approximate play counts from recently-played observations
 
 ## Code Style
 - All tool inputs: Pydantic BaseModel with Field() descriptions
@@ -48,6 +63,12 @@ Tools are organized by domain: library, catalog, playback, manage, taste, recomm
 - sqlalchemy — query building (Core only, no ORM)
 - pyjwt[crypto] + cryptography — ES256 JWT for Apple developer tokens
 - numpy — vector operations for taste profile scoring
+- scikit-learn — TF-IDF for editorial note extraction
 - pydantic — input validation for all MCP tools
 - ruff — linting
 - pytest + pytest-asyncio — testing
+
+### Optional (audio analysis)
+- librosa + soundfile — audio feature extraction from preview URLs (Tier 2)
+- ffmpeg (system) — required for M4A/AAC decoding
+- Swift 5.9+ — for building SoundAnalysis CLI tool (Tier 3, macOS only)

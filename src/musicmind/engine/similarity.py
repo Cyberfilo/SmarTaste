@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from musicmind.engine.profile import expand_genres
 
 
@@ -73,3 +75,66 @@ def song_similarity(song_a: dict[str, Any], song_b: dict[str, Any]) -> float:
         + 0.15 * album_score
         + 0.10 * rating_score
     )
+
+
+def audio_feature_similarity(
+    features_a: dict[str, float] | None,
+    features_b: dict[str, float] | None,
+) -> float:
+    """Cosine similarity between two audio feature vectors.
+
+    Returns 0.5 (neutral) if either is None.
+    Normalizes tempo to 0-1 range before comparison.
+    """
+    if not features_a or not features_b:
+        return 0.5
+
+    keys = ["energy", "brightness", "danceability", "acousticness",
+            "valence_proxy", "beat_strength"]
+
+    def _norm_tempo(t: float | None) -> float:
+        if t is None:
+            return 0.5
+        return max(0.0, min(1.0, (t - 40.0) / 180.0))
+
+    vec_a = [_norm_tempo(features_a.get("tempo"))] + [
+        features_a.get(k, 0.5) for k in keys
+    ]
+    vec_b = [_norm_tempo(features_b.get("tempo"))] + [
+        features_b.get(k, 0.5) for k in keys
+    ]
+
+    a = np.array(vec_a)
+    b = np.array(vec_b)
+    dot = float(np.dot(a, b))
+    norm_a = float(np.linalg.norm(a))
+    norm_b = float(np.linalg.norm(b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.5
+    return float(dot / (norm_a * norm_b))
+
+
+def classification_similarity(
+    labels_a: dict[str, float] | None,
+    labels_b: dict[str, float] | None,
+) -> float:
+    """Jaccard-like similarity on classification labels weighted by confidence.
+
+    Returns 0.0 if either is None or empty.
+    """
+    if not labels_a or not labels_b:
+        return 0.0
+
+    shared = set(labels_a.keys()) & set(labels_b.keys())
+    if not shared:
+        return 0.0
+
+    # Weighted overlap: sum of min confidences / sum of max confidences
+    min_sum = sum(min(labels_a[k], labels_b[k]) for k in shared)
+    all_keys = set(labels_a.keys()) | set(labels_b.keys())
+    max_sum = sum(
+        max(labels_a.get(k, 0.0), labels_b.get(k, 0.0)) for k in all_keys
+    )
+    if max_sum == 0:
+        return 0.0
+    return min_sum / max_sum

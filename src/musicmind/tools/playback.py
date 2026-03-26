@@ -63,6 +63,11 @@ async def musicmind_recently_played(limit: int = 30) -> str:
     if cache_data:
         await queries.upsert_song_metadata(cache_data)
 
+    # Track play count observations
+    for r in all_tracks:
+        if r.id:
+            await queries.upsert_play_observation(r.id)
+
     lines = [f"## Recently Played ({len(all_tracks)} tracks)"]
     for i, r in enumerate(all_tracks, start=1):
         lines.append(format_song_md(r, index=i))

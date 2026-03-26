@@ -74,6 +74,54 @@ taste_profile_snapshots = sa.Table(
     sa.Column("listening_hours_estimated", sa.Float, default=0.0),
 )
 
+recommendation_feedback = sa.Table(
+    "recommendation_feedback",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("catalog_id", sa.Text, nullable=False, index=True),
+    sa.Column("recommendation_id", sa.Text, nullable=True),
+    sa.Column(
+        "feedback_type",
+        sa.Text,
+        nullable=False,
+    ),  # thumbs_up, thumbs_down, added_to_library, skipped
+    sa.Column("predicted_score", sa.Float, nullable=True),
+    sa.Column("weight_snapshot", sa.JSON, default=dict),
+    sa.Column("created_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
+)
+
+audio_features_cache = sa.Table(
+    "audio_features_cache",
+    metadata,
+    sa.Column("catalog_id", sa.Text, primary_key=True),
+    sa.Column("tempo", sa.Float, nullable=True),
+    sa.Column("energy", sa.Float, nullable=True),
+    sa.Column("brightness", sa.Float, nullable=True),
+    sa.Column("danceability", sa.Float, nullable=True),
+    sa.Column("acousticness", sa.Float, nullable=True),
+    sa.Column("valence_proxy", sa.Float, nullable=True),
+    sa.Column("beat_strength", sa.Float, nullable=True),
+    sa.Column("analyzed_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
+)
+
+sound_classification_cache = sa.Table(
+    "sound_classification_cache",
+    metadata,
+    sa.Column("catalog_id", sa.Text, primary_key=True),
+    sa.Column("labels", sa.JSON, default=dict),
+    sa.Column("analyzed_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
+    sa.Column("analyzer_version", sa.Text, default=""),
+)
+
+play_count_proxy = sa.Table(
+    "play_count_proxy",
+    metadata,
+    sa.Column("song_id", sa.Text, primary_key=True),
+    sa.Column("seen_count", sa.Integer, nullable=False, default=1),
+    sa.Column("first_seen", sa.DateTime, nullable=False, server_default=sa.func.now()),
+    sa.Column("last_seen", sa.DateTime, nullable=False, server_default=sa.func.now()),
+)
+
 generated_playlists = sa.Table(
     "generated_playlists",
     metadata,

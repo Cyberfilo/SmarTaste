@@ -40,7 +40,7 @@ async def musicmind_taste_profile() -> str:
             "`musicmind_recently_played` first to populate the cache."
         )
 
-    profile = build_taste_profile(songs, history)
+    profile = build_taste_profile(songs, history, use_temporal_decay=True)
 
     # Save snapshot
     await queries.save_taste_snapshot(profile)

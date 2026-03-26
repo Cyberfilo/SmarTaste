@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -33,35 +34,77 @@ def expand_genres(genre_names: list[str]) -> list[str]:
     return list(expanded)
 
 
+def temporal_decay_weight(
+    timestamp: datetime | str | None,
+    now: datetime,
+    half_life_days: float = 90.0,
+) -> float:
+    """Compute exponential decay weight based on age.
+
+    Returns 1.0 for now, 0.5 at half_life, 0.25 at 2x half_life.
+    Returns 0.5 (neutral) for None timestamps.
+    """
+    if timestamp is None:
+        return 0.5
+    if isinstance(timestamp, str):
+        try:
+            timestamp = datetime.fromisoformat(timestamp)
+        except (ValueError, TypeError):
+            return 0.5
+    # Make timezone-aware if needed
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+
+    age_days = max(0.0, (now - timestamp).total_seconds() / 86400.0)
+    return 2.0 ** (-age_days / half_life_days)
+
+
 def build_genre_vector(
     songs: list[dict[str, Any]],
     history: list[dict[str, Any]],
+    *,
+    use_temporal_decay: bool = False,
+    half_life_days: float = 90.0,
 ) -> dict[str, float]:
     """Build a normalized genre affinity vector.
 
     Songs from the library count 1x, songs from recent history count 2x.
     Genres are expanded hierarchically.
+    When use_temporal_decay is True, each song's contribution is multiplied
+    by an exponential decay weight based on its timestamp.
     """
     counter: Counter[str] = Counter()
+    now = datetime.now(tz=UTC)
 
-    # Library songs: 1x weight
+    # Library songs: 1x weight (optionally decayed)
     for song in songs:
         genres = song.get("genre_names") or []
         if isinstance(genres, str):
             genres = [genres]
+
+        base_weight = 1.0
+        if use_temporal_decay:
+            ts = song.get("date_added_to_library") or song.get("fetched_at")
+            base_weight *= temporal_decay_weight(ts, now, half_life_days)
+
         for g in expand_genres(genres):
-            counter[g] += 1.0
+            counter[g] += base_weight
 
     # Recent plays: 2x weight (recency bias)
     seen_song_ids = set()
     for entry in history:
         song_id = entry.get("song_id", "")
         if song_id in seen_song_ids:
-            # Extra weight for repeated plays
             weight = 3.0
         else:
             weight = 2.0
             seen_song_ids.add(song_id)
+
+        if use_temporal_decay:
+            ts = entry.get("observed_at")
+            weight *= temporal_decay_weight(ts, now, half_life_days)
 
         genres = entry.get("genre_names") or []
         if isinstance(genres, str):
@@ -79,6 +122,9 @@ def build_genre_vector(
 def build_artist_affinity(
     songs: list[dict[str, Any]],
     history: list[dict[str, Any]],
+    *,
+    use_temporal_decay: bool = False,
+    half_life_days: float = 90.0,
 ) -> list[dict[str, Any]]:
     """Build artist affinity scores.
 
@@ -87,24 +133,33 @@ def build_artist_affinity(
     """
     artist_scores: dict[str, float] = Counter()
     artist_song_counts: dict[str, int] = Counter()
+    now = datetime.now(tz=UTC)
 
     for song in songs:
         artist = song.get("artist_name", "")
         if not artist:
             continue
-        artist_scores[artist] += 1.0
+        decay = 1.0
+        if use_temporal_decay:
+            ts = song.get("date_added_to_library") or song.get("fetched_at")
+            decay = temporal_decay_weight(ts, now, half_life_days)
+
+        artist_scores[artist] += 1.0 * decay
         artist_song_counts[artist] += 1
-        # Loved songs get a bonus
         rating = song.get("user_rating")
         if rating == 1:
-            artist_scores[artist] += 3.0
+            artist_scores[artist] += 3.0 * decay
         elif rating == -1:
-            artist_scores[artist] -= 2.0
+            artist_scores[artist] -= 2.0 * decay
 
     for entry in history:
         artist = entry.get("artist_name", "")
         if artist:
-            artist_scores[artist] += 2.0
+            decay = 1.0
+            if use_temporal_decay:
+                ts = entry.get("observed_at")
+                decay = temporal_decay_weight(ts, now, half_life_days)
+            artist_scores[artist] += 2.0 * decay
 
     # Normalize by max score
     if not artist_scores:
@@ -184,21 +239,70 @@ def compute_familiarity_score(genre_vector: dict[str, float]) -> float:
     return round(entropy / max_entropy, 3)
 
 
+def build_audio_centroid(
+    audio_features_list: list[dict[str, float]],
+    engagement_weights: list[float] | None = None,
+) -> dict[str, float]:
+    """Compute weighted average audio feature centroid.
+
+    Args:
+        audio_features_list: List of audio feature dicts (tempo, energy, etc.)
+        engagement_weights: Optional weights per song (loved=3, recent=2, library=1)
+
+    Returns:
+        Dict with average audio features, or empty dict if no data.
+    """
+    if not audio_features_list:
+        return {}
+
+    keys = ["tempo", "energy", "brightness", "danceability",
+            "acousticness", "valence_proxy", "beat_strength"]
+    weights = engagement_weights or [1.0] * len(audio_features_list)
+
+    weighted_sums: dict[str, float] = {k: 0.0 for k in keys}
+    total_weight = 0.0
+
+    for features, w in zip(audio_features_list, weights):
+        for k in keys:
+            val = features.get(k)
+            if val is not None:
+                weighted_sums[k] += val * w
+        total_weight += w
+
+    if total_weight == 0:
+        return {}
+
+    return {k: round(v / total_weight, 3) for k, v in weighted_sums.items()}
+
+
 def build_taste_profile(
     songs: list[dict[str, Any]],
     history: list[dict[str, Any]],
+    *,
+    use_temporal_decay: bool = False,
+    half_life_days: float = 90.0,
 ) -> dict[str, Any]:
     """Build a complete taste profile from cached data.
 
     Args:
         songs: All songs from song_metadata_cache
         history: Listening history entries
+        use_temporal_decay: Apply exponential decay to older songs
+        half_life_days: Half-life in days for temporal decay
 
     Returns:
         Dict ready for saving as a taste_profile_snapshot
     """
-    genre_vector = build_genre_vector(songs, history)
-    top_artists = build_artist_affinity(songs, history)
+    genre_vector = build_genre_vector(
+        songs, history,
+        use_temporal_decay=use_temporal_decay,
+        half_life_days=half_life_days,
+    )
+    top_artists = build_artist_affinity(
+        songs, history,
+        use_temporal_decay=use_temporal_decay,
+        half_life_days=half_life_days,
+    )
     release_dist = build_release_year_distribution(songs)
     audio_prefs = build_audio_trait_preferences(songs)
     familiarity = compute_familiarity_score(genre_vector)

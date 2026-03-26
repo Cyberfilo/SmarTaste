@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import sqlalchemy as sa
@@ -10,9 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from musicmind.db.schema import (
     artist_cache,
+    audio_features_cache,
     generated_playlists,
     listening_history,
+    play_count_proxy,
+    recommendation_feedback,
     song_metadata_cache,
+    sound_classification_cache,
     taste_profile_snapshots,
 )
 
@@ -172,6 +176,219 @@ class QueryExecutor:
                 sa.select(generated_playlists)
                 .order_by(generated_playlists.c.created_at.desc())
                 .limit(limit)
+            )
+            return [dict(row._mapping) for row in result]
+
+    # ── Recommendation Feedback ─────────────────────────────────────
+
+    async def insert_feedback(self, record: dict[str, Any]) -> int:
+        """Insert a recommendation feedback record. Returns the ID."""
+        if "created_at" not in record:
+            record["created_at"] = datetime.now(tz=UTC)
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                recommendation_feedback.insert().values(**record)
+            )
+            return result.inserted_primary_key[0]
+
+    async def get_all_feedback(self) -> list[dict[str, Any]]:
+        """Get all feedback records."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(recommendation_feedback).order_by(
+                    recommendation_feedback.c.created_at.desc()
+                )
+            )
+            return [dict(row._mapping) for row in result]
+
+    async def get_feedback_since(self, since: datetime) -> list[dict[str, Any]]:
+        """Get feedback records since a given date."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(recommendation_feedback)
+                .where(recommendation_feedback.c.created_at >= since)
+                .order_by(recommendation_feedback.c.created_at.desc())
+            )
+            return [dict(row._mapping) for row in result]
+
+    # ── Audio Features Cache ─────────────────────────────────────────
+
+    async def upsert_audio_features(self, features: list[dict[str, Any]]) -> int:
+        """Upsert audio features for songs."""
+        if not features:
+            return 0
+        for f in features:
+            if "analyzed_at" not in f:
+                f["analyzed_at"] = datetime.now(tz=UTC)
+
+        async with self._engine.begin() as conn:
+            for f in features:
+                existing = await conn.execute(
+                    sa.select(audio_features_cache.c.catalog_id).where(
+                        audio_features_cache.c.catalog_id == f["catalog_id"]
+                    )
+                )
+                if existing.fetchone():
+                    await conn.execute(
+                        audio_features_cache.update()
+                        .where(audio_features_cache.c.catalog_id == f["catalog_id"])
+                        .values(**f)
+                    )
+                else:
+                    await conn.execute(audio_features_cache.insert().values(**f))
+        return len(features)
+
+    async def get_audio_features(self, catalog_id: str) -> dict[str, Any] | None:
+        """Get audio features for a single song."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(audio_features_cache).where(
+                    audio_features_cache.c.catalog_id == catalog_id
+                )
+            )
+            row = result.fetchone()
+            return dict(row._mapping) if row else None
+
+    async def get_audio_features_bulk(
+        self, catalog_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Get audio features for multiple songs. Returns {catalog_id: features}."""
+        if not catalog_ids:
+            return {}
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(audio_features_cache).where(
+                    audio_features_cache.c.catalog_id.in_(catalog_ids)
+                )
+            )
+            return {
+                row._mapping["catalog_id"]: dict(row._mapping) for row in result
+            }
+
+    # ── Sound Classification Cache ───────────────────────────────────
+
+    async def upsert_classification_labels(
+        self, records: list[dict[str, Any]]
+    ) -> int:
+        """Upsert sound classification labels."""
+        if not records:
+            return 0
+        for r in records:
+            if "analyzed_at" not in r:
+                r["analyzed_at"] = datetime.now(tz=UTC)
+
+        async with self._engine.begin() as conn:
+            for r in records:
+                existing = await conn.execute(
+                    sa.select(sound_classification_cache.c.catalog_id).where(
+                        sound_classification_cache.c.catalog_id == r["catalog_id"]
+                    )
+                )
+                if existing.fetchone():
+                    await conn.execute(
+                        sound_classification_cache.update()
+                        .where(
+                            sound_classification_cache.c.catalog_id == r["catalog_id"]
+                        )
+                        .values(**r)
+                    )
+                else:
+                    await conn.execute(
+                        sound_classification_cache.insert().values(**r)
+                    )
+        return len(records)
+
+    async def get_classification_labels(
+        self, catalog_id: str
+    ) -> dict[str, Any] | None:
+        """Get classification labels for a single song."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(sound_classification_cache).where(
+                    sound_classification_cache.c.catalog_id == catalog_id
+                )
+            )
+            row = result.fetchone()
+            return dict(row._mapping) if row else None
+
+    async def get_classification_labels_bulk(
+        self, catalog_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Get classification labels for multiple songs."""
+        if not catalog_ids:
+            return {}
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(sound_classification_cache).where(
+                    sound_classification_cache.c.catalog_id.in_(catalog_ids)
+                )
+            )
+            return {
+                row._mapping["catalog_id"]: dict(row._mapping) for row in result
+            }
+
+    # ── Play Count Proxy ─────────────────────────────────────────────
+
+    async def upsert_play_observation(self, song_id: str) -> None:
+        """Record a play observation — increment count, update last_seen."""
+        now = datetime.now(tz=UTC)
+        async with self._engine.begin() as conn:
+            existing = await conn.execute(
+                sa.select(play_count_proxy).where(
+                    play_count_proxy.c.song_id == song_id
+                )
+            )
+            row = existing.fetchone()
+            if row:
+                await conn.execute(
+                    play_count_proxy.update()
+                    .where(play_count_proxy.c.song_id == song_id)
+                    .values(
+                        seen_count=row._mapping["seen_count"] + 1,
+                        last_seen=now,
+                    )
+                )
+            else:
+                await conn.execute(
+                    play_count_proxy.insert().values(
+                        song_id=song_id,
+                        seen_count=1,
+                        first_seen=now,
+                        last_seen=now,
+                    )
+                )
+
+    async def get_play_observations(self) -> list[dict[str, Any]]:
+        """Get all play count observations."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(play_count_proxy).order_by(
+                    play_count_proxy.c.seen_count.desc()
+                )
+            )
+            return [dict(row._mapping) for row in result]
+
+    async def get_top_played(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Get top played songs by observation count."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(play_count_proxy)
+                .order_by(play_count_proxy.c.seen_count.desc())
+                .limit(limit)
+            )
+            return [dict(row._mapping) for row in result]
+
+    async def get_recent_recommendations(
+        self, days: int = 30
+    ) -> list[dict[str, Any]]:
+        """Get recently recommended song IDs (for anti-staleness)."""
+        since = datetime.now(tz=UTC) - timedelta(days=days)
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(recommendation_feedback.c.catalog_id,
+                          recommendation_feedback.c.created_at)
+                .where(recommendation_feedback.c.created_at >= since)
+                .order_by(recommendation_feedback.c.created_at.desc())
             )
             return [dict(row._mapping) for row in result]
 
