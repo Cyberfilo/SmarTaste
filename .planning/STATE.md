@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-02-PLAN.md
-last_updated: "2026-03-27T20:41:34.473Z"
+stopped_at: Completed 11-03-PLAN.md
+last_updated: "2026-03-27T20:43:13.957Z"
 last_activity: 2026-03-27
 progress:
   total_phases: 11
-  completed_phases: 10
-  total_plans: 24
-  completed_plans: 22
+  completed_phases: 9
+  total_plans: 17
+  completed_plans: 21
   percent: 0
 ---
 
@@ -65,7 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 07 P02 | 18 | 2 tasks | 4 files |
 | Phase 09 P02 | 7min | 1 tasks | 2 files |
 | Phase 09 P03 | 5min | 2 tasks | 3 files |
-| Phase 11 P02 | 4min | 2 tasks | 13 files |
+| Phase 11 P03 | 5min | 2 tasks | 18 files |
 
 ## Accumulated Context
 
@@ -115,8 +115,9 @@ Recent decisions affecting current work:
 - [Phase 09]: System prompt dynamically queries service_connections and taste_profile_snapshots for user context
 - [Phase 09]: Plain StreamingResponse with manual SSE formatting for chat endpoint (no sse-starlette dependency)
 - [Phase 09]: Mock ChatService at class level with lambda for async generator returns in tests
-- [Phase 11]: Period selector uses shared state with TanStack Query key invalidation for automatic refetch
-- [Phase 11]: Centralized API types in frontend/src/types/api.ts for all backend response interfaces
+- [Phase 11]: Strategy selector: native select on mobile, segmented button group on md: breakpoint
+- [Phase 11]: Apple Music connect shows info toast for MusicKit JS requirement -- full integration needs Apple script tag
+- [Phase 11]: BYOK key input uses type=password with sk-ant-... placeholder for secure entry
 
 ### Roadmap Evolution
 
@@ -135,6 +136,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-27T20:41:34.471Z
-Stopped at: Completed 11-02-PLAN.md
+Last session: 2026-03-27T20:43:13.955Z
+Stopped at: Completed 11-03-PLAN.md
 Resume file: None
