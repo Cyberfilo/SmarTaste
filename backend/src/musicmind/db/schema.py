@@ -59,6 +59,32 @@ service_connections = sa.Table(
     sa.UniqueConstraint("user_id", "service", name="uq_user_service"),
 )
 
+user_api_keys = sa.Table(
+    "user_api_keys",
+    metadata,
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("service", sa.Text, nullable=False, server_default="anthropic"),
+    sa.Column("api_key_encrypted", sa.Text, nullable=False),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.PrimaryKeyConstraint("user_id", "service"),
+)
+
 refresh_tokens = sa.Table(
     "refresh_tokens",
     metadata,
