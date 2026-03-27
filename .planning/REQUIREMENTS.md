@@ -81,7 +81,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **INFR-01**: Multi-user database with user-scoped data isolation
 - [x] **INFR-02**: Database migrations via Alembic for schema evolution
 - [x] **INFR-03**: API key and OAuth token encryption at rest
-- [ ] **INFR-04**: Responsive web design (works on desktop and mobile browsers)
+- [x] **INFR-04**: Responsive web design (works on desktop and mobile browsers)
 - [x] **INFR-05**: Local-first deployment (runs via docker-compose or similar)
 
 ## v2 Requirements
@@ -172,7 +172,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INFR-01 | Phase 1 | Complete |
 | INFR-02 | Phase 1 | Complete |
 | INFR-03 | Phase 1 | Complete |
-| INFR-04 | Phase 10 | Pending |
+| INFR-04 | Phase 10 | Complete |
 | INFR-05 | Phase 1 | Complete |
 
 **Coverage:**
