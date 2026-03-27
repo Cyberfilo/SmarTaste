@@ -153,6 +153,18 @@ class TasteService:
             return None
 
         mapping = row._mapping
+
+        def _parse_json(val: Any, default: Any) -> Any:
+            """Parse JSON string from DB if needed (SQLite stores JSON as TEXT)."""
+            if val is None:
+                return default
+            if isinstance(val, str):
+                try:
+                    return json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    return default
+            return val
+
         return {
             "service": mapping["service_source"],
             "computed_at": (
@@ -160,10 +172,14 @@ class TasteService:
                 if mapping["computed_at"]
                 else datetime.now(UTC).isoformat()
             ),
-            "genre_vector": mapping["genre_vector"] or {},
-            "top_artists": mapping["top_artists"] or [],
-            "audio_trait_preferences": mapping["audio_trait_preferences"] or {},
-            "release_year_distribution": mapping["release_year_distribution"] or {},
+            "genre_vector": _parse_json(mapping["genre_vector"], {}),
+            "top_artists": _parse_json(mapping["top_artists"], []),
+            "audio_trait_preferences": _parse_json(
+                mapping["audio_trait_preferences"], {}
+            ),
+            "release_year_distribution": _parse_json(
+                mapping["release_year_distribution"], {}
+            ),
             "familiarity_score": mapping["familiarity_score"] or 0.0,
             "total_songs_analyzed": mapping["total_songs_analyzed"] or 0,
             "listening_hours_estimated": mapping["listening_hours_estimated"] or 0.0,
