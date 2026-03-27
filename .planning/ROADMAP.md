@@ -21,8 +21,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 7: Recommendation Feed** - Personalized suggestions with explanations, feedback loop, discovery strategies, mood filtering (completed 2026-03-27)
 - [ ] **Phase 8: Multi-Service Unification** - Data normalization, genre taxonomy mapping, cross-service deduplication, unified taste profile
 - [ ] **Phase 9: Claude Chat Integration** - Streaming chat with tool-use, conversational music exploration, conversation persistence
-- [ ] **Phase 10: Detail Views and Responsive Polish** - Scoring breakdown, audio feature visualization, responsive design
-- [x] **Phase 11: UI Design & Frontend Shell** - Comprehensive UI/UX for entire webapp using ui-ux-pro-max skill (completed 2026-03-27)
+- [x] **Phase 10: Detail Views and Responsive Polish** - Scoring breakdown, audio feature visualization, responsive design (completed 2026-03-27)
+- [ ] **Phase 11: UI Design & Frontend Shell** - Comprehensive UI/UX for entire webapp using ui-ux-pro-max skill
 
 ## Phase Details
 
@@ -180,7 +180,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11
 
 Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Phase 3 (not Phase 5). Phases 5 and 6 could execute in parallel if desired. Phases 4 and 3 could also overlap since Phase 4 only needs user accounts.
 
@@ -195,20 +195,26 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 7. Recommendation Feed | 2/2 | Complete   | 2026-03-27 |
 | 8. Multi-Service Unification | 0/2 | Planning complete | - |
 | 9. Claude Chat Integration | 0/3 | Planning complete | - |
-| 10. Detail Views and Responsive Polish | 0/1 | Planning complete | - |
-| 11. UI Design & Frontend Shell | 1/1 | Complete   | 2026-03-27 |
+| 10. Detail Views and Responsive Polish | 0/1 | Complete    | 2026-03-27 |
+| 11. UI Design & Frontend Shell | 0/4 | Planning complete | - |
 
 ### Phase 11: UI Design & Frontend Shell
 
-**Goal:** Comprehensive UI/UX design and frontend implementation for the entire webapp — login/signup pages, dashboard layout, settings page, chat interface, service connection UI — using the ui-ux-pro-max skill for high-quality, distinctive frontend design that avoids generic AI aesthetics
+**Goal:** Comprehensive UI/UX design and frontend implementation for the entire webapp -- login/signup pages, dashboard layout with taste profile and stats visualizations, recommendation feed, settings page, and Claude chat interface -- using the ui-ux-pro-max skill for high-quality, distinctive frontend design that avoids generic AI aesthetics
 **Depends on:** Phase 3 (needs auth + service connections working for real page interactions)
 **Requirements**: INFR-04, plus visual implementations for all user-facing features from Phases 2-10
 **Success Criteria** (what must be TRUE):
   1. Next.js 16 frontend exists with responsive layout, navigation, and routing for all major pages
   2. Login/signup pages work end-to-end with the backend auth API
-  3. Dashboard page displays placeholder sections for taste profile, stats, recommendations, and chat
+  3. Dashboard page displays taste profile (genres, artists, audio traits radar), listening stats (tracks, artists, genres by period), and recommendations feed
   4. Settings page shows service connections with connect/disconnect flows and BYOK API key management
-  5. All pages render correctly on desktop and mobile (INFR-04)
-**Plans**: TBD
+  5. Chat interface with SSE streaming, tool activity indicators, and conversation persistence
+  6. All pages render correctly on desktop and mobile (INFR-04)
+**Plans**: 4 plans
+Plans:
+- [ ] 11-01-PLAN.md -- Next.js 16 scaffold, Tailwind 4, shadcn/ui, Zustand, TanStack Query, auth pages (login/signup)
+- [ ] 11-02-PLAN.md -- Dashboard layout, taste profile visualizations, listening stats with period selector
+- [ ] 11-03-PLAN.md -- Recommendations feed with filters/feedback/breakdown, settings page with services and BYOK
+- [ ] 11-04-PLAN.md -- Claude chat interface with SSE streaming, tool indicators, conversation history
 **UI hint**: yes
-**Skill note**: Use `/ui-ux-pro-max` skill during discuss-phase and execution for design decisions, color palettes, typography, component styling
+**Skill note**: Use `/ui-ux-pro-max` skill during execution for design decisions, color palettes, typography, component styling
