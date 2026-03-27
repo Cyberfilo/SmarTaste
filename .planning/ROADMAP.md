@@ -174,7 +174,7 @@ Plans:
   3. All pages render correctly and are usable on both desktop and mobile screen sizes
 **Plans**: 1 plan
 Plans:
-- [x] 10-01-PLAN.md -- Scoring breakdown endpoint (RECO-07), audio features endpoint (RECO-08), integration tests
+- [ ] 10-01-PLAN.md -- Scoring breakdown endpoint, audio features endpoint, tracks router, integration tests (RECO-07, RECO-08; INFR-04 deferred to Phase 11)
 **UI hint**: yes
 
 ## Progress
@@ -195,7 +195,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 7. Recommendation Feed | 2/2 | Complete   | 2026-03-27 |
 | 8. Multi-Service Unification | 0/2 | Planning complete | - |
 | 9. Claude Chat Integration | 0/3 | Planning complete | - |
-| 10. Detail Views and Responsive Polish | 1/1 | Complete | 2026-03-27 |
+| 10. Detail Views and Responsive Polish | 0/1 | Planning complete | - |
 | 11. UI Design & Frontend Shell | 0/0 | Not started | - |
 
 ### Phase 11: UI Design & Frontend Shell
