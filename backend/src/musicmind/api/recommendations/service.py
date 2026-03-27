@@ -3,6 +3,9 @@
 Orchestrates the full recommendation flow: builds taste profile, runs discovery
 strategies, deduplicates and scores candidates, applies mood filtering, and
 generates natural-language explanations.
+
+Supports unified cross-service recommendations when both Spotify and Apple Music
+are connected, running discovery strategies against both catalogs in parallel.
 """
 
 from __future__ import annotations
@@ -33,6 +36,8 @@ from musicmind.db.schema import (
     song_metadata_cache,
     taste_profile_snapshots,
 )
+from musicmind.engine.dedup import deduplicate_tracks
+from musicmind.engine.genres import normalize_genre_list
 from musicmind.engine.mood import MOOD_PROFILES, filter_candidates_by_mood
 from musicmind.engine.scorer import rank_candidates, score_candidate
 from musicmind.engine.weights import (
@@ -142,7 +147,7 @@ class RecommendationService:
         )
 
         # Step 2: Resolve service + credentials
-        service, access_token, developer_token = await self._resolve_credentials(
+        all_creds = await self._resolve_all_credentials(
             engine, encryption, settings, user_id=user_id,
         )
 
@@ -157,15 +162,39 @@ class RecommendationService:
         )[:5]
         top_genre_names = [g[0] for g in top_genres]
 
-        # Step 4: Run discovery strategies
-        candidates = await self._run_discovery(
-            service, access_token, seed_artist_names, top_genre_names,
-            strategy=strategy,
-            developer_token=developer_token,
-        )
+        # Step 4: Run discovery strategies (against all connected services)
+        candidates: list[dict[str, Any]] = []
+        discovery_tasks = []
+        for svc, access_token, developer_token in all_creds:
+            discovery_tasks.append(
+                self._run_discovery(
+                    svc, access_token, seed_artist_names, top_genre_names,
+                    strategy=strategy,
+                    developer_token=developer_token,
+                )
+            )
 
-        # Step 5: Deduplicate candidates and count cross-strategy occurrences
+        discovery_results = await asyncio.gather(
+            *discovery_tasks, return_exceptions=True,
+        )
+        for result in discovery_results:
+            if isinstance(result, list):
+                candidates.extend(result)
+            elif isinstance(result, Exception):
+                logger.warning("Cross-service discovery failed: %s", result)
+
+        # Step 5: Deduplicate candidates across services and strategies
         unique = self._deduplicate_candidates(candidates)
+
+        # Apply cross-service dedup via ISRC + fuzzy match if multiple services
+        if len(all_creds) > 1:
+            unique = deduplicate_tracks(unique)
+            # Normalize genres on deduplicated candidates
+            for c in unique:
+                genres = c.get("genre_names") or []
+                if isinstance(genres, str):
+                    genres = [genres]
+                c["genre_names"] = normalize_genre_list(genres)
 
         # Step 6: Load adaptive weights
         weights, weights_adapted = await self._load_adaptive_weights(
@@ -254,27 +283,62 @@ class RecommendationService:
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    async def _resolve_credentials(
+    async def _resolve_all_credentials(
         self,
         engine,
         encryption: EncryptionService,
         settings,
         *,
         user_id: str,
-    ) -> tuple[str, str, str | None]:
-        """Resolve service type, access token, and optional developer token.
+    ) -> list[tuple[str, str, str | None]]:
+        """Resolve credentials for all connected services.
+
+        Returns a list of (service, access_token, developer_token) tuples,
+        one per connected service. For unified recommendations, this returns
+        credentials for both Spotify and Apple Music.
 
         Returns:
-            Tuple of (service, access_token, developer_token).
+            List of (service, access_token, developer_token) tuples.
         """
         connections = await get_user_connections(engine, user_id=user_id)
         if not connections:
             raise ValueError("No connected service found")
 
-        conn_data = connections[0]
-        service = conn_data["service"]
+        results: list[tuple[str, str, str | None]] = []
 
-        # Get full connection row for token refresh
+        for conn_data in connections:
+            service = conn_data["service"]
+
+            try:
+                creds = await self._resolve_single_credentials(
+                    engine, encryption, settings,
+                    user_id=user_id, service=service,
+                )
+                results.append(creds)
+            except Exception:
+                logger.warning(
+                    "Failed to resolve credentials for %s, skipping", service,
+                )
+
+        if not results:
+            raise ValueError("No valid service credentials found")
+
+        return results
+
+    async def _resolve_single_credentials(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+    ) -> tuple[str, str, str | None]:
+        """Resolve credentials for a single service.
+
+        Returns:
+            Tuple of (service, access_token, developer_token).
+        """
         async with engine.begin() as db_conn:
             result = await db_conn.execute(
                 sa.select(service_connections).where(
