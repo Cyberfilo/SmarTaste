@@ -157,7 +157,11 @@ Plans:
   3. User can ask Claude to find music matching a natural language description and receive relevant recommendations
   4. User can have a multi-turn conversation with context preserved, and conversation history persists across browser sessions
   5. Errors (expired API key, rate limit, insufficient balance) display user-friendly messages instead of crashing
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [ ] 09-01-PLAN.md -- Database table (chat_conversations), Alembic migration, Pydantic schemas, tool registry (8 curated tools)
+- [ ] 09-02-PLAN.md -- ChatService agentic loop, SSE streaming, tool execution, context window, conversation persistence
+- [ ] 09-03-PLAN.md -- Chat router endpoints (message SSE, conversation CRUD), API wiring, integration tests
 **UI hint**: yes
 
 ### Phase 10: Detail Views and Responsive Polish
@@ -188,7 +192,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 6. Listening Stats Dashboard | 0/2 | Planning complete | - |
 | 7. Recommendation Feed | 2/2 | Complete   | 2026-03-27 |
 | 8. Multi-Service Unification | 0/2 | Planning complete | - |
-| 9. Claude Chat Integration | 0/0 | Not started | - |
+| 9. Claude Chat Integration | 0/3 | Planning complete | - |
 | 10. Detail Views and Responsive Polish | 0/0 | Not started | - |
 | 11. UI Design & Frontend Shell | 0/0 | Not started | - |
 
