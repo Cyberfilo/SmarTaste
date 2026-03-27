@@ -22,6 +22,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 8: Multi-Service Unification** - Data normalization, genre taxonomy mapping, cross-service deduplication, unified taste profile
 - [ ] **Phase 9: Claude Chat Integration** - Streaming chat with tool-use, conversational music exploration, conversation persistence
 - [ ] **Phase 10: Detail Views and Responsive Polish** - Scoring breakdown, audio feature visualization, responsive design
+- [ ] **Phase 11: UI Design & Frontend Shell** - Comprehensive UI/UX for entire webapp using ui-ux-pro-max skill
 
 ## Phase Details
 
@@ -79,7 +80,10 @@ Plans:
   2. User can click "validate" and see confirmation that the key works (or a clear error if it does not)
   3. User can update their key to a new one or remove it entirely
   4. User can see estimated cost-per-message before using the chat feature
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [x] 04-01-PLAN.md -- Database table (user_api_keys), Pydantic schemas, service helpers, anthropic SDK dependency
+- [ ] 04-02-PLAN.md -- Claude BYOK router endpoints, api_router wiring, integration tests
 **UI hint**: yes
 
 ### Phase 5: Taste Profile Dashboard
@@ -167,10 +171,26 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 1. Infrastructure Foundation | 0/2 | Planning complete | - |
 | 2. User Accounts | 0/2 | Planning complete | - |
 | 3. Service Connections | 2/2 | Complete   | 2026-03-27 |
-| 4. BYOK Claude API Key Management | 0/0 | Not started | - |
+| 4. BYOK Claude API Key Management | 0/2 | Planning complete | - |
 | 5. Taste Profile Dashboard | 0/0 | Not started | - |
 | 6. Listening Stats Dashboard | 0/0 | Not started | - |
 | 7. Recommendation Feed | 0/0 | Not started | - |
 | 8. Multi-Service Unification | 0/0 | Not started | - |
 | 9. Claude Chat Integration | 0/0 | Not started | - |
 | 10. Detail Views and Responsive Polish | 0/0 | Not started | - |
+| 11. UI Design & Frontend Shell | 0/0 | Not started | - |
+
+### Phase 11: UI Design & Frontend Shell
+
+**Goal:** Comprehensive UI/UX design and frontend implementation for the entire webapp — login/signup pages, dashboard layout, settings page, chat interface, service connection UI — using the ui-ux-pro-max skill for high-quality, distinctive frontend design that avoids generic AI aesthetics
+**Depends on:** Phase 3 (needs auth + service connections working for real page interactions)
+**Requirements**: INFR-04, plus visual implementations for all user-facing features from Phases 2-10
+**Success Criteria** (what must be TRUE):
+  1. Next.js 16 frontend exists with responsive layout, navigation, and routing for all major pages
+  2. Login/signup pages work end-to-end with the backend auth API
+  3. Dashboard page displays placeholder sections for taste profile, stats, recommendations, and chat
+  4. Settings page shows service connections with connect/disconnect flows and BYOK API key management
+  5. All pages render correctly on desktop and mobile (INFR-04)
+**Plans**: TBD
+**UI hint**: yes
+**Skill note**: Use `/ui-ux-pro-max` skill during discuss-phase and execution for design decisions, color palettes, typography, component styling
