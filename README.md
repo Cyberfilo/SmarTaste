@@ -1,326 +1,279 @@
-# MusicMind MCP
+# MusicMind
 
-**V2.20** | **32 tools** | **150 tests** | **Adaptive scoring** | **Audio analysis** | **Mood filtering**
+A music discovery webapp that connects to your Spotify and Apple Music accounts, analyzes your listening habits, and delivers genuinely personalized recommendations — powered by a 7-dimension adaptive scoring engine and conversational AI via Claude.
 
-> An MCP server that gives Claude deep, intelligent access to your Apple Music account — not just CRUD operations, but a full taste-understanding engine that analyzes listening patterns, builds genre/artist/mood profiles, and generates genuinely personalized recommendations and playlists.
+## What It Does
 
----
-
-## How It Works
-
-```
-You → Claude → MusicMind MCP → Apple Music API
-                    ↓
-              SQLite Cache ← Taste Engine → Recommendations
-                    ↓
-           Audio Analysis (optional)
-```
-
-MusicMind sits between Claude and Apple Music as an MCP server. It caches your library and listening history locally, builds a multi-dimensional taste profile (genre vectors, artist affinity, audio preferences, temporal patterns), and uses that profile to score and rank new music — producing recommendations that actually reflect what you listen to, not just what's popular.
-
-The recommendation engine is **adaptive**: give feedback on songs and it learns your preferences over time, adjusting scoring weights automatically.
-
-## Features
-
-### Library & Catalog Access
-Browse your full Apple Music library, search the catalog, look up songs/artists/albums with rich metadata, view charts and editorial categories.
-
-### Taste Profiling
-Algorithmic profile built from your cached data:
-- **Genre affinity vector** — weighted by recency and frequency, with hierarchical genre expansion
-- **Artist affinity scores** — library presence + listening history + ratings
-- **Audio trait preferences** — lossless, Atmos, spatial audio
-- **Release year distribution** — new releases vs. catalog preference
-- **Familiarity score** — Shannon entropy measure of how adventurous your taste is
-
-### Smart Recommendations
-Four discovery strategies combined with MMR-diversity selection, all using full regional genre names and pre-filtering by genre overlap:
-- **Similar artist crawl** — 1-hop traversal of Apple Music's artist graph (tight, no drift)
-- **Genre-adjacent exploration** — search your top regional genres, filter out zero-overlap results
-- **Editorial mining** — extract songs from editorial playlists using full genre names
-- **Chart filtering** — genre-filtered charts with mandatory genre overlap check
-
-### Adaptive Scoring Engine
-10 scoring dimensions with weights that learn from your feedback:
-
-| Dimension | Weight | Description |
-|-----------|--------|-------------|
-| Genre Match | **35%** | Cosine similarity with regional genre prioritization (full genre 1.0, parent 0.3) |
-| Audio Similarity | **20%** | Cosine on audio feature vectors — beat/style matters (when available) |
-| Novelty | **12%** | Gaussian bell curve — rewards familiar-genre, new-artist combos |
-| Freshness | **10%** | Matches your release year preferences |
-| Diversity | **8%** | MMR penalty to avoid echo chambers |
-| Artist Affinity | **8%** | How much you listen to this artist (penalized if wrong genre) |
-| Staleness | **7%** | Cooldown on recently recommended songs |
-| Cross-Strategy | bonus | +5% per additional strategy that found the same song |
-| Mood Boost | bonus | Contextual filtering (workout, chill, focus, party, sad, driving) |
-| Classification | bonus | From SoundAnalysis labels (macOS, optional) |
-
-### Audio Analysis (3-tier, graceful degradation)
-- **Tier 1** (always available): Metadata-only scoring
-- **Tier 2** (requires ffmpeg + librosa): 7-dimension audio feature extraction from 30s previews — tempo, energy, brightness, danceability, acousticness, valence proxy, beat strength
-- **Tier 3** (macOS only): Apple SoundAnalysis classification labels via Swift CLI
-
-### Playlist Generation
-Describe a vibe in natural language and MusicMind creates a real Apple Music playlist:
-```
-"underground drill tracks for a late night drive"
-"chill atmospheric stuff for studying"
-"high energy workout bangers"
-```
-
----
-
-## Prerequisites
-
-- **Python 3.11+**
-- **[uv](https://docs.astral.sh/uv/)** — Python package manager
-- **Apple Developer account** with a MusicKit key (`.p8` file)
-  - Create one at [developer.apple.com/account/resources/authkeys](https://developer.apple.com/account/resources/authkeys/list)
-  - Enable "Media Services (MusicKit)" capability
-
-### Optional (for audio analysis)
-- `ffmpeg` — for M4A/AAC decoding (`brew install ffmpeg`)
-- `librosa` — installed via `uv sync --extra audio`
-- Swift 5.9+ — for SoundAnalysis CLI (macOS only)
-
----
-
-## Quick Start
-
-```bash
-# Clone
-git clone https://github.com/Cyberfilo/musicmind-mcp.git
-cd musicmind-mcp
-
-# Install
-uv sync --all-extras
-
-# Setup (one-time: enters your Apple credentials + OAuth)
-uv run python -m musicmind.setup
-
-# Connect to Claude (automatic)
-./scripts/connect-claude.sh
-```
-
-Or connect manually — see [Manual Integration](#manual-integration) below.
-
----
-
-## Setup Details
-
-### 1. Install Dependencies
-
-```bash
-uv sync --all-extras
-```
-
-For audio analysis (Tier 2), also install ffmpeg:
-```bash
-brew install ffmpeg          # macOS
-sudo apt-get install ffmpeg  # Linux
-uv sync --extra audio        # Install librosa + soundfile
-```
-
-### 2. Apple Music Authorization
-
-```bash
-uv run python -m musicmind.setup
-```
-
-The wizard will:
-1. Ask for your **Apple Developer Team ID** (10 characters, from developer.apple.com)
-2. Ask for your **MusicKit Key ID** (10 characters, from the key you created)
-3. Ask for the **path to your `.p8` private key file**
-4. Open a browser window for **Apple Music OAuth** — click "Authorize" to grant access
-5. Save everything to `~/.config/musicmind/config.json` (permissions `600`)
-
-### 3. Connect to Claude
-
-Run the automated setup script:
-
-```bash
-./scripts/connect-claude.sh
-```
-
-This detects whether you have Claude Desktop, Claude Code, or both — and configures the MCP server automatically.
-
----
-
-## Manual Integration
-
-### Claude Desktop
-
-Add to `~/.config/claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "musicmind": {
-      "command": "uv",
-      "args": ["run", "--directory", "/absolute/path/to/musicmind-mcp", "python", "-m", "musicmind"]
-    }
-  }
-}
-```
-
-Then restart Claude Desktop.
-
-### Claude Code (CLI)
-
-From any project directory:
-
-```bash
-claude mcp add musicmind -- uv run --directory /absolute/path/to/musicmind-mcp python -m musicmind
-```
-
-Or add to `.mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "musicmind": {
-      "command": "uv",
-      "args": ["run", "--directory", "/absolute/path/to/musicmind-mcp", "python", "-m", "musicmind"]
-    }
-  }
-}
-```
-
-### Verify
-
-In Claude, ask: **"Check MusicMind health"** — it should show server version, auth status, and cache stats.
-
----
-
-## Tools (32)
-
-### Library Browsing
-| Tool | Description |
-|------|-------------|
-| `musicmind_library_songs` | Browse your library songs (paginated, with genre metadata) |
-| `musicmind_library_albums` | Browse your library albums |
-| `musicmind_library_artists` | Browse your library artists |
-| `musicmind_library_playlists` | List all your playlists |
-| `musicmind_playlist_tracks` | Get tracks in a specific playlist |
-| `musicmind_search_library` | Search within your library |
-
-### Catalog Search & Lookup
-| Tool | Description |
-|------|-------------|
-| `musicmind_search` | Search the Apple Music catalog |
-| `musicmind_lookup_song` | Full song details with metadata and relationships |
-| `musicmind_lookup_artist` | Artist details + top songs + similar artists |
-| `musicmind_lookup_album` | Album details + track listing |
-| `musicmind_charts` | Top charts (songs, albums, playlists), optionally by genre |
-| `musicmind_activities` | Mood/activity categories (Chill, Workout, Focus, etc.) |
-| `musicmind_genres` | Full genre listing for your storefront |
-
-### Listening History
-| Tool | Description |
-|------|-------------|
-| `musicmind_recently_played` | Recent tracks (auto-cached for taste analysis) |
-| `musicmind_heavy_rotation` | Content you've been listening to heavily |
-| `musicmind_apple_recommendations` | Apple's own personalized picks |
-
-### Library Management
-| Tool | Description |
-|------|-------------|
-| `musicmind_create_playlist` | Create a new playlist with optional initial tracks |
-| `musicmind_add_to_playlist` | Add tracks to an existing playlist |
-| `musicmind_add_to_library` | Add catalog songs to your library |
-| `musicmind_rate_song` | Love, dislike, or remove rating |
-
-### Taste Analysis
-| Tool | Description |
-|------|-------------|
-| `musicmind_taste_profile` | Build and display your full taste profile |
-| `musicmind_taste_compare` | Score how well a song matches your taste |
-| `musicmind_listening_stats` | Aggregate stats from your cached data |
-| `musicmind_why_this_song` | Explain per-dimension taste match for a song |
-| `musicmind_taste_deep` | Comprehensive taste briefing (profile + recent + patterns) in one call |
-
-### Smart Recommendations
-| Tool | Description |
-|------|-------------|
-| `musicmind_discover` | Find new songs with optional mood and strategy selection |
-| `musicmind_smart_playlist` | Create a vibe-based playlist from natural language |
-| `musicmind_curate_playlist` | Claude-as-DJ: resolve "artist - title" queries to IDs + create playlist |
-| `musicmind_feedback` | Train the engine with thumbs up/down feedback |
-| `musicmind_refresh_cache` | Re-fetch data and rebuild taste profile |
-
-### System
-| Tool | Description |
-|------|-------------|
-| `musicmind_health` | Server status, auth check, cache stats |
-| `musicmind_help` | Full tool guide with example prompts |
-
----
-
-## Example Prompts
-
-Once connected, try these in Claude:
-
-```
-"Show me my music taste profile"
-"What have I been listening to lately?"
-"Search for 'Kendrick Lamar' in my library"
-"Find me 20 new songs — use the similar artists strategy"
-"Discover chill music for studying"
-"Create a playlist called 'Night Drive' with underground drill vibes"
-"Why would I like this song?" (after looking up a song ID)
-"Give thumbs up to song 1234567890" (after a recommendation)
-"What are the top charts right now?"
-"Compare my taste to this album's tracks"
-"Fammi una playlist estiva tipo drill milanese" (uses curate_playlist for regional scenes)
-"Give me a deep taste briefing" (uses taste_deep for max context)
-```
-
----
+- **Taste Profile** — Visualize your musical DNA: top genres (with regional specificity), favorite artists, audio trait preferences
+- **Smart Recommendations** — 4 discovery strategies (similar artists, genre exploration, editorial mining, chart filtering) scored across 7 weighted dimensions that learn from your feedback
+- **Claude Chat** — Ask Claude about your music taste, get recommendations by description ("something like early Radiohead but more electronic"), adjust preferences via natural language
+- **Multi-Service** — Connect Spotify and/or Apple Music. Unified taste profiles with cross-service genre normalization and ISRC-based deduplication
+- **Listening Stats** — Top tracks, artists, and genres by time period (month, 6 months, all time)
 
 ## Architecture
 
 ```
-src/musicmind/
-├── server.py          # FastMCP server + lifespan (DB, auth, client init)
-├── config.py          # Config from ~/.config/musicmind/config.json
-├── auth.py            # ES256 JWT developer token + Music User Token
-├── client.py          # Async Apple Music API client (25+ endpoints)
-├── models.py          # Pydantic response models
-├── tools/
-│   ├── library.py     # 6 library browsing tools
-│   ├── catalog.py     # 7 catalog search/lookup tools
-│   ├── playback.py    # 3 listening history tools
-│   ├── manage.py      # 4 library management tools
-│   ├── taste.py       # 5 taste analysis tools (+ taste_deep)
-│   └── recommend.py   # 5 recommendation tools (+ curate_playlist)
-├── engine/
-│   ├── profile.py     # Taste profile builder (genre vectors, artist affinity, temporal decay)
-│   ├── similarity.py  # Song/artist/audio similarity scoring
-│   ├── scorer.py      # 10-dimension candidate scoring with adaptive weights
-│   ├── discovery.py   # 4 discovery strategies
-│   ├── weights.py     # Adaptive weight optimizer (coordinate descent from feedback)
-│   ├── mood.py        # 6 mood profiles with genre + audio feature ranges
-│   ├── audio.py       # Audio feature extraction via librosa (Tier 2)
-│   └── classifier.py  # SoundAnalysis integration via Swift CLI (Tier 3)
-└── db/
-    ├── schema.py      # 9 SQLAlchemy Core tables
-    ├── manager.py     # Async DB lifecycle
-    └── queries.py     # All query methods
+frontend/          Next.js 16 · React 19 · Tailwind 4 · shadcn/ui
+    |
+    | REST + SSE
+    |
+backend/           FastAPI · SQLAlchemy Core · asyncpg · Alembic
+    |
+    |── engine/    Taste profiling · 7-dim scorer · Discovery · Mood filter · Adaptive weights
+    |── auth/      JWT (httpOnly cookies) · bcrypt · CSRF · Refresh tokens
+    |── api/       Taste · Stats · Recommendations · Chat · Services · Claude BYOK · Tracks
+    |
+    |── PostgreSQL 16 (user-scoped, multi-service)
+    |── Anthropic API (BYOK — users bring their own Claude key)
+    |── Spotify Web API (OAuth PKCE)
+    |── Apple Music API (MusicKit JS + ES256 developer tokens)
 ```
 
----
+## Quick Start
 
-## Development
+### Sandbox Mode (fastest — no keys needed)
 
 ```bash
-uv run pytest              # Run all 150 tests
-uv run pytest -v           # Verbose output
-uv run ruff check src/     # Lint
-uv run ruff check src/ --fix  # Auto-fix lint issues
+# Clone
+git clone https://github.com/Cyberfilo/MusicMind.git
+cd MusicMind
+
+# Start database
+docker compose up db -d
+
+# Backend (sandbox auto-fills secrets with dev defaults)
+cd backend
+uv sync --dev
+MUSICMIND_SANDBOX=true uv run alembic upgrade head
+MUSICMIND_SANDBOX=true uv run uvicorn musicmind.app:app --reload --port 8000
+
+# Frontend (new terminal)
+cd frontend
+npm install
+npm run dev
 ```
 
----
+Open http://localhost:3000 — sign up, explore the dashboard. Spotify/Apple Music features require API keys (see below).
+
+### Production Setup
+
+```bash
+# 1. Copy and fill environment variables
+cp .env.example .env
+# Edit .env — generate the required secrets:
+#   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# 2. Start everything
+docker compose up db -d
+cd backend && uv sync --dev
+uv run alembic upgrade head
+uv run uvicorn musicmind.app:app --reload --port 8000
+
+# 3. Frontend (new terminal)
+cd frontend && npm install && npm run dev
+```
+
+### Docker Compose (full stack)
+
+```bash
+cp .env.example .env
+# Fill in .env
+docker compose up -d
+# Backend at :8000, PostgreSQL at :5432
+# Frontend: cd frontend && npm install && npm run dev
+```
+
+## Commands Reference
+
+| Command | What it does |
+|---------|-------------|
+| `docker compose up db -d` | Start PostgreSQL |
+| `docker compose up -d` | Start PostgreSQL + backend |
+| `cd backend && uv sync --dev` | Install backend dependencies |
+| `cd backend && uv run alembic upgrade head` | Run database migrations |
+| `cd backend && uv run uvicorn musicmind.app:app --reload --port 8000` | Start backend (dev) |
+| `cd backend && uv run python -m pytest tests/ -v` | Run backend tests (294 tests) |
+| `cd backend && uv run ruff check src/` | Lint backend |
+| `cd frontend && npm install` | Install frontend dependencies |
+| `cd frontend && npm run dev` | Start frontend (dev, port 3000) |
+| `cd frontend && npm run build` | Build frontend for production |
+| `MUSICMIND_SANDBOX=true uv run uvicorn ...` | Start in sandbox mode (no keys needed) |
+
+## Environment Variables
+
+All variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.example) for the full list.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `MUSICMIND_DATABASE_URL` | Yes | PostgreSQL connection string |
+| `MUSICMIND_FERNET_KEY` | Yes* | Encryption key for secrets at rest |
+| `MUSICMIND_JWT_SECRET_KEY` | Yes* | JWT signing secret |
+| `MUSICMIND_SANDBOX` | No | Set `true` for dev defaults (skips key requirements) |
+| `MUSICMIND_SPOTIFY_CLIENT_ID` | No | Spotify app client ID |
+| `MUSICMIND_SPOTIFY_CLIENT_SECRET` | No | Spotify app client secret |
+| `MUSICMIND_SPOTIFY_REDIRECT_URI` | No | OAuth callback URL (default: `http://127.0.0.1:8000/api/services/spotify/callback`) |
+| `MUSICMIND_APPLE_TEAM_ID` | No | Apple Developer Team ID |
+| `MUSICMIND_APPLE_KEY_ID` | No | MusicKit key ID |
+| `MUSICMIND_APPLE_PRIVATE_KEY_PATH` | No | Path to `.p8` private key file |
+| `MUSICMIND_DEBUG` | No | Enable debug mode |
+| `MUSICMIND_LOG_LEVEL` | No | Logging level (default: `INFO`) |
+
+*Not required in sandbox mode.
+
+## Connecting Music Services
+
+### Spotify
+
+1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+2. Add redirect URI: `http://127.0.0.1:8000/api/services/spotify/callback`
+3. Set `MUSICMIND_SPOTIFY_CLIENT_ID` and `MUSICMIND_SPOTIFY_CLIENT_SECRET` in `.env`
+4. In the app, go to Settings → Connect Spotify
+
+> Spotify dev mode limits to 5 authorized users. Apply for extended quota if needed.
+
+### Apple Music
+
+1. Create a MusicKit key at [developer.apple.com](https://developer.apple.com/account/resources/authkeys)
+2. Download the `.p8` private key file
+3. Set `MUSICMIND_APPLE_TEAM_ID`, `MUSICMIND_APPLE_KEY_ID`, and `MUSICMIND_APPLE_PRIVATE_KEY_PATH` in `.env`
+4. In the app, go to Settings → Connect Apple Music
+
+### Claude (BYOK)
+
+Users provide their own Anthropic API key in Settings → Claude API Key. The key is encrypted at rest with Fernet. No shared API key — each user pays for their own usage.
+
+## API Endpoints
+
+<details>
+<summary>Full endpoint list (click to expand)</summary>
+
+### Auth
+- `POST /api/auth/signup` — Create account
+- `POST /api/auth/login` — Log in (sets JWT cookies)
+- `POST /api/auth/logout` — Log out (clears cookies)
+- `POST /api/auth/refresh` — Refresh access token
+- `GET /api/auth/me` — Current user info
+
+### Services
+- `GET /api/services` — List connected services
+- `POST /api/services/spotify/connect` — Initiate Spotify OAuth
+- `GET /api/services/spotify/callback` — OAuth callback
+- `GET /api/services/apple-music/developer-token` — Get Apple developer token
+- `POST /api/services/apple-music/connect` — Store Apple Music token
+- `DELETE /api/services/{service}` — Disconnect service
+
+### Claude BYOK
+- `POST /api/claude/key` — Store API key (encrypted)
+- `GET /api/claude/key/status` — Check if key configured
+- `POST /api/claude/key/validate` — Test key works
+- `DELETE /api/claude/key` — Remove key
+- `GET /api/claude/key/cost` — Estimated cost per message
+
+### Taste Profile
+- `GET /api/taste/profile` — Full taste profile
+- `GET /api/taste/genres` — Top genres
+- `GET /api/taste/artists` — Top artists
+- `GET /api/taste/audio-traits` — Audio preferences
+
+### Listening Stats
+- `GET /api/stats/tracks?period=month` — Top tracks
+- `GET /api/stats/artists?period=6months` — Top artists
+- `GET /api/stats/genres?period=alltime` — Top genres
+
+### Recommendations
+- `GET /api/recommendations?strategy=all&mood=chill&limit=10` — Get recommendations
+- `POST /api/recommendations/{id}/feedback` — Thumbs up/down
+- `GET /api/recommendations/{id}/breakdown` — 7-dimension scoring
+
+### Tracks
+- `GET /api/tracks/{id}/audio-features` — Audio feature radar data
+
+### Chat
+- `POST /api/chat/message` — Send message (SSE stream response)
+- `GET /api/chat/conversations` — List conversations
+- `GET /api/chat/conversations/{id}` — Load conversation
+- `DELETE /api/chat/conversations/{id}` — Delete conversation
+
+### Health
+- `GET /health` — Backend health check
+
+</details>
+
+## Recommendation Engine
+
+The scorer evaluates candidates across 7 weighted dimensions:
+
+| Dimension | Default Weight | What it measures |
+|-----------|---------------|-----------------|
+| Genre match | 0.35 | Cosine similarity of genre vectors (with regional prioritization) |
+| Audio similarity | 0.20 | Energy, tempo, danceability, valence proximity |
+| Novelty | 0.12 | New artists in familiar genres (Gaussian bell curve) |
+| Freshness | 0.10 | Release year match to listening distribution |
+| Diversity (MMR) | 0.08 | Penalty for similarity to already-selected songs |
+| Artist affinity | 0.08 | Deliberately low — style matters more than specific artist |
+| Anti-staleness | 0.07 | Cooldown on recently recommended songs |
+
+Weights adapt via coordinate descent optimization after 10+ feedback records. Cross-strategy convergence bonuses and mood filtering applied on top.
+
+## Tech Stack
+
+**Backend:** Python 3.11+ · FastAPI · SQLAlchemy Core · asyncpg · Alembic · Pydantic · bcrypt · PyJWT · Fernet · Anthropic SDK · httpx · numpy
+
+**Frontend:** Next.js 16 · React 19 · TypeScript · Tailwind CSS 4 · shadcn/ui · TanStack Query · Zustand · Recharts · Sonner
+
+**Infrastructure:** PostgreSQL 16 · Docker Compose · uv (Python) · npm (Node)
+
+## Project Structure
+
+```
+musicmind/
+├── backend/
+│   ├── src/musicmind/
+│   │   ├── api/              # REST endpoints
+│   │   │   ├── chat/         # Claude chat (SSE streaming)
+│   │   │   ├── claude/       # BYOK key management
+│   │   │   ├── recommendations/  # Discovery + scoring
+│   │   │   ├── services/     # Spotify/Apple Music OAuth
+│   │   │   ├── stats/        # Listening statistics
+│   │   │   ├── taste/        # Taste profile
+│   │   │   └── tracks/       # Audio features
+│   │   ├── auth/             # JWT authentication
+│   │   ├── db/               # Schema + engine
+│   │   ├── engine/           # Recommendation algorithms
+│   │   │   ├── scorer.py     # 7-dimension scoring
+│   │   │   ├── profile.py    # Taste profile builder
+│   │   │   ├── mood.py       # Mood filtering
+│   │   │   ├── weights.py    # Adaptive weight optimizer
+│   │   │   ├── genres.py     # Cross-service genre normalization
+│   │   │   ├── dedup.py      # ISRC + fuzzy deduplication
+│   │   │   └── similarity.py # Vector similarity
+│   │   └── security/         # Fernet encryption
+│   ├── alembic/              # Database migrations
+│   ├── tests/                # 294 tests
+│   └── pyproject.toml
+├── frontend/
+│   ├── src/
+│   │   ├── app/              # Next.js pages (login, dashboard, chat, settings)
+│   │   ├── components/       # React components (ui, chat, dashboard, recommendations, settings)
+│   │   ├── hooks/            # TanStack Query hooks
+│   │   ├── stores/           # Zustand stores
+│   │   ├── lib/              # API client, SSE, utils
+│   │   └── types/            # TypeScript types
+│   └── package.json
+├── docker-compose.yml
+├── .env.example
+└── LICENSE
+```
+
+## Tests
+
+```bash
+cd backend
+uv run python -m pytest tests/ -v
+```
+
+294 tests covering: authentication, service connections, BYOK key management, taste profiles, listening stats, recommendations, multi-service unification, Claude chat, detail views, genre normalization, track deduplication.
 
 ## License
 
