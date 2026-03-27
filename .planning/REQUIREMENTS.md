@@ -40,10 +40,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Listening Stats
 
-- [ ] **STAT-01**: User can view their top tracks by time period (last month, 6 months, all time)
-- [ ] **STAT-02**: User can view their top artists by time period
-- [ ] **STAT-03**: User can view their top genres by time period
-- [ ] **STAT-04**: User can view stats from either or both connected services
+- [x] **STAT-01**: User can view their top tracks by time period (last month, 6 months, all time)
+- [x] **STAT-02**: User can view their top artists by time period
+- [x] **STAT-03**: User can view their top genres by time period
+- [x] **STAT-04**: User can view stats from either or both connected services
 
 ### Recommendations
 
@@ -143,10 +143,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TAST-03 | Phase 5 | Complete |
 | TAST-04 | Phase 5 | Complete |
 | TAST-05 | Phase 8 | Pending |
-| STAT-01 | Phase 6 | Pending |
-| STAT-02 | Phase 6 | Pending |
-| STAT-03 | Phase 6 | Pending |
-| STAT-04 | Phase 6 | Pending |
+| STAT-01 | Phase 6 | Complete |
+| STAT-02 | Phase 6 | Complete |
+| STAT-03 | Phase 6 | Complete |
+| STAT-04 | Phase 6 | Complete |
 | RECO-01 | Phase 7 | Pending |
 | RECO-02 | Phase 7 | Pending |
 | RECO-03 | Phase 7 | Pending |
