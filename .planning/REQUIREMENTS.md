@@ -32,10 +32,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Taste Profile
 
-- [ ] **TAST-01**: User can view their taste profile showing top genres with regional specificity
-- [ ] **TAST-02**: User can view their top artists ranked by affinity
-- [ ] **TAST-03**: User can view their audio trait preferences (energy, danceability, valence, acousticness)
-- [ ] **TAST-04**: User can view their taste profile built from a single connected service
+- [x] **TAST-01**: User can view their taste profile showing top genres with regional specificity
+- [x] **TAST-02**: User can view their top artists ranked by affinity
+- [x] **TAST-03**: User can view their audio trait preferences (energy, danceability, valence, acousticness)
+- [x] **TAST-04**: User can view their taste profile built from a single connected service
 - [ ] **TAST-05**: User can view a unified taste profile merging both services (if both connected)
 
 ### Listening Stats
@@ -138,10 +138,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BYOK-02 | Phase 4 | Complete |
 | BYOK-03 | Phase 4 | Complete |
 | BYOK-04 | Phase 4 | Complete |
-| TAST-01 | Phase 5 | Pending |
-| TAST-02 | Phase 5 | Pending |
-| TAST-03 | Phase 5 | Pending |
-| TAST-04 | Phase 5 | Pending |
+| TAST-01 | Phase 5 | Complete |
+| TAST-02 | Phase 5 | Complete |
+| TAST-03 | Phase 5 | Complete |
+| TAST-04 | Phase 5 | Complete |
 | TAST-05 | Phase 8 | Pending |
 | STAT-01 | Phase 6 | Pending |
 | STAT-02 | Phase 6 | Pending |
