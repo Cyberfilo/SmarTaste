@@ -126,7 +126,10 @@ Plans:
   3. User can give thumbs up or thumbs down on any recommendation and see the feedback registered
   4. After providing feedback, subsequent recommendation batches reflect adjusted scoring weights
   5. User can select a discovery strategy (similar artist, genre adjacent, editorial mining, chart filter) and see recommendations change accordingly
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 07-01-PLAN.md -- Engine port (scorer, weights, mood, similarity), numpy dependency, Pydantic schemas, discovery fetch functions
+- [ ] 07-02-PLAN.md -- RecommendationService pipeline, router endpoints, API wiring, integration tests (RECO-01 through RECO-06)
 **UI hint**: yes
 
 ### Phase 8: Multi-Service Unification
@@ -180,7 +183,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 4. BYOK Claude API Key Management | 0/2 | Planning complete | - |
 | 5. Taste Profile Dashboard | 1/2 | In Progress|  |
 | 6. Listening Stats Dashboard | 0/2 | Planning complete | - |
-| 7. Recommendation Feed | 0/0 | Not started | - |
+| 7. Recommendation Feed | 0/2 | Planning complete | - |
 | 8. Multi-Service Unification | 0/0 | Not started | - |
 | 9. Claude Chat Integration | 0/0 | Not started | - |
 | 10. Detail Views and Responsive Polish | 0/0 | Not started | - |
