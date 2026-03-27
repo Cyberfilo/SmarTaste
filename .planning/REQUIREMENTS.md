@@ -36,7 +36,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **TAST-02**: User can view their top artists ranked by affinity
 - [x] **TAST-03**: User can view their audio trait preferences (energy, danceability, valence, acousticness)
 - [x] **TAST-04**: User can view their taste profile built from a single connected service
-- [ ] **TAST-05**: User can view a unified taste profile merging both services (if both connected)
+- [x] **TAST-05**: User can view a unified taste profile merging both services (if both connected)
 
 ### Listening Stats
 
@@ -71,10 +71,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Multi-Service
 
-- [ ] **MSVC-01**: Data from both services is normalized to a shared internal representation
-- [ ] **MSVC-02**: Recommendations can draw from both services' catalogs transparently
-- [ ] **MSVC-03**: Genre taxonomies are mapped to a shared canonical representation
-- [ ] **MSVC-04**: Cross-service track deduplication via ISRC (with fuzzy title+artist fallback)
+- [x] **MSVC-01**: Data from both services is normalized to a shared internal representation
+- [x] **MSVC-02**: Recommendations can draw from both services' catalogs transparently
+- [x] **MSVC-03**: Genre taxonomies are mapped to a shared canonical representation
+- [x] **MSVC-04**: Cross-service track deduplication via ISRC (with fuzzy title+artist fallback)
 
 ### Infrastructure
 
@@ -142,7 +142,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TAST-02 | Phase 5 | Complete |
 | TAST-03 | Phase 5 | Complete |
 | TAST-04 | Phase 5 | Complete |
-| TAST-05 | Phase 8 | Pending |
+| TAST-05 | Phase 8 | Complete |
 | STAT-01 | Phase 6 | Complete |
 | STAT-02 | Phase 6 | Complete |
 | STAT-03 | Phase 6 | Complete |
@@ -165,10 +165,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CHAT-08 | Phase 9 | Pending |
 | CHAT-09 | Phase 9 | Pending |
 | CHAT-10 | Phase 9 | Pending |
-| MSVC-01 | Phase 8 | Pending |
-| MSVC-02 | Phase 8 | Pending |
-| MSVC-03 | Phase 8 | Pending |
-| MSVC-04 | Phase 8 | Pending |
+| MSVC-01 | Phase 8 | Complete |
+| MSVC-02 | Phase 8 | Complete |
+| MSVC-03 | Phase 8 | Complete |
+| MSVC-04 | Phase 8 | Complete |
 | INFR-01 | Phase 1 | Complete |
 | INFR-02 | Phase 1 | Complete |
 | INFR-03 | Phase 1 | Complete |
