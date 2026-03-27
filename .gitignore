@@ -11,3 +11,6 @@ coverage/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+.planning/
+.claude/worktrees/
+.claude/cache/
