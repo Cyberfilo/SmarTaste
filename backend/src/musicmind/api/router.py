@@ -11,6 +11,7 @@ from musicmind.api.recommendations.router import router as recommendations_route
 from musicmind.api.services.router import router as services_router
 from musicmind.api.stats.router import router as stats_router
 from musicmind.api.taste.router import router as taste_router
+from musicmind.api.tracks.router import router as tracks_router
 from musicmind.auth.router import router as auth_router
 
 api_router = APIRouter()
@@ -22,3 +23,4 @@ api_router.include_router(chat_router)
 api_router.include_router(taste_router)
 api_router.include_router(stats_router)
 api_router.include_router(recommendations_router)
+api_router.include_router(tracks_router)

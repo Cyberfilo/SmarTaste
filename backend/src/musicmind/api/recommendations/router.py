@@ -7,6 +7,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from musicmind.api.recommendations.schemas import (
+    BreakdownDimension,
+    BreakdownResponse,
     FeedbackRequest,
     FeedbackResponse,
     RecommendationItem,
@@ -139,4 +141,53 @@ async def submit_feedback(
         catalog_id=catalog_id,
         feedback_type=body.feedback_type,
         recorded=True,
+    )
+
+
+@router.get("/{catalog_id}/breakdown")
+async def get_breakdown(
+    request: Request,
+    catalog_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> BreakdownResponse:
+    """Get the 7-dimension scoring breakdown for a recommendation.
+
+    Params:
+        catalog_id: Service-specific track ID.
+    """
+    try:
+        result = await recommendation_service.get_scoring_breakdown(
+            request.app.state.engine,
+            request.app.state.encryption,
+            request.app.state.settings,
+            user_id=current_user["user_id"],
+            catalog_id=catalog_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception("Unexpected error computing breakdown")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to compute scoring breakdown",
+        )
+
+    dimensions = [
+        BreakdownDimension(
+            name=d["name"],
+            label=d["label"],
+            score=d["score"],
+            weight=d["weight"],
+        )
+        for d in result["dimensions"]
+    ]
+
+    return BreakdownResponse(
+        catalog_id=result["catalog_id"],
+        overall_score=result["overall_score"],
+        dimensions=dimensions,
+        explanation=result["explanation"],
     )
