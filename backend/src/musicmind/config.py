@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://musicmind:musicmind@localhost:5432/musicmind"
     fernet_key: str  # No default -- MUST be set via MUSICMIND_FERNET_KEY
+    jwt_secret_key: str  # No default -- MUST be set via MUSICMIND_JWT_SECRET_KEY
+    jwt_algorithm: str = "HS256"
     debug: bool = False
     log_level: str = "INFO"
 

@@ -52,6 +52,7 @@ def test_settings_loads_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Settings loads database_url and fernet_key from MUSICMIND_ prefixed env vars."""
     monkeypatch.setenv("MUSICMIND_DATABASE_URL", "postgresql+asyncpg://test:test@db:5432/testdb")
     monkeypatch.setenv("MUSICMIND_FERNET_KEY", EncryptionService.generate_key())
+    monkeypatch.setenv("MUSICMIND_JWT_SECRET_KEY", "test-jwt-secret-for-settings-test")
     monkeypatch.delenv("MUSICMIND_DEBUG", raising=False)
     monkeypatch.delenv("MUSICMIND_LOG_LEVEL", raising=False)
 

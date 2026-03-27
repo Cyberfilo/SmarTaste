@@ -15,6 +15,9 @@ dependencies = [
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "greenlet>=3.0",
+    "pyjwt>=2.12.1",
+    "bcrypt>=5.0.0",
+    "starlette-csrf>=3.0.0",
 ]
 
 [project.optional-dependencies]

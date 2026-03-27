@@ -7,6 +7,7 @@ from musicmind.db.schema import metadata
 ALL_TABLE_NAMES = [
     "users",
     "service_connections",
+    "refresh_tokens",
     "listening_history",
     "song_metadata_cache",
     "artist_cache",
@@ -33,11 +34,11 @@ DATA_TABLE_NAMES = [
 
 
 def test_all_tables_present() -> None:
-    """All 11 tables are defined in the schema metadata."""
+    """All 12 tables are defined in the schema metadata."""
     table_names = set(metadata.tables.keys())
     for name in ALL_TABLE_NAMES:
         assert name in table_names, f"Table '{name}' missing from schema"
-    assert len(metadata.tables) == 11
+    assert len(metadata.tables) == 12
 
 
 def test_user_id_on_all_data_tables() -> None:

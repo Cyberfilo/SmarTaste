@@ -59,6 +59,27 @@ service_connections = sa.Table(
     sa.UniqueConstraint("user_id", "service", name="uq_user_service"),
 )
 
+refresh_tokens = sa.Table(
+    "refresh_tokens",
+    metadata,
+    sa.Column("id", sa.Text, primary_key=True),
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("revoked", sa.Boolean, nullable=False, server_default=sa.text("false")),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 # ── Adapted Data Tables (all with user_id FK) ───────────────────────────────
 
 listening_history = sa.Table(
