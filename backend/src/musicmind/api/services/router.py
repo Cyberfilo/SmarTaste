@@ -66,7 +66,11 @@ async def list_connections(
             )
         else:
             # For Spotify: check token_expires_at. For Apple Music: no expiry tracked.
+            # SQLite returns timezone-naive datetimes; normalize before comparing.
             expires_at = conn.get("token_expires_at")
+            if expires_at is not None:
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=UTC)
             if expires_at is not None and expires_at < now:
                 svc_status = "expired"
             else:
