@@ -110,7 +110,10 @@ Plans:
   2. User can view their top artists for each time period
   3. User can view their top genres for each time period
   4. Stats work correctly whether the user has one or both services connected
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 06-01-PLAN.md -- Stats schemas, time-range-parameterized fetchers, StatsService orchestration
+- [ ] 06-02-PLAN.md -- Stats router endpoints, API wiring, integration tests (STAT-01 through STAT-04)
 **UI hint**: yes
 
 ### Phase 7: Recommendation Feed
@@ -176,7 +179,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 3. Service Connections | 2/2 | Complete   | 2026-03-27 |
 | 4. BYOK Claude API Key Management | 0/2 | Planning complete | - |
 | 5. Taste Profile Dashboard | 1/2 | In Progress|  |
-| 6. Listening Stats Dashboard | 0/0 | Not started | - |
+| 6. Listening Stats Dashboard | 0/2 | Planning complete | - |
 | 7. Recommendation Feed | 0/0 | Not started | - |
 | 8. Multi-Service Unification | 0/0 | Not started | - |
 | 9. Claude Chat Integration | 0/0 | Not started | - |

@@ -26,13 +26,18 @@ Users get genuinely good music recommendations powered by real audio analysis an
 - ✓ Audio feature extraction via librosa (Tier 2) — existing (`src/musicmind/engine/audio.py`)
 - ✓ SoundAnalysis classification via macOS (Tier 3) — existing (`src/musicmind/engine/classifier.py`)
 - ✓ MCP server with 30+ tools organized by domain — existing (`src/musicmind/server.py`, `tools/`)
+- ✓ Multi-user PostgreSQL database with user-scoped data isolation — Phase 1
+- ✓ Database migrations via Alembic — Phase 1
+- ✓ API key and OAuth token encryption at rest (Fernet) — Phase 1
+- ✓ Local-first deployment via docker-compose — Phase 1
+- ✓ User accounts with signup, login, persistent JWT sessions, logout — Phase 2
+- ✓ Session security with httpOnly cookies and CSRF protection — Phase 2
 
 ### Active
 
 <!-- Current scope. Building toward these. -->
 
 - [ ] Web application with dashboard and Claude chat interface
-- [ ] User accounts with authentication (signup, login, sessions)
 - [ ] Spotify OAuth integration for user account connection
 - [ ] Apple Music OAuth integration adapted for webapp context
 - [ ] Spotify Web API client (library, recently played, saved tracks, playlists)
@@ -102,4 +107,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-26 after initialization*
+*Last updated: 2026-03-26 after Phase 1 completion*
