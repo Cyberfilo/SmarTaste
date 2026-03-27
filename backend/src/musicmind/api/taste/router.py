@@ -78,6 +78,7 @@ async def get_profile(
         top_artists=top_artists,
         audio_trait_preferences=profile.get("audio_trait_preferences", {}),
         release_year_distribution=profile.get("release_year_distribution", {}),
+        services_included=profile.get("services_included", []),
     )
 
 

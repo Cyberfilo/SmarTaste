@@ -1,4 +1,9 @@
-"""Taste profile pipeline: staleness check, fetch, cache, compute, return."""
+"""Taste profile pipeline: staleness check, fetch, cache, compute, return.
+
+Supports single-service profiles (spotify, apple_music) and unified profiles
+that merge data from both services with cross-service genre normalization
+and track deduplication.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +35,8 @@ from musicmind.db.schema import (
     song_metadata_cache,
     taste_profile_snapshots,
 )
+from musicmind.engine.dedup import deduplicate_tracks
+from musicmind.engine.genres import normalize_genre_list
 from musicmind.engine.profile import build_taste_profile
 from musicmind.security.encryption import EncryptionService
 
@@ -87,6 +94,12 @@ class TasteService:
                 )
                 return snapshot
 
+        # Unified profile: fetch from both services, deduplicate, normalize
+        if resolved_service == "unified":
+            return await self._build_unified_profile(
+                engine, encryption, settings, user_id=user_id,
+            )
+
         songs, history = await self._fetch_and_cache_data(
             engine,
             encryption,
@@ -110,7 +123,8 @@ class TasteService:
         """Resolve which service to use for the taste profile.
 
         If service is explicitly provided, return it directly.
-        Otherwise query connected services and pick the first one.
+        If None, auto-detect: both services connected -> "unified",
+        single service -> that service name.
         """
         if service is not None:
             return service
@@ -119,7 +133,83 @@ class TasteService:
         if not connections:
             raise ValueError("No connected service found")
 
+        services = {c["service"] for c in connections}
+        if "spotify" in services and "apple_music" in services:
+            return "unified"
+
         return connections[0]["service"]
+
+    async def _build_unified_profile(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """Build a unified profile from both connected services.
+
+        Fetches data from both Spotify and Apple Music, applies cross-service
+        track deduplication and genre normalization, then builds a single
+        merged taste profile.
+
+        Returns:
+            Unified taste profile dict with services_included field.
+        """
+        all_songs: list[dict] = []
+        all_history: list[dict] = []
+        services_included: list[str] = []
+
+        # Try fetching from each service, tolerate individual failures
+        for svc in ("spotify", "apple_music"):
+            try:
+                songs, history = await self._fetch_and_cache_data(
+                    engine, encryption, settings,
+                    user_id=user_id, service=svc,
+                )
+                all_songs.extend(songs)
+                all_history.extend(history)
+                services_included.append(svc)
+            except ValueError:
+                logger.info(
+                    "No %s connection for user %s, skipping in unified profile",
+                    svc, user_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to fetch %s data for unified profile, skipping", svc,
+                )
+
+        if not all_songs and not all_history:
+            raise ValueError("No data fetched from any connected service")
+
+        # Cross-service deduplication
+        deduplicated_songs = deduplicate_tracks(all_songs)
+
+        # Normalize genres on all songs
+        for song in deduplicated_songs:
+            genres = song.get("genre_names") or []
+            if isinstance(genres, str):
+                genres = [genres]
+            song["genre_names"] = normalize_genre_list(genres)
+
+        for entry in all_history:
+            genres = entry.get("genre_names") or []
+            if isinstance(genres, str):
+                genres = [genres]
+            entry["genre_names"] = normalize_genre_list(genres)
+
+        # Build unified profile
+        profile = await self._compute_and_save_profile(
+            engine,
+            user_id=user_id,
+            service="unified",
+            songs=deduplicated_songs,
+            history=all_history,
+        )
+
+        profile["services_included"] = services_included
+        return profile
 
     async def _get_fresh_snapshot(
         self, engine, *, user_id: str, service_source: str

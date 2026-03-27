@@ -21,10 +21,13 @@ class ArtistEntry(BaseModel):
 
 
 class TasteProfileResponse(BaseModel):
-    """Full taste profile built from a single connected service."""
+    """Full taste profile built from one or both connected services.
+
+    When service="unified", services_included lists which services contributed.
+    """
 
     service: str = Field(
-        description="Service this profile was built from (spotify or apple_music)"
+        description="Service source (spotify, apple_music, or unified)"
     )
     computed_at: str = Field(description="ISO 8601 timestamp of last computation")
     total_songs_analyzed: int = Field(
@@ -47,6 +50,10 @@ class TasteProfileResponse(BaseModel):
     )
     release_year_distribution: dict[str, float] = Field(
         description="Year -> fraction of library"
+    )
+    services_included: list[str] = Field(
+        default_factory=list,
+        description="Services that contributed to this profile (empty for single-service)",
     )
 
 
