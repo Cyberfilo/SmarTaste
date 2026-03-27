@@ -241,6 +241,138 @@ class RecommendationService:
             "weights_adapted": weights_adapted,
         }
 
+    async def get_scoring_breakdown(
+        self,
+        engine,
+        encryption,
+        settings,
+        *,
+        user_id: str,
+        catalog_id: str,
+    ) -> dict[str, Any]:
+        """Get the 7-dimension scoring breakdown for a track.
+
+        Re-scores the track against the user's latest taste profile and
+        returns overall score, per-dimension scores with weights, and
+        a natural-language explanation.
+
+        Args:
+            engine: SQLAlchemy async engine.
+            encryption: EncryptionService for token decryption.
+            settings: Application settings.
+            user_id: MusicMind user ID.
+            catalog_id: Catalog ID of the track to score.
+
+        Returns:
+            Dict with catalog_id, overall_score, dimensions, explanation.
+
+        Raises:
+            ValueError: If track not in song_metadata_cache or no profile.
+        """
+        async with engine.begin() as conn:
+            # Get song metadata
+            song_result = await conn.execute(
+                sa.select(song_metadata_cache).where(
+                    sa.and_(
+                        song_metadata_cache.c.catalog_id == catalog_id,
+                        song_metadata_cache.c.user_id == user_id,
+                    )
+                )
+            )
+            song_row = song_result.first()
+
+            if song_row is None:
+                raise ValueError("Track not found in catalog")
+
+            # Get latest taste profile
+            profile_result = await conn.execute(
+                sa.select(taste_profile_snapshots)
+                .where(taste_profile_snapshots.c.user_id == user_id)
+                .order_by(taste_profile_snapshots.c.computed_at.desc())
+                .limit(1)
+            )
+            profile_row = profile_result.first()
+
+            if profile_row is None:
+                raise ValueError("No taste profile available")
+
+        # Build song dict
+        genre_names = song_row.genre_names
+        if isinstance(genre_names, str):
+            try:
+                genre_names = json.loads(genre_names)
+            except (json.JSONDecodeError, TypeError):
+                genre_names = []
+
+        song_dict: dict[str, Any] = {
+            "catalog_id": song_row.catalog_id,
+            "name": song_row.name,
+            "artist_name": song_row.artist_name,
+            "genre_names": genre_names,
+            "release_date": song_row.release_date,
+        }
+
+        # Build profile dict
+        def _parse_json(val: Any, default: Any) -> Any:
+            if val is None:
+                return default
+            if isinstance(val, str):
+                try:
+                    return json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    return default
+            return val
+
+        profile_dict: dict[str, Any] = {
+            "genre_vector": _parse_json(profile_row.genre_vector, {}),
+            "top_artists": _parse_json(profile_row.top_artists, []),
+            "release_year_distribution": _parse_json(
+                profile_row.release_year_distribution, {},
+            ),
+            "familiarity_score": profile_row.familiarity_score or 0.0,
+        }
+
+        # Score the candidate
+        result = score_candidate(song_dict, profile_dict)
+
+        # Map breakdown keys to the 7 reportable dimensions
+        breakdown = result.get("_breakdown", {})
+        dimension_map: list[tuple[str, str, str]] = [
+            ("genre_match", "Genre Match", "genre"),
+            ("audio_similarity", "Audio Similarity", "audio"),
+            ("novelty", "Novelty", "novelty"),
+            ("freshness", "Freshness", "freshness"),
+            ("diversity", "Diversity", "diversity"),
+            ("artist_affinity", "Artist Affinity", "artist"),
+            ("anti_staleness", "Anti-Staleness", "staleness"),
+        ]
+
+        dimensions: list[dict[str, Any]] = []
+        for dim_name, dim_label, weight_key in dimension_map:
+            # Map breakdown keys to dimension names
+            if dim_name == "diversity":
+                score = round(1.0 - breakdown.get("diversity_penalty", 0.0), 3)
+            elif dim_name == "artist_affinity":
+                score = breakdown.get("artist_match", 0.0)
+            elif dim_name == "anti_staleness":
+                score = round(1.0 - breakdown.get("staleness", 0.0), 3)
+            else:
+                score = breakdown.get(dim_name, 0.0)
+
+            dimensions.append({
+                "name": dim_name,
+                "label": dim_label,
+                "score": score,
+                "weight": DEFAULT_WEIGHTS.get(weight_key, 0.0),
+            })
+
+        return {
+            "catalog_id": catalog_id,
+            "overall_score": result.get("_score", 0.0),
+            "dimensions": dimensions,
+            "explanation": result.get("_explanation", ""),
+        }
+
     async def submit_feedback(
         self,
         engine,

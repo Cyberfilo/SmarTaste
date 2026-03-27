@@ -46,6 +46,28 @@ class RecommendationsResponse(BaseModel):
     )
 
 
+class BreakdownDimension(BaseModel):
+    """A single scoring dimension with its score and weight."""
+
+    name: str = Field(description="Machine key (e.g. genre_match)")
+    label: str = Field(description="Human-readable label (e.g. Genre Match)")
+    score: float = Field(description="Dimension score 0-1")
+    weight: float = Field(description="Dimension weight 0-1")
+
+
+class BreakdownResponse(BaseModel):
+    """Full 7-dimension scoring breakdown for a recommendation."""
+
+    catalog_id: str = Field(description="Service-specific track ID")
+    overall_score: float = Field(description="Overall match score 0-1")
+    dimensions: list[BreakdownDimension] = Field(
+        description="Per-dimension scoring breakdown"
+    )
+    explanation: str = Field(
+        description="Natural language explanation of the scoring"
+    )
+
+
 class FeedbackRequest(BaseModel):
     """User feedback on a recommended track."""
 
