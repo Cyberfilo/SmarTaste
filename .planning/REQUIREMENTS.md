@@ -47,12 +47,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Recommendations
 
-- [ ] **RECO-01**: User can view a recommendation feed with personalized song suggestions
-- [ ] **RECO-02**: Each recommendation includes a natural-language explanation of why it was suggested
+- [x] **RECO-01**: User can view a recommendation feed with personalized song suggestions
+- [x] **RECO-02**: Each recommendation includes a natural-language explanation of why it was suggested
 - [ ] **RECO-03**: User can give thumbs up/down feedback on any recommendation
 - [ ] **RECO-04**: Feedback drives adaptive weight optimization for future recommendations
-- [ ] **RECO-05**: User can select a discovery strategy (similar artist, genre adjacent, editorial mining, chart filter)
-- [ ] **RECO-06**: User can filter recommendations by mood (focus, energy, chill, melancholy, etc.)
+- [x] **RECO-05**: User can select a discovery strategy (similar artist, genre adjacent, editorial mining, chart filter)
+- [x] **RECO-06**: User can filter recommendations by mood (focus, energy, chill, melancholy, etc.)
 - [ ] **RECO-07**: User can view the full 7-dimension scoring breakdown for any recommendation
 - [ ] **RECO-08**: User can view a per-track audio feature visualization (radar chart: energy, danceability, valence, acousticness, tempo, instrumentalness)
 
@@ -147,12 +147,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STAT-02 | Phase 6 | Complete |
 | STAT-03 | Phase 6 | Complete |
 | STAT-04 | Phase 6 | Complete |
-| RECO-01 | Phase 7 | Pending |
-| RECO-02 | Phase 7 | Pending |
+| RECO-01 | Phase 7 | Complete |
+| RECO-02 | Phase 7 | Complete |
 | RECO-03 | Phase 7 | Pending |
 | RECO-04 | Phase 7 | Pending |
-| RECO-05 | Phase 7 | Pending |
-| RECO-06 | Phase 7 | Pending |
+| RECO-05 | Phase 7 | Complete |
+| RECO-06 | Phase 7 | Complete |
 | RECO-07 | Phase 10 | Pending |
 | RECO-08 | Phase 10 | Pending |
 | CHAT-01 | Phase 9 | Pending |
