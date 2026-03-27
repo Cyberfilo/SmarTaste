@@ -161,7 +161,7 @@ Plans:
 Plans:
 - [x] 09-01-PLAN.md -- Database table (chat_conversations), Alembic migration, Pydantic schemas, tool registry (8 curated tools)
 - [x] 09-02-PLAN.md -- ChatService agentic loop, SSE streaming, tool execution, context window, conversation persistence
-- [ ] 09-03-PLAN.md -- Chat router endpoints (message SSE, conversation CRUD), API wiring, integration tests
+- [x] 09-03-PLAN.md -- Chat router endpoints (message SSE, conversation CRUD), API wiring, integration tests
 **UI hint**: yes
 
 ### Phase 10: Detail Views and Responsive Polish
