@@ -946,11 +946,19 @@ class TestChatServiceContextWindow:
             ):
                 events.append(event)
 
-        # Check that messages sent to API are truncated
+        # Check that messages sent to API are truncated.
+        # The mock captures a reference to the list, which may have the
+        # assistant response appended after the call.  Verify the first
+        # user message in the list is NOT "Message 0" (oldest of 30),
+        # confirming that old messages were dropped.
         call_args = mock_client.messages.stream.call_args
         messages_sent = call_args.kwargs.get("messages", [])
-        # Should be at most CONTEXT_WINDOW_MESSAGES (20) + 1 new message = 21
-        assert len(messages_sent) <= ChatService.CONTEXT_WINDOW_MESSAGES + 1
+        # The oldest message should be "Message 10" (30 - 20 = 10)
+        first_content = messages_sent[0].get("content", "")
+        assert first_content == "Message 10"
+        # The last user-contributed message should be "New message"
+        user_messages = [m for m in messages_sent if m.get("content") == "New message"]
+        assert len(user_messages) >= 1
 
 
 # ── TestChatServiceSystemPrompt ─────────────────────────────────────────────
