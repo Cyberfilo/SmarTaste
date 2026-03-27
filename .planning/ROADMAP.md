@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 4: BYOK Claude API Key Management** - Key storage, validation, cost transparency
 - [ ] **Phase 5: Taste Profile Dashboard** - Single-service taste profile visualization using existing engine
 - [ ] **Phase 6: Listening Stats Dashboard** - Top tracks, artists, genres by time period
-- [ ] **Phase 7: Recommendation Feed** - Personalized suggestions with explanations, feedback loop, discovery strategies, mood filtering
+- [x] **Phase 7: Recommendation Feed** - Personalized suggestions with explanations, feedback loop, discovery strategies, mood filtering (completed 2026-03-27)
 - [ ] **Phase 8: Multi-Service Unification** - Data normalization, genre taxonomy mapping, cross-service deduplication, unified taste profile
 - [ ] **Phase 9: Claude Chat Integration** - Streaming chat with tool-use, conversational music exploration, conversation persistence
 - [ ] **Phase 10: Detail Views and Responsive Polish** - Scoring breakdown, audio feature visualization, responsive design
@@ -128,8 +128,8 @@ Plans:
   5. User can select a discovery strategy (similar artist, genre adjacent, editorial mining, chart filter) and see recommendations change accordingly
 **Plans**: 2 plans
 Plans:
-- [ ] 07-01-PLAN.md -- Engine port (scorer, weights, mood, similarity), numpy dependency, Pydantic schemas, discovery fetch functions
-- [ ] 07-02-PLAN.md -- RecommendationService pipeline, router endpoints, API wiring, integration tests (RECO-01 through RECO-06)
+- [x] 07-01-PLAN.md -- Engine port (scorer, weights, mood, similarity), numpy dependency, Pydantic schemas, discovery fetch functions
+- [x] 07-02-PLAN.md -- RecommendationService pipeline, router endpoints, API wiring, integration tests (RECO-01 through RECO-06)
 **UI hint**: yes
 
 ### Phase 8: Multi-Service Unification
@@ -183,7 +183,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 4. BYOK Claude API Key Management | 0/2 | Planning complete | - |
 | 5. Taste Profile Dashboard | 1/2 | In Progress|  |
 | 6. Listening Stats Dashboard | 0/2 | Planning complete | - |
-| 7. Recommendation Feed | 0/2 | Planning complete | - |
+| 7. Recommendation Feed | 2/2 | Complete   | 2026-03-27 |
 | 8. Multi-Service Unification | 0/0 | Not started | - |
 | 9. Claude Chat Integration | 0/0 | Not started | - |
 | 10. Detail Views and Responsive Polish | 0/0 | Not started | - |
