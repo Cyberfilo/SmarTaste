@@ -220,6 +220,7 @@ taste_profile_snapshots = sa.Table(
     sa.Column("familiarity_score", sa.Float, server_default="0.0"),
     sa.Column("total_songs_analyzed", sa.Integer, server_default="0"),
     sa.Column("listening_hours_estimated", sa.Float, server_default="0.0"),
+    sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
 )
 
 recommendation_feedback = sa.Table(

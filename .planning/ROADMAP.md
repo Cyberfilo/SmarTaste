@@ -95,7 +95,10 @@ Plans:
   2. User can view their top artists ranked by affinity score
   3. User can view their audio trait preferences as a visual display (energy, danceability, valence, acousticness)
   4. The taste profile builds successfully from either Spotify-only or Apple Music-only data
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 05-01-PLAN.md -- Alembic migration (service_source on snapshots), engine port, Pydantic schemas, Spotify/Apple Music data fetchers
+- [ ] 05-02-PLAN.md -- TasteService pipeline, taste router endpoints, API wiring, integration tests
 **UI hint**: yes
 
 ### Phase 6: Listening Stats Dashboard
@@ -172,7 +175,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 2. User Accounts | 0/2 | Planning complete | - |
 | 3. Service Connections | 2/2 | Complete   | 2026-03-27 |
 | 4. BYOK Claude API Key Management | 0/2 | Planning complete | - |
-| 5. Taste Profile Dashboard | 0/0 | Not started | - |
+| 5. Taste Profile Dashboard | 0/2 | Planning complete | - |
 | 6. Listening Stats Dashboard | 0/0 | Not started | - |
 | 7. Recommendation Feed | 0/0 | Not started | - |
 | 8. Multi-Service Unification | 0/0 | Not started | - |
