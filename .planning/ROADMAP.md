@@ -83,7 +83,7 @@ Plans:
 **Plans**: 2 plans
 Plans:
 - [x] 04-01-PLAN.md -- Database table (user_api_keys), Pydantic schemas, service helpers, anthropic SDK dependency
-- [ ] 04-02-PLAN.md -- Claude BYOK router endpoints, api_router wiring, integration tests
+- [x] 04-02-PLAN.md -- Claude BYOK router endpoints, api_router wiring, integration tests
 **UI hint**: yes
 
 ### Phase 5: Taste Profile Dashboard
