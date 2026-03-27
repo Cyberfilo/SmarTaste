@@ -59,15 +59,15 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Claude Chat
 
 - [x] **CHAT-01**: User can open a Claude chat interface and send messages
-- [ ] **CHAT-02**: Claude responses stream in real-time (SSE) for perceived speed
+- [x] **CHAT-02**: Claude responses stream in real-time (SSE) for perceived speed
 - [x] **CHAT-03**: Claude can call MusicMind engine tools (taste profile, discovery, scoring) via tool_use
-- [ ] **CHAT-04**: User sees "searching your library" indicators during tool execution
+- [x] **CHAT-04**: User sees "searching your library" indicators during tool execution
 - [x] **CHAT-05**: User can have a multi-turn conversation with context preserved
-- [ ] **CHAT-06**: User can ask Claude to explain any recommendation in detail
-- [ ] **CHAT-07**: User can ask Claude to find music matching a description ("something like early Radiohead but more electronic")
-- [ ] **CHAT-08**: User can ask Claude to adjust their taste preferences via natural language ("less mainstream pop")
+- [x] **CHAT-06**: User can ask Claude to explain any recommendation in detail
+- [x] **CHAT-07**: User can ask Claude to find music matching a description ("something like early Radiohead but more electronic")
+- [x] **CHAT-08**: User can ask Claude to adjust their taste preferences via natural language ("less mainstream pop")
 - [x] **CHAT-09**: Conversation history is persisted per user across sessions
-- [ ] **CHAT-10**: Errors (key expired, rate limited, insufficient balance) show user-friendly messages
+- [x] **CHAT-10**: Errors (key expired, rate limited, insufficient balance) show user-friendly messages
 
 ### Multi-Service
 
@@ -156,15 +156,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RECO-07 | Phase 10 | Pending |
 | RECO-08 | Phase 10 | Pending |
 | CHAT-01 | Phase 9 | Complete |
-| CHAT-02 | Phase 9 | Pending |
+| CHAT-02 | Phase 9 | Complete |
 | CHAT-03 | Phase 9 | Complete |
-| CHAT-04 | Phase 9 | Pending |
+| CHAT-04 | Phase 9 | Complete |
 | CHAT-05 | Phase 9 | Complete |
-| CHAT-06 | Phase 9 | Pending |
-| CHAT-07 | Phase 9 | Pending |
-| CHAT-08 | Phase 9 | Pending |
+| CHAT-06 | Phase 9 | Complete |
+| CHAT-07 | Phase 9 | Complete |
+| CHAT-08 | Phase 9 | Complete |
 | CHAT-09 | Phase 9 | Complete |
-| CHAT-10 | Phase 9 | Pending |
+| CHAT-10 | Phase 9 | Complete |
 | MSVC-01 | Phase 8 | Complete |
 | MSVC-02 | Phase 8 | Complete |
 | MSVC-03 | Phase 8 | Complete |
