@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: Infrastructure Foundation** - Multi-user database, migrations, encryption, deployment skeleton
 - [ ] **Phase 2: User Accounts** - Signup, login, sessions, and security
-- [ ] **Phase 3: Service Connections** - Spotify PKCE OAuth, Apple Music MusicKit JS OAuth, connection management
+- [x] **Phase 3: Service Connections** - Spotify PKCE OAuth, Apple Music MusicKit JS OAuth, connection management (completed 2026-03-27)
 - [ ] **Phase 4: BYOK Claude API Key Management** - Key storage, validation, cost transparency
 - [ ] **Phase 5: Taste Profile Dashboard** - Single-service taste profile visualization using existing engine
 - [ ] **Phase 6: Listening Stats Dashboard** - Top tracks, artists, genres by time period
@@ -66,8 +66,8 @@ Plans:
   5. Spotify access tokens refresh silently in the background without user intervention
 **Plans**: 2 plans
 Plans:
-- [ ] 03-01-PLAN.md -- Settings extension, service schemas, and service helper module (PKCE, token ops, DB ops)
-- [ ] 03-02-PLAN.md -- Service router endpoints, SessionMiddleware, and integration tests
+- [x] 03-01-PLAN.md -- Settings extension, service schemas, and service helper module (PKCE, token ops, DB ops)
+- [x] 03-02-PLAN.md -- Service router endpoints, SessionMiddleware, and integration tests
 **UI hint**: yes
 
 ### Phase 4: BYOK Claude API Key Management
@@ -166,7 +166,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 |-------|----------------|--------|-----------|
 | 1. Infrastructure Foundation | 0/2 | Planning complete | - |
 | 2. User Accounts | 0/2 | Planning complete | - |
-| 3. Service Connections | 0/2 | Planning complete | - |
+| 3. Service Connections | 2/2 | Complete   | 2026-03-27 |
 | 4. BYOK Claude API Key Management | 0/0 | Not started | - |
 | 5. Taste Profile Dashboard | 0/0 | Not started | - |
 | 6. Listening Stats Dashboard | 0/0 | Not started | - |
