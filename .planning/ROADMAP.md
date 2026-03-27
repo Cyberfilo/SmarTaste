@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 5: Taste Profile Dashboard** - Single-service taste profile visualization using existing engine
 - [ ] **Phase 6: Listening Stats Dashboard** - Top tracks, artists, genres by time period
 - [x] **Phase 7: Recommendation Feed** - Personalized suggestions with explanations, feedback loop, discovery strategies, mood filtering (completed 2026-03-27)
-- [x] **Phase 8: Multi-Service Unification** - Data normalization, genre taxonomy mapping, cross-service deduplication, unified taste profile (completed 2026-03-27)
+- [ ] **Phase 8: Multi-Service Unification** - Data normalization, genre taxonomy mapping, cross-service deduplication, unified taste profile
 - [ ] **Phase 9: Claude Chat Integration** - Streaming chat with tool-use, conversational music exploration, conversation persistence
 - [ ] **Phase 10: Detail Views and Responsive Polish** - Scoring breakdown, audio feature visualization, responsive design
 - [ ] **Phase 11: UI Design & Frontend Shell** - Comprehensive UI/UX for entire webapp using ui-ux-pro-max skill
@@ -142,9 +142,10 @@ Plans:
   3. Genre taxonomies from both services are mapped to a shared canonical representation
   4. User with both services connected can view a unified taste profile that merges data from both
   5. Recommendations draw from both services' catalogs transparently
-**Plans**: 1 plan
+**Plans**: 2 plans
 Plans:
-- [x] 08-01-PLAN.md -- Genre normalization, track deduplication, unified taste profile, cross-service recommendations
+- [ ] 08-01-PLAN.md -- Genre mapping module (Spotify->canonical), track deduplication (ISRC + fuzzy), unit tests
+- [ ] 08-02-PLAN.md -- Unified TasteService and RecommendationService modes, integration tests (MSVC-01 through MSVC-04, TAST-05)
 
 ### Phase 9: Claude Chat Integration
 **Goal**: Users can have a streaming conversational experience with Claude that has full access to their music data and the recommendation engine
@@ -186,7 +187,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 5. Taste Profile Dashboard | 1/2 | In Progress|  |
 | 6. Listening Stats Dashboard | 0/2 | Planning complete | - |
 | 7. Recommendation Feed | 2/2 | Complete   | 2026-03-27 |
-| 8. Multi-Service Unification | 1/1 | Complete   | 2026-03-27 |
+| 8. Multi-Service Unification | 0/2 | Planning complete | - |
 | 9. Claude Chat Integration | 0/0 | Not started | - |
 | 10. Detail Views and Responsive Polish | 0/0 | Not started | - |
 | 11. UI Design & Frontend Shell | 0/0 | Not started | - |
