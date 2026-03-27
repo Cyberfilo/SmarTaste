@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-03-PLAN.md
-last_updated: "2026-03-27T20:43:13.957Z"
+stopped_at: Completed 11-04-PLAN.md
+last_updated: "2026-03-27T20:42:49.883Z"
 last_activity: 2026-03-27
 progress:
   total_phases: 11
@@ -65,7 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 07 P02 | 18 | 2 tasks | 4 files |
 | Phase 09 P02 | 7min | 1 tasks | 2 files |
 | Phase 09 P03 | 5min | 2 tasks | 3 files |
-| Phase 11 P03 | 5min | 2 tasks | 18 files |
+| Phase 11 P04 | 5min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -115,9 +115,9 @@ Recent decisions affecting current work:
 - [Phase 09]: System prompt dynamically queries service_connections and taste_profile_snapshots for user context
 - [Phase 09]: Plain StreamingResponse with manual SSE formatting for chat endpoint (no sse-starlette dependency)
 - [Phase 09]: Mock ChatService at class level with lambda for async generator returns in tests
-- [Phase 11]: Strategy selector: native select on mobile, segmented button group on md: breakpoint
-- [Phase 11]: Apple Music connect shows info toast for MusicKit JS requirement -- full integration needs Apple script tag
-- [Phase 11]: BYOK key input uses type=password with sk-ant-... placeholder for secure entry
+- [Phase 11]: SSE via fetch+ReadableStream (not EventSource) because backend uses POST for chat
+- [Phase 11]: Zustand for chat state (not TanStack Query) -- chat is interactive state, not cacheable
+- [Phase 11]: Lightweight inline markdown rendering without heavy library dependency
 
 ### Roadmap Evolution
 
@@ -136,6 +136,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-27T20:43:13.955Z
-Stopped at: Completed 11-03-PLAN.md
+Last session: 2026-03-27T20:42:49.881Z
+Stopped at: Completed 11-04-PLAN.md
 Resume file: None

@@ -214,7 +214,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 Plans:
 - [x] 11-01-PLAN.md -- Next.js 16 scaffold, Tailwind 4, shadcn/ui, Zustand, TanStack Query, auth pages (login/signup)
 - [ ] 11-02-PLAN.md -- Dashboard layout, taste profile visualizations, listening stats with period selector
-- [x] 11-03-PLAN.md -- Recommendations feed with filters/feedback/breakdown, settings page with services and BYOK
-- [ ] 11-04-PLAN.md -- Claude chat interface with SSE streaming, tool indicators, conversation history
+- [ ] 11-03-PLAN.md -- Recommendations feed with filters/feedback/breakdown, settings page with services and BYOK
+- [x] 11-04-PLAN.md -- Claude chat interface with SSE streaming, tool indicators, conversation history
 **UI hint**: yes
 **Skill note**: Use `/ui-ux-pro-max` skill during execution for design decisions, color palettes, typography, component styling

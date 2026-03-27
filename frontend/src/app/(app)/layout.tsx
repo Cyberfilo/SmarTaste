@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { useAuthStore } from "@/stores/auth-store";
 import { authApi } from "@/lib/api";
@@ -20,8 +20,10 @@ import {
  */
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
+  const pathname = usePathname();
   const { user, isLoading, isAuthenticated, checkAuth, clearUser } =
     useAuthStore();
+  const isChat = pathname === "/chat";
 
   useEffect(() => {
     checkAuth();
@@ -124,12 +126,12 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        {/* Page content */}
-        <main className="flex-1 p-4 pb-20 sm:p-6 lg:pb-6">{children}</main>
+        {/* Page content -- chat page manages its own padding and height */}
+        <main className={isChat ? "flex-1 overflow-hidden" : "flex-1 p-4 pb-20 sm:p-6 lg:pb-6"}>{children}</main>
       </div>
 
-      {/* Mobile bottom nav */}
-      <nav className="fixed bottom-0 left-0 right-0 flex items-center justify-around border-t border-border bg-card py-2 lg:hidden">
+      {/* Mobile bottom nav -- hidden on chat page which has its own input bar */}
+      <nav className={`fixed bottom-0 left-0 right-0 flex items-center justify-around border-t border-border bg-card py-2 lg:hidden ${isChat ? "hidden" : ""}`}>
         {navItems.map((item) => (
           <Link
             key={item.href}
