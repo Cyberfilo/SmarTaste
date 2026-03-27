@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.middleware.sessions import SessionMiddleware
 from starlette_csrf import CSRFMiddleware
 
 from musicmind.api.router import api_router
@@ -40,6 +41,7 @@ app.add_middleware(
     cookie_name="csrftoken",
     header_name="x-csrf-token",
 )
+app.add_middleware(SessionMiddleware, secret_key=_settings.jwt_secret_key)
 
 
 if __name__ == "__main__":
