@@ -53,8 +53,8 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **RECO-04**: Feedback drives adaptive weight optimization for future recommendations
 - [x] **RECO-05**: User can select a discovery strategy (similar artist, genre adjacent, editorial mining, chart filter)
 - [x] **RECO-06**: User can filter recommendations by mood (focus, energy, chill, melancholy, etc.)
-- [ ] **RECO-07**: User can view the full 7-dimension scoring breakdown for any recommendation
-- [ ] **RECO-08**: User can view a per-track audio feature visualization (radar chart: energy, danceability, valence, acousticness, tempo, instrumentalness)
+- [x] **RECO-07**: User can view the full 7-dimension scoring breakdown for any recommendation
+- [x] **RECO-08**: User can view a per-track audio feature visualization (radar chart: energy, danceability, valence, acousticness, tempo, instrumentalness)
 
 ### Claude Chat
 
@@ -153,8 +153,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RECO-04 | Phase 7 | Complete |
 | RECO-05 | Phase 7 | Complete |
 | RECO-06 | Phase 7 | Complete |
-| RECO-07 | Phase 10 | Pending |
-| RECO-08 | Phase 10 | Pending |
+| RECO-07 | Phase 10 | Complete |
+| RECO-08 | Phase 10 | Complete |
 | CHAT-01 | Phase 9 | Complete |
 | CHAT-02 | Phase 9 | Complete |
 | CHAT-03 | Phase 9 | Complete |

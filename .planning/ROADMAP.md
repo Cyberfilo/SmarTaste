@@ -172,7 +172,9 @@ Plans:
   1. User can view the full 7-dimension scoring breakdown for any recommendation (genre, audio, novelty, freshness, diversity, artist, staleness)
   2. User can view a per-track audio feature radar chart (energy, danceability, valence, acousticness, tempo, instrumentalness)
   3. All pages render correctly and are usable on both desktop and mobile screen sizes
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [x] 10-01-PLAN.md -- Scoring breakdown endpoint (RECO-07), audio features endpoint (RECO-08), integration tests
 **UI hint**: yes
 
 ## Progress
@@ -193,7 +195,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 7. Recommendation Feed | 2/2 | Complete   | 2026-03-27 |
 | 8. Multi-Service Unification | 0/2 | Planning complete | - |
 | 9. Claude Chat Integration | 0/3 | Planning complete | - |
-| 10. Detail Views and Responsive Polish | 0/0 | Not started | - |
+| 10. Detail Views and Responsive Polish | 1/1 | Complete | 2026-03-27 |
 | 11. UI Design & Frontend Shell | 0/0 | Not started | - |
 
 ### Phase 11: UI Design & Frontend Shell
