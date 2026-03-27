@@ -318,6 +318,33 @@ play_count_proxy = sa.Table(
     sa.PrimaryKeyConstraint("song_id", "user_id"),
 )
 
+chat_conversations = sa.Table(
+    "chat_conversations",
+    metadata,
+    sa.Column("id", sa.Text, primary_key=True),
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("title", sa.Text, nullable=False, server_default=""),
+    sa.Column("messages", sa.JSON, server_default="[]"),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 generated_playlists = sa.Table(
     "generated_playlists",
     metadata,
