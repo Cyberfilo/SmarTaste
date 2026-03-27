@@ -207,7 +207,7 @@ async def other_user_conversation(engine_and_tables: AsyncEngine) -> str:
 # ── Mock for ChatService.send_message ────────────────────────────────────────
 
 
-async def _mock_send_message_generator(*args: Any, **kwargs: Any) -> Any:
+async def _mock_sse_events():
     """Async generator that yields mock SSE events."""
     yield {"event": "conversation_id", "data": {"id": "mock-conv-id"}}
     yield {"event": "text", "data": {"text": "Hello! How can I help you?"}}
@@ -230,9 +230,7 @@ class TestChatMessageEndpoint:
             "musicmind.api.chat.router.ChatService"
         ) as MockChatService:
             instance = MockChatService.return_value
-            instance.send_message = AsyncMock(
-                return_value=_mock_send_message_generator()
-            )
+            instance.send_message = lambda *a, **kw: _mock_sse_events()
             resp = await _authenticated_post(
                 client,
                 "/api/chat/message",
@@ -266,9 +264,7 @@ class TestChatMessageEndpoint:
             "musicmind.api.chat.router.ChatService"
         ) as MockChatService:
             instance = MockChatService.return_value
-            instance.send_message = AsyncMock(
-                return_value=_mock_send_message_generator()
-            )
+            instance.send_message = lambda *a, **kw: _mock_sse_events()
             resp = await _authenticated_post(
                 client,
                 "/api/chat/message",
