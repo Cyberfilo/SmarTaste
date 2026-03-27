@@ -13,9 +13,9 @@ from musicmind.api.recommendations.schemas import (
     RecommendationsResponse,
 )
 from musicmind.api.recommendations.service import (
-    RecommendationService,
     VALID_MOODS,
     VALID_STRATEGIES,
+    RecommendationService,
 )
 from musicmind.auth.dependencies import get_current_user
 

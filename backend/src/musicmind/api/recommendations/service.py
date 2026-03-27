@@ -35,7 +35,11 @@ from musicmind.db.schema import (
 )
 from musicmind.engine.mood import MOOD_PROFILES, filter_candidates_by_mood
 from musicmind.engine.scorer import rank_candidates, score_candidate
-from musicmind.engine.weights import DEFAULT_WEIGHTS, MIN_FEEDBACK_FOR_OPTIMIZATION, optimize_weights
+from musicmind.engine.weights import (
+    DEFAULT_WEIGHTS,
+    MIN_FEEDBACK_FOR_OPTIMIZATION,
+    optimize_weights,
+)
 from musicmind.security.encryption import EncryptionService
 
 logger = logging.getLogger(__name__)
