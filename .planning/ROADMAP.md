@@ -112,8 +112,8 @@ Plans:
   4. Stats work correctly whether the user has one or both services connected
 **Plans**: 2 plans
 Plans:
-- [ ] 06-01-PLAN.md -- Stats schemas, time-range-parameterized fetchers, StatsService orchestration
-- [ ] 06-02-PLAN.md -- Stats router endpoints, API wiring, integration tests (STAT-01 through STAT-04)
+- [x] 06-01-PLAN.md -- Stats schemas, time-range-parameterized fetchers, StatsService orchestration
+- [x] 06-02-PLAN.md -- Stats router endpoints, API wiring, integration tests (STAT-01 through STAT-04)
 **UI hint**: yes
 
 ### Phase 7: Recommendation Feed
