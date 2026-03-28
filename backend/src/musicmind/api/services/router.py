@@ -202,9 +202,9 @@ async def apple_music_developer_token(
     settings = request.app.state.settings
 
     if (
-        settings.apple_team_id is None
-        or settings.apple_key_id is None
-        or settings.apple_private_key_path is None
+        not settings.apple_team_id
+        or not settings.apple_key_id
+        or not settings.apple_private_key_path
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

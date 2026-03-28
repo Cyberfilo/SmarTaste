@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings
 # Sandbox mode: when started with --sandbox, use preloaded defaults
 SANDBOX_MODE = os.environ.get("MUSICMIND_SANDBOX", "false").lower() == "true"
 
-_SANDBOX_FERNET_KEY = "ZmVybmV0LWtleS1mb3ItZGV2LW9ubHktbm90LWZvci1wcm9k"
+_SANDBOX_FERNET_KEY = "sAJgv89oolXMmdtREth-fgeK3GwYi5l2qbH7qIsLKJE="
 _SANDBOX_JWT_SECRET = "sandbox-jwt-secret-not-for-production"
 
 
