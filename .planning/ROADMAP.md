@@ -23,7 +23,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 9: Claude Chat Integration** - Streaming chat with tool-use, conversational music exploration, conversation persistence
 - [x] **Phase 10: Detail Views and Responsive Polish** - Scoring breakdown, audio feature visualization, responsive design (completed 2026-03-27)
 - [x] **Phase 11: UI Design & Frontend Shell** - Comprehensive UI/UX for entire webapp using ui-ux-pro-max skill (completed 2026-03-27)
-- [ ] **Phase 12: Multi-LLM Support** - LLM provider abstraction, OpenAI BYOK, tool converter, frontend model selector
+- [ ] **Phase 12: Multi-LLM Support** - OpenAI GPT-4o/4.1 alongside Claude, model switching, shared system prompt
 
 ## Phase Details
 
@@ -181,9 +181,9 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12
 
-Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Phase 3 (not Phase 5). Phases 5 and 6 could execute in parallel if desired. Phases 4 and 3 could also overlap since Phase 4 only needs user accounts.
+Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Phase 3 (not Phase 5). Phases 5 and 6 could execute in parallel if desired. Phases 4 and 3 could also overlap since Phase 4 only needs user accounts. Phase 12 depends on Phase 9.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -198,6 +198,7 @@ Note: Phase 4 depends only on Phase 2 (not Phase 3). Phase 6 depends only on Pha
 | 9. Claude Chat Integration | 0/3 | Planning complete | - |
 | 10. Detail Views and Responsive Polish | 0/1 | Complete    | 2026-03-27 |
 | 11. UI Design & Frontend Shell | 2/1 | Complete    | 2026-03-27 |
+| 12. Multi-LLM Support | 0/2 | Planning complete | - |
 
 ### Phase 11: UI Design & Frontend Shell
 
@@ -219,3 +220,19 @@ Plans:
 - [x] 11-04-PLAN.md -- Claude chat interface with SSE streaming, tool indicators, conversation history
 **UI hint**: yes
 **Skill note**: Use `/ui-ux-pro-max` skill during execution for design decisions, color palettes, typography, component styling
+
+### Phase 12: Multi-LLM Support
+
+**Goal:** Add OpenAI GPT-4o/GPT-4.1 as an alternative AI backend alongside Claude. Users can switch between Claude and ChatGPT in settings. Both models use a strong, music-domain-specific system prompt with full access to the MusicMind tool registry. BYOK key management extended for OpenAI API keys.
+**Depends on:** Phase 9 (Claude chat must exist to extend it)
+**Requirements**: CHAT-01 through CHAT-10 extended for multi-model, plus new OpenAI BYOK management
+**Success Criteria** (what must be TRUE):
+  1. User can store an OpenAI API key alongside their Anthropic key (both encrypted)
+  2. User can select which AI model to use (Claude or ChatGPT) in settings and per-conversation
+  3. Chat works with both Claude (tool_use) and OpenAI (function_calling) using the same tool registry
+  4. Both models receive a strong, music-domain-specific system prompt that describes MusicMind capabilities
+  5. Switching models mid-session preserves conversation history
+**Plans**: 2 plans
+Plans:
+- [ ] 12-01-PLAN.md -- LLM provider abstraction (ClaudeProvider + OpenAIProvider), tool converter, shared system prompt, OpenAI BYOK, ChatService refactor, tests
+- [ ] 12-02-PLAN.md -- Frontend OpenAI key manager, model selector in settings, per-conversation model override in chat, SSE model param
