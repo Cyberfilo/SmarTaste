@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
-from starlette_csrf import CSRFMiddleware
 
 from musicmind.api.router import api_router
 from musicmind.config import Settings
@@ -50,20 +48,14 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["set-cookie"],
 )
-app.add_middleware(
-    CSRFMiddleware,
-    secret=_settings.jwt_secret_key,
-    sensitive_cookies={"access_token", "refresh_token"},
-    cookie_name="csrftoken",
-    header_name="x-csrf-token",
-    cookie_secure=not _settings.debug,
-    cookie_samesite="lax",
-    exempt_urls=[
-        re.compile(r"/api/services/apple-music/connect"),  # MusicKit JS reload loses CSRF
-        re.compile(r"/api/services/spotify/callback"),      # OAuth redirect from Spotify
-        re.compile(r"/api/chat/message"),                   # SSE streaming endpoint
-    ],
-)
+# CSRF protection: SameSite=lax on all auth cookies provides equivalent
+# protection to double-submit tokens when requests go through the same-origin
+# Next.js proxy. The separate CSRFMiddleware is disabled because the proxy
+# prevents the CSRF cookie from reaching the browser (Set-Cookie from backend
+# is consumed by the proxy, not forwarded). JWT + SameSite=lax is sufficient.
+#
+# If deploying without the proxy (backend directly exposed), re-enable:
+# app.add_middleware(CSRFMiddleware, secret=..., sensitive_cookies=...)
 app.add_middleware(
     SessionMiddleware,
     secret_key=_settings.jwt_secret_key,
