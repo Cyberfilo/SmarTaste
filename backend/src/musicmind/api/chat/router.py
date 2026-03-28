@@ -75,6 +75,7 @@ async def send_message(
         user_id=user_id,
         conversation_id=body.conversation_id,
         message=body.message,
+        model=body.model,
     )
 
     return StreamingResponse(

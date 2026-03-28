@@ -279,7 +279,7 @@ class TestChatServiceTextResponse:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -315,7 +315,7 @@ class TestChatServiceTextResponse:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -349,7 +349,7 @@ class TestChatServiceTextResponse:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -403,11 +403,11 @@ class TestChatServiceToolUse:
 
         with (
             patch(
-                "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+                "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
                 return_value=mock_client,
             ),
             patch(
-                "musicmind.api.chat.service.TOOL_EXECUTORS",
+                "musicmind.api.chat.providers.base.TOOL_EXECUTORS",
                 {"get_taste_profile": mock_executor},
             ),
         ):
@@ -453,11 +453,11 @@ class TestChatServiceToolUse:
 
         with (
             patch(
-                "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+                "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
                 return_value=mock_client,
             ),
             patch(
-                "musicmind.api.chat.service.TOOL_EXECUTORS",
+                "musicmind.api.chat.providers.base.TOOL_EXECUTORS",
                 {"get_recommendations": mock_executor},
             ),
         ):
@@ -506,11 +506,11 @@ class TestChatServiceToolUse:
 
         with (
             patch(
-                "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+                "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
                 return_value=mock_client,
             ),
             patch(
-                "musicmind.api.chat.service.TOOL_EXECUTORS",
+                "musicmind.api.chat.providers.base.TOOL_EXECUTORS",
                 {"get_top_genres": mock_executor},
             ),
         ):
@@ -527,7 +527,8 @@ class TestChatServiceToolUse:
                 events.append(event)
 
         tool_start_count = sum(1 for e in events if e["event"] == "tool_start")
-        assert tool_start_count <= ChatService.MAX_TOOL_CALLS
+        from musicmind.api.chat.providers.base import MAX_TOOL_CALLS
+        assert tool_start_count <= MAX_TOOL_CALLS
         assert events[-1]["event"] == "done"
 
 
@@ -559,7 +560,7 @@ class TestChatServiceErrorHandling:
         )
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -602,7 +603,7 @@ class TestChatServiceErrorHandling:
         )
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -644,7 +645,7 @@ class TestChatServiceErrorHandling:
         )
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -722,7 +723,7 @@ class TestChatServiceConversationPersistence:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -769,7 +770,7 @@ class TestChatServiceConversationPersistence:
         long_message = "This is a really long message that should get truncated at fifty characters for the title"
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -812,7 +813,7 @@ class TestChatServiceConversationPersistence:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -872,7 +873,7 @@ class TestChatServiceConversationPersistence:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -931,7 +932,7 @@ class TestChatServiceContextWindow:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -982,7 +983,7 @@ class TestChatServiceSystemPrompt:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
@@ -1025,7 +1026,7 @@ class TestChatServiceSystemPrompt:
         mock_client.messages.stream = MagicMock(return_value=stream)
 
         with patch(
-            "musicmind.api.chat.service.anthropic.AsyncAnthropic",
+            "musicmind.api.chat.providers.claude.anthropic.AsyncAnthropic",
             return_value=mock_client,
         ):
             service = ChatService()
