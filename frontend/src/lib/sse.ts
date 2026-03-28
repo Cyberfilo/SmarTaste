@@ -13,6 +13,7 @@ import { API_URL } from "@/lib/api";
 export interface StreamChatParams {
   conversationId?: string;
   message: string;
+  model?: string;
 }
 
 export interface StreamChatCallbacks {
@@ -130,6 +131,9 @@ export async function streamChat(
   const body: Record<string, unknown> = { message: params.message };
   if (params.conversationId) {
     body.conversation_id = params.conversationId;
+  }
+  if (params.model) {
+    body.model = params.model;
   }
 
   let response: Response;

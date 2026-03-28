@@ -44,9 +44,11 @@ interface ChatState {
   isStreaming: boolean;
   activeTools: ActiveTool[];
   error: string | null;
+  selectedModel: string;
 
   // Actions
   sendMessage: (text: string) => void;
+  setSelectedModel: (model: string) => void;
   loadConversation: (id: string) => Promise<void>;
   newConversation: () => void;
   cancelStream: () => void;
@@ -55,14 +57,24 @@ interface ChatState {
 
 // ── Error code to user-friendly message mapping ────────
 
+/** Map provider model ID to the backend provider name ("claude" or "openai"). */
+function modelToProvider(model: string): string {
+  if (model.startsWith("gpt")) return "openai";
+  return "claude";
+}
+
 function mapErrorCode(code: string, fallback: string): string {
   switch (code) {
     case "key_expired":
-      return "Your Claude API key has expired. Update it in Settings.";
+      return "Your API key has expired. Update it in Settings.";
     case "rate_limited":
       return "Rate limit reached. Please wait a moment.";
     case "insufficient_balance":
-      return "Insufficient Anthropic account balance.";
+      return "Insufficient account balance. Check your provider dashboard.";
+    case "openai_key_missing":
+      return "Your OpenAI API key is missing. Add it in Settings.";
+    case "claude_key_missing":
+      return "Your Claude API key is missing. Add it in Settings.";
     case "internal":
     default:
       return fallback || "Something went wrong. Please try again.";
@@ -71,15 +83,28 @@ function mapErrorCode(code: string, fallback: string): string {
 
 // ── Zustand store ──────────────────────────────────────
 
+function getInitialModel(): string {
+  if (typeof window === "undefined") return "claude";
+  return localStorage.getItem("musicmind-preferred-model") || "claude";
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   conversationId: null,
   isStreaming: false,
   activeTools: [],
   error: null,
+  selectedModel: getInitialModel(),
+
+  setSelectedModel: (model: string) => {
+    set({ selectedModel: model });
+    if (typeof window !== "undefined") {
+      localStorage.setItem("musicmind-preferred-model", model);
+    }
+  },
 
   sendMessage: (text: string) => {
-    const { conversationId } = get();
+    const { conversationId, selectedModel } = get();
 
     // Append user message immediately
     const userMessage: ChatMessage = { role: "user", content: text };
@@ -99,6 +124,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       {
         conversationId: conversationId ?? undefined,
         message: text,
+        model: modelToProvider(selectedModel),
       },
       {
         onTextDelta: (delta: string) => {
