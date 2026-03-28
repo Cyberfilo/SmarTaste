@@ -120,6 +120,15 @@ async def spotify_connect(
     request.session["spotify_state"] = state
     request.session["spotify_user_id"] = current_user["user_id"]
 
+    # Store the frontend origin for post-callback redirect
+    origin = request.headers.get("origin") or request.headers.get("referer", "")
+    if origin:
+        # Strip path to get just the origin (e.g., "https://live.menghi.dev")
+        from urllib.parse import urlparse
+
+        parsed = urlparse(origin)
+        request.session["frontend_origin"] = f"{parsed.scheme}://{parsed.netloc}"
+
     url = build_spotify_authorize_url(
         settings.spotify_client_id,
         settings.spotify_redirect_uri,
@@ -131,7 +140,7 @@ async def spotify_connect(
 
 
 @router.get("/spotify/callback")
-async def spotify_callback(request: Request, code: str, state: str) -> dict:
+async def spotify_callback(request: Request, code: str, state: str):
     """Handle Spotify OAuth callback after user authorization.
 
     This endpoint does NOT use get_current_user. The browser is redirected here
@@ -191,7 +200,17 @@ async def spotify_callback(request: Request, code: str, state: str) -> dict:
     )
 
     logger.info("Spotify connected for user: %s", user_id)
-    return {"message": "Spotify connected", "service_user_id": service_user_id}
+
+    # Redirect back to the frontend settings page.
+    # The frontend runs on port 3000 (or behind a tunnel). Use the Origin/Referer
+    # from the initial connect request (stored in session), or default to localhost:3000.
+    from starlette.responses import RedirectResponse
+
+    frontend_url = request.session.pop("frontend_origin", "http://localhost:3000")
+    return RedirectResponse(
+        url=f"{frontend_url}/settings?service=spotify&status=connected",
+        status_code=302,
+    )
 
 
 @router.get("/apple-music/developer-token")

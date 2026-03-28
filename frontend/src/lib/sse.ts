@@ -69,20 +69,28 @@ function parseSSEEvents(
       try {
         const parsed = JSON.parse(currentData);
         switch (currentEvent) {
+          case "text":
           case "text_delta":
-            callbacks.onTextDelta(parsed.delta ?? "");
+            callbacks.onTextDelta(parsed.text ?? parsed.delta ?? "");
             break;
-          case "tool_use":
-            callbacks.onToolUse(parsed);
+          case "tool_start":
+            callbacks.onToolUse({ tool: parsed.tool, input: parsed.input ?? {} });
             break;
+          case "tool_end":
           case "tool_result":
-            callbacks.onToolResult(parsed);
+            callbacks.onToolResult({ tool: parsed.tool, output: parsed.result ?? parsed.output ?? "" });
+            break;
+          case "conversation_id":
+            callbacks.onComplete({ conversation_id: parsed.id ?? parsed.conversation_id });
             break;
           case "message_complete":
-            callbacks.onComplete(parsed);
+          case "done":
+            if (parsed.conversation_id || parsed.id) {
+              callbacks.onComplete({ conversation_id: parsed.conversation_id ?? parsed.id });
+            }
             break;
           case "error":
-            callbacks.onError(parsed);
+            callbacks.onError({ error: parsed.message ?? parsed.error ?? "Unknown error", code: parsed.code ?? "internal" });
             break;
         }
       } catch {

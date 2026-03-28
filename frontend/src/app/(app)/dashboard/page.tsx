@@ -17,6 +17,7 @@ import { useTasteProfile } from "@/hooks/use-taste";
 const tabs = [
   { href: "/dashboard/taste", label: "Taste Profile" },
   { href: "/dashboard/stats", label: "Listening Stats" },
+  { href: "/dashboard/recommendations", label: "Recommendations" },
 ];
 
 function SkeletonCard() {
