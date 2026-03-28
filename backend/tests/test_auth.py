@@ -332,21 +332,23 @@ async def test_cookie_security_flags(client: AsyncClient) -> None:
 
 
 async def test_csrf_protection(client: AsyncClient) -> None:
-    """POST with sensitive cookies but no CSRF token returns 403."""
-    # First, sign up a user to get sensitive cookies
+    """POST with sensitive cookies works without CSRF token.
+
+    CSRF middleware is disabled — SameSite=lax cookies behind the
+    same-origin Next.js proxy provide equivalent protection.
+    """
     signup_resp = await _signup_user(client)
     login_cookies = _extract_cookies(signup_resp)
 
-    # POST with sensitive cookies but WITHOUT CSRF token should be rejected
+    # POST without CSRF token should succeed (CSRF middleware disabled)
     logout_resp = await client.post(
         "/api/auth/logout",
         cookies={
             "access_token": login_cookies["access_token"],
             "refresh_token": login_cookies["refresh_token"],
         },
-        # No x-csrf-token header
     )
-    assert logout_resp.status_code == 403
+    assert logout_resp.status_code == 200
 
 
 async def test_csrf_with_valid_token(client: AsyncClient) -> None:

@@ -55,10 +55,12 @@ def test_settings_loads_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MUSICMIND_JWT_SECRET_KEY", "test-jwt-secret-for-settings-test")
     monkeypatch.delenv("MUSICMIND_DEBUG", raising=False)
     monkeypatch.delenv("MUSICMIND_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("MUSICMIND_SANDBOX", raising=False)
 
     from musicmind.config import Settings
 
-    settings = Settings()
+    # _env_file=None prevents loading .env which would override test env vars
+    settings = Settings(_env_file=None)
     assert settings.database_url == "postgresql+asyncpg://test:test@db:5432/testdb"
     assert settings.fernet_key  # non-empty
     assert settings.debug is False  # default
