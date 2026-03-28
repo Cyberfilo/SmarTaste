@@ -23,6 +23,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 9: Claude Chat Integration** - Streaming chat with tool-use, conversational music exploration, conversation persistence
 - [x] **Phase 10: Detail Views and Responsive Polish** - Scoring breakdown, audio feature visualization, responsive design (completed 2026-03-27)
 - [x] **Phase 11: UI Design & Frontend Shell** - Comprehensive UI/UX for entire webapp using ui-ux-pro-max skill (completed 2026-03-27)
+- [ ] **Phase 12: Multi-LLM Support** - LLM provider abstraction, OpenAI BYOK, tool converter, frontend model selector
 
 ## Phase Details
 
