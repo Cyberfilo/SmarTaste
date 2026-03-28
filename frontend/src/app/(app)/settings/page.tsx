@@ -12,9 +12,16 @@ export default function SettingsPage() {
   // Handle OAuth callbacks (Spotify redirects back here with query params)
   useEffect(() => {
     const service = searchParams.get("service");
-    const status = searchParams.get("status");
-    if (service && status === "connected") {
+    const connStatus = searchParams.get("status");
+    const detail = searchParams.get("detail");
+    if (service && connStatus === "connected") {
       toast.success(`${service.charAt(0).toUpperCase() + service.slice(1)} connected!`);
+    } else if (service && connStatus === "error") {
+      toast.error(`Failed to connect ${service}`, {
+        description: detail || "Please try again.",
+      });
+    }
+    if (service && connStatus) {
       // Clean the URL without causing a navigation
       window.history.replaceState({}, "", "/settings");
     }

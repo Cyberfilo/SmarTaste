@@ -55,8 +55,15 @@ app.add_middleware(
     sensitive_cookies={"access_token", "refresh_token"},
     cookie_name="csrftoken",
     header_name="x-csrf-token",
+    cookie_secure=not _settings.debug,
+    cookie_samesite="lax",
 )
-app.add_middleware(SessionMiddleware, secret_key=_settings.jwt_secret_key)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=_settings.jwt_secret_key,
+    same_site="lax",
+    https_only=not _settings.debug,
+)
 
 
 if __name__ == "__main__":

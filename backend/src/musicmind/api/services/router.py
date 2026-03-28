@@ -120,15 +120,6 @@ async def spotify_connect(
     request.session["spotify_state"] = state
     request.session["spotify_user_id"] = current_user["user_id"]
 
-    # Store the frontend origin for post-callback redirect
-    origin = request.headers.get("origin") or request.headers.get("referer", "")
-    if origin:
-        # Strip path to get just the origin (e.g., "https://live.menghi.dev")
-        from urllib.parse import urlparse
-
-        parsed = urlparse(origin)
-        request.session["frontend_origin"] = f"{parsed.scheme}://{parsed.netloc}"
-
     url = build_spotify_authorize_url(
         settings.spotify_client_id,
         settings.spotify_redirect_uri,
@@ -146,26 +137,33 @@ async def spotify_callback(request: Request, code: str, state: str):
     This endpoint does NOT use get_current_user. The browser is redirected here
     by Spotify -- there are no auth cookies on this request. The user_id is
     retrieved from the session (stored during connect).
+
+    On success: redirect to /settings?service=spotify&status=connected
+    On error: redirect to /settings?service=spotify&status=error&detail=...
     """
+    from starlette.responses import RedirectResponse
+    from urllib.parse import quote
+
     settings = request.app.state.settings
     engine = request.app.state.engine
     encryption = request.app.state.encryption
+    frontend_url = settings.frontend_url.rstrip("/")
+
+    def _error_redirect(detail: str) -> RedirectResponse:
+        return RedirectResponse(
+            url=f"{frontend_url}/settings?service=spotify&status=error&detail={quote(detail)}",
+            status_code=302,
+        )
 
     # Validate state parameter (CSRF protection for OAuth)
     stored_state = request.session.get("spotify_state")
     if not stored_state or stored_state != state:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid state",
-        )
+        return _error_redirect("Invalid state parameter. Please try connecting again.")
 
     code_verifier = request.session.get("spotify_code_verifier")
     user_id = request.session.get("spotify_user_id")
     if not code_verifier or not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing session data",
-        )
+        return _error_redirect("Session expired. Please try connecting again.")
 
     # Clear session keys after retrieval
     request.session.pop("spotify_code_verifier", None)
@@ -183,10 +181,11 @@ async def spotify_callback(request: Request, code: str, state: str):
         profile = await fetch_spotify_user_profile(access_token)
         service_user_id = profile["id"]
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Spotify error: {exc.response.text}",
-        ) from exc
+        logger.error("Spotify token exchange failed: %s", exc.response.text)
+        return _error_redirect("Spotify authorization failed. Please try again.")
+    except Exception as exc:
+        logger.error("Spotify callback error: %s", exc)
+        return _error_redirect("An unexpected error occurred. Please try again.")
 
     await upsert_service_connection(
         engine,
@@ -201,12 +200,10 @@ async def spotify_callback(request: Request, code: str, state: str):
 
     logger.info("Spotify connected for user: %s", user_id)
 
-    # Redirect back to the frontend settings page.
-    # The frontend runs on port 3000 (or behind a tunnel). Use the Origin/Referer
-    # from the initial connect request (stored in session), or default to localhost:3000.
+    # Redirect back to the frontend settings page using configured frontend URL
     from starlette.responses import RedirectResponse
 
-    frontend_url = request.session.pop("frontend_origin", "http://localhost:3000")
+    frontend_url = settings.frontend_url.rstrip("/")
     return RedirectResponse(
         url=f"{frontend_url}/settings?service=spotify&status=connected",
         status_code=302,
