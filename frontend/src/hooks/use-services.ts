@@ -49,6 +49,21 @@ export function useAppleMusicDeveloperToken() {
   });
 }
 
+export function useAppleMusicConnect() {
+  const queryClient = useQueryClient();
+
+  return useMutation<{ message: string }, Error, string>({
+    mutationFn: (musicUserToken: string) =>
+      apiFetch<{ message: string }>("/api/services/apple-music/connect", {
+        method: "POST",
+        body: JSON.stringify({ music_user_token: musicUserToken }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["services"] });
+    },
+  });
+}
+
 export function useDisconnectService() {
   const queryClient = useQueryClient();
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -21,9 +21,44 @@ import {
   useServices,
   useSpotifyConnect,
   useAppleMusicDeveloperToken,
+  useAppleMusicConnect,
   useDisconnectService,
   type ServiceConnection,
 } from "@/hooks/use-services";
+
+// ── MusicKit JS loader ──────────────────────────────────
+
+declare global {
+  interface Window {
+    MusicKit: {
+      configure: (config: {
+        developerToken: string;
+        app: { name: string; build: string };
+      }) => typeof window.MusicKit;
+      getInstance: () => {
+        authorize: () => Promise<string>;
+        isAuthorized: boolean;
+        musicUserToken: string;
+      };
+    };
+  }
+}
+
+function loadMusicKitJS(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (typeof window !== "undefined" && window.MusicKit) {
+      resolve();
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://js-cdn.music.apple.com/musickit/v3/musickit.js";
+    script.async = true;
+    script.crossOrigin = "anonymous";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load MusicKit JS"));
+    document.head.appendChild(script);
+  });
+}
 
 function statusBadge(status: string) {
   switch (status) {
@@ -133,7 +168,9 @@ export function ServiceConnections() {
   const { data, isLoading } = useServices();
   const spotifyConnect = useSpotifyConnect();
   const appleMusicToken = useAppleMusicDeveloperToken();
+  const appleMusicConnect = useAppleMusicConnect();
   const disconnectService = useDisconnectService();
+  const [appleMusicLoading, setAppleMusicLoading] = useState(false);
 
   const spotify = data?.services.find((s) => s.service === "spotify");
   const appleMusic = data?.services.find((s) => s.service === "apple_music");
@@ -141,7 +178,6 @@ export function ServiceConnections() {
   function handleSpotifyConnect() {
     spotifyConnect.mutate(undefined, {
       onSuccess: (res) => {
-        // Redirect to Spotify OAuth
         window.location.href = res.authorize_url;
       },
       onError: (err) => {
@@ -150,21 +186,55 @@ export function ServiceConnections() {
     });
   }
 
-  function handleAppleMusicConnect() {
-    // TODO: Full MusicKit JS integration requires loading Apple's MusicKit JS script
-    // and calling MusicKit.authorize() with the developer token.
-    // For now, fetch the developer token and show instructions.
-    appleMusicToken.mutate(undefined, {
-      onSuccess: () => {
-        toast.info(
-          "Apple Music connection requires MusicKit JS. Developer token obtained. Full integration coming soon."
-        );
-      },
-      onError: (err) => {
-        toast.error(err.message || "Failed to get Apple Music developer token");
-      },
-    });
-  }
+  const handleAppleMusicConnect = useCallback(async () => {
+    setAppleMusicLoading(true);
+    try {
+      // 1. Get developer token from backend
+      const tokenRes = await new Promise<{ developer_token: string }>(
+        (resolve, reject) => {
+          appleMusicToken.mutate(undefined, {
+            onSuccess: resolve,
+            onError: reject,
+          });
+        }
+      );
+
+      // 2. Load MusicKit JS
+      toast.info("Loading Apple Music...");
+      await loadMusicKitJS();
+
+      // 3. Configure MusicKit with our developer token
+      window.MusicKit.configure({
+        developerToken: tokenRes.developer_token,
+        app: { name: "MusicMind", build: "1.0.0" },
+      });
+
+      // 4. Authorize — opens Apple's sign-in popup
+      const music = window.MusicKit.getInstance();
+      const musicUserToken = await music.authorize();
+
+      if (!musicUserToken) {
+        toast.error("Apple Music authorization was cancelled");
+        return;
+      }
+
+      // 5. Send the user token to our backend
+      appleMusicConnect.mutate(musicUserToken, {
+        onSuccess: () => {
+          toast.success("Apple Music connected!");
+        },
+        onError: (err) => {
+          toast.error(err.message || "Failed to store Apple Music connection");
+        },
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to connect Apple Music";
+      toast.error(message);
+    } finally {
+      setAppleMusicLoading(false);
+    }
+  }, [appleMusicToken, appleMusicConnect]);
 
   function handleDisconnect(service: string) {
     disconnectService.mutate(service, {
@@ -244,7 +314,7 @@ export function ServiceConnections() {
           }
           onConnect={handleAppleMusicConnect}
           onDisconnect={handleDisconnect}
-          isConnecting={appleMusicToken.isPending}
+          isConnecting={appleMusicLoading}
         />
       </CardContent>
     </Card>
