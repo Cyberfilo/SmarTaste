@@ -111,10 +111,13 @@ function SidebarContent({
             {conversations.map((conv) => {
               const isActive = conv.id === activeConversationId;
               return (
-                <button
+                <div
                   key={conv.id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onSelectConversation(conv.id)}
-                  className={`group flex w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors ${
+                  onKeyDown={(e) => e.key === "Enter" && onSelectConversation(conv.id)}
+                  className={`group flex w-full cursor-pointer items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors ${
                     isActive
                       ? "bg-emerald-600/10 text-foreground"
                       : "text-muted-foreground hover:bg-zinc-800/50 hover:text-foreground"
@@ -147,7 +150,7 @@ function SidebarContent({
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
-                </button>
+                </div>
               );
             })}
           </div>
