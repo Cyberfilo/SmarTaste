@@ -208,17 +208,24 @@ export function BYOKKeyManager() {
               )}
             </div>
             {!isConfigured && (
-              <p className="text-xs text-muted-foreground">
-                Get your API key from{" "}
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  You need an Anthropic API key to use the AI chat. It takes 30 seconds:
+                </p>
                 <a
                   href="https://console.anthropic.com/settings/keys"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-primary hover:underline"
+                  className="inline-flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
                 >
-                  console.anthropic.com
+                  <Key className="h-3.5 w-3.5" />
+                  Get your API key from Anthropic Console
+                  <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none"><path d="M3.5 3h5.5v5.5M9 3L3 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
                 </a>
-              </p>
+                <p className="text-[10px] text-muted-foreground/70">
+                  Create a key → copy it → paste above → Save Key. You pay Anthropic directly per usage.
+                </p>
+              </div>
             )}
           </>
         )}
