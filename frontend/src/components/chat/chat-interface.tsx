@@ -11,7 +11,7 @@
  * subtle borders, smooth auto-scroll. No chatbot widget aesthetic."
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Settings, Sparkles, ChevronDown } from "lucide-react";
 import Link from "next/link";
 import { useChatStore } from "@/hooks/use-chat";
@@ -121,22 +121,31 @@ function ErrorBanner({
 function ChatModelSelector() {
   const selectedModel = useChatStore((s) => s.selectedModel);
   const setSelectedModel = useChatStore((s) => s.setSelectedModel);
+  const [open, setOpen] = useState(false);
 
   const currentModel = MODEL_OPTIONS.find((m) => m.id === selectedModel) ?? MODEL_OPTIONS[0];
 
   return (
-    <div className="relative group">
-      <button className="flex items-center gap-1.5 rounded-lg border border-border bg-zinc-800/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-emerald-500/30 hover:text-foreground">
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 rounded-lg border border-border bg-zinc-800/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-emerald-500/30 hover:text-foreground"
+      >
         <Sparkles className="h-3 w-3" />
         {currentModel.name}
-        <ChevronDown className="h-3 w-3" />
+        <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
-      {/* Dropdown panel (visible on hover/focus-within) */}
-      <div className="invisible absolute left-0 top-full z-50 mt-1 min-w-[200px] rounded-lg border border-border bg-popover p-1 shadow-lg group-focus-within:visible group-hover:visible">
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1 min-w-[200px] rounded-lg border border-border bg-popover p-1 shadow-lg">
         {MODEL_OPTIONS.map((model) => (
           <button
             key={model.id}
-            onClick={() => setSelectedModel(model.id)}
+            onClick={() => {
+              setSelectedModel(model.id);
+              setOpen(false);
+            }}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs transition-colors ${
               selectedModel === model.id
                 ? "bg-emerald-500/10 text-emerald-400"
@@ -154,7 +163,9 @@ function ChatModelSelector() {
             )}
           </button>
         ))}
-      </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
