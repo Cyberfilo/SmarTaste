@@ -553,8 +553,13 @@ class ChatService:
             top_artists = json.loads(top_artists)
 
         parts = [f"User's top genres: {', '.join(top_genres)}."]
-        if top_artists:
-            artist_names = top_artists[:3] if isinstance(top_artists, list) else []
+        if top_artists and isinstance(top_artists, list):
+            artist_names = []
+            for a in top_artists[:3]:
+                if isinstance(a, dict):
+                    artist_names.append(a.get("name", str(a)))
+                else:
+                    artist_names.append(str(a))
             if artist_names:
                 parts.append(f"Top artists: {', '.join(artist_names)}.")
 
