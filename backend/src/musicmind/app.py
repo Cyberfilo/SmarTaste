@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -57,6 +58,11 @@ app.add_middleware(
     header_name="x-csrf-token",
     cookie_secure=not _settings.debug,
     cookie_samesite="lax",
+    exempt_urls=[
+        re.compile(r"/api/services/apple-music/connect"),  # MusicKit JS reload loses CSRF
+        re.compile(r"/api/services/spotify/callback"),      # OAuth redirect from Spotify
+        re.compile(r"/api/chat/message"),                   # SSE streaming endpoint
+    ],
 )
 app.add_middleware(
     SessionMiddleware,
