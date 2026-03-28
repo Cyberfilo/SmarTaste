@@ -34,14 +34,17 @@ declare global {
       configure: (config: {
         developerToken: string;
         app: { name: string; build: string };
-      }) => typeof window.MusicKit;
-      getInstance: () => {
-        authorize: () => Promise<string>;
-        isAuthorized: boolean;
-        musicUserToken: string;
-      };
+      }) => Promise<MusicKitInstance>;
+      getInstance: () => MusicKitInstance;
     };
   }
+}
+
+interface MusicKitInstance {
+  authorize: () => Promise<string>;
+  unauthorize: () => Promise<void>;
+  isAuthorized: boolean;
+  musicUserToken: string;
 }
 
 function loadMusicKitJS(): Promise<void> {
@@ -50,13 +53,28 @@ function loadMusicKitJS(): Promise<void> {
       resolve();
       return;
     }
+    // MusicKit v3 fires a "musickitloaded" event when ready
+    const handler = () => {
+      document.removeEventListener("musickitloaded", handler);
+      resolve();
+    };
+    document.addEventListener("musickitloaded", handler);
+
     const script = document.createElement("script");
     script.src = "https://js-cdn.music.apple.com/musickit/v3/musickit.js";
     script.async = true;
     script.crossOrigin = "anonymous";
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Failed to load MusicKit JS"));
+    script.onerror = () => {
+      document.removeEventListener("musickitloaded", handler);
+      reject(new Error("Failed to load MusicKit JS"));
+    };
     document.head.appendChild(script);
+
+    // Timeout after 15s
+    setTimeout(() => {
+      document.removeEventListener("musickitloaded", handler);
+      if (!window.MusicKit) reject(new Error("MusicKit JS load timeout"));
+    }, 15000);
   });
 }
 
@@ -203,14 +221,13 @@ export function ServiceConnections() {
       toast.info("Loading Apple Music...");
       await loadMusicKitJS();
 
-      // 3. Configure MusicKit with our developer token
-      window.MusicKit.configure({
+      // 3. Configure MusicKit with our developer token (v3 returns a promise)
+      const music = await window.MusicKit.configure({
         developerToken: tokenRes.developer_token,
         app: { name: "MusicMind", build: "1.0.0" },
       });
 
       // 4. Authorize — opens Apple's sign-in popup
-      const music = window.MusicKit.getInstance();
       const musicUserToken = await music.authorize();
 
       if (!musicUserToken) {
