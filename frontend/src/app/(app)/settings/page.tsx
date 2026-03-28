@@ -5,6 +5,8 @@ import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import { ServiceConnections } from "@/components/settings/service-connections";
 import { BYOKKeyManager } from "@/components/settings/byok-key-manager";
+import { ModelSelector } from "@/components/settings/model-selector";
+import { OpenAIKeyManager } from "@/components/settings/openai-key-manager";
 
 export default function SettingsPage() {
   const searchParams = useSearchParams();
@@ -37,6 +39,8 @@ export default function SettingsPage() {
       </div>
       <ServiceConnections />
       <BYOKKeyManager />
+      <ModelSelector />
+      <OpenAIKeyManager />
     </div>
   );
 }
