@@ -42,7 +42,11 @@ app.include_router(api_router)
 
 # CORS — allow frontend origins to make credentialed requests
 # Default localhost origins + any extra from MUSICMIND_CORS_ORIGINS env var
-_cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+_cors_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://music.menghi.dev",
+]
 if _settings.cors_origins:
     _cors_origins.extend(
         origin.strip() for origin in _settings.cors_origins.split(",") if origin.strip()

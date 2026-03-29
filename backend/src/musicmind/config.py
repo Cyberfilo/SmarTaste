@@ -36,8 +36,8 @@ class Settings(BaseSettings):
     spotify_client_id: str | None = None
     spotify_client_secret: str | None = None
     # Redirect URI MUST go through the frontend proxy (same domain as session cookie).
-    # For tunnel: https://live.menghi.dev/api/services/spotify/callback
-    # For local: http://localhost:3000/api/services/spotify/callback
+    # Production: https://music.menghi.dev/api/services/spotify/callback
+    # Local: http://localhost:3000/api/services/spotify/callback
     spotify_redirect_uri: str = "http://localhost:3000/api/services/spotify/callback"
 
     # Frontend URL for redirects after OAuth callbacks

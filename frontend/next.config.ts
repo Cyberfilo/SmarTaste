@@ -1,16 +1,19 @@
 import type { NextConfig } from "next";
 
+// Backend URL: defaults to localhost for dev, set BACKEND_URL in Vercel for production.
+const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
+
 const nextConfig: NextConfig = {
-  allowedDevOrigins: ["live.menghi.dev"],
+  allowedDevOrigins: ["live.menghi.dev", "music.menghi.dev"],
   async rewrites() {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:8000/api/:path*",
+        destination: `${backendUrl}/api/:path*`,
       },
       {
         source: "/health",
-        destination: "http://localhost:8000/health",
+        destination: `${backendUrl}/health`,
       },
     ];
   },
