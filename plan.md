@@ -57,7 +57,54 @@ Phase 10 (Last.fm) is independent and can slot in anywhere.
 - Created chat_messages table (migration 007) with normalized writes + JSON blob backward compat
 - 287 tests passing (28 pre-existing uuid7 failures excluded — Python 3.11 issue)
 
+### Phase 5 — Essentia Audio Pipeline ✅ (b84b379)
+- Created engine/audio/ package: extractor.py, cache.py, models.py
+- ExtractedFeatures with 11 scalar features + 128-dim Discogs-EffNet embedding
+- embedding_cosine_similarity() + combined_audio_similarity() (70% embedding + 30% scalar)
+- New audio_embeddings table (migration 008)
+- Graceful degradation when essentia unavailable
+
+### Phase 6 — Sequential Session Model ✅ (be98bb7)
+- ListeningSession: exponentially-weighted average of last 20 embeddings (α=0.85)
+- SessionManager: in-memory store with 2hr TTL
+- session_similarity() for candidate-context cosine similarity
+- POST/GET/DELETE /api/session endpoints
+
+### Phase 7 — Music Knowledge Graph ✅ (a4dce66)
+- MusicBrainz API integration: search, relations, genre tags
+- kg_artists and kg_relationships tables
+- Node2Vec biased random walks (p=1, q=0.5, 80-step, 10 walks)
+- 128-dim artist embeddings via co-occurrence averaging
+
+### Phase 8 — Contextual Bandit ✅ (a85d96a)
+- Thompson Sampling with Beta(α,β) per (user, context) pair
+- 24 context buckets: 4 time × 2 day × 3 session_length
+- sample_exploration_weight() → diversity range [0.02, 0.20]
+- DB-backed arm state with decay (0.995) for adaptation
+
+### Phase 9 — CLAP Mood Embeddings ✅ (b82f141)
+- Text-to-audio cosine similarity via msclap (when available)
+- 6 pre-computed mood descriptions with lazy embedding cache
+- Natural language mood queries supported
+- Graceful fallback to categorical mood system
+
+### Phase 10 — Last.fm Tag Enrichment ✅ (c7adcd4)
+- Last.fm API client with 5 req/sec rate limiting
+- Tag cache (lastfm_tags_cache table) for persistence
+- tag_jaccard_similarity() with weighted min/max overlap
+- combined_genre_similarity(): 70% embedding + 30% Last.fm Jaccard
+
+**Test results**: 352 passed, 0 failures (28 pre-existing uuid7 excluded)
+**New tests added**: 66 across 6 test files
+
 ## Decisions Log
 - **chat_messages not in DATA_TABLE_NAMES**: chat_messages has conversation_id FK (not user_id directly), so excluded from test_user_id_on_all_data_tables
 - **Rate limit key**: Uses authenticated user_id when available, falls back to IP for unauthenticated endpoints
 - **Background rebuild status**: In-memory dict (not DB) — acceptable for single-instance deployment targeting small friend group
+- **Essentia graceful degradation**: extractor returns None when essentia not installed; combined_audio_similarity falls back to scalar-only
+- **Session storage**: In-memory dict, not DB — sessions are ephemeral by design (2hr TTL); per-process scope acceptable for small user base
+- **Node2Vec simplified**: Uses co-occurrence averaging instead of full Word2Vec — adequate for graphs under 500 nodes
+- **Bandit decay**: 0.995 per update prevents early observations from permanently dominating; allows weight to adapt to changing preferences
+- **CLAP lazy loading**: Model loaded on first use, not at startup — avoids slowing boot when CLAP unused
+- **Last.fm rate limit**: 200ms sleep between requests (5 req/sec) with cache-first pattern to minimize API calls
+- **kg_artists/kg_relationships global**: Not user-scoped — MusicBrainz data is universal; saves storage and API calls across users
