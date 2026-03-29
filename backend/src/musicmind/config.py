@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Frontend URL for redirects after OAuth callbacks
     frontend_url: str = "http://localhost:3000"
 
+    # Additional CORS origins (comma-separated), merged with default localhost origins
+    cors_origins: str = ""
+
     # Apple Music
     apple_team_id: str | None = None
     apple_key_id: str | None = None

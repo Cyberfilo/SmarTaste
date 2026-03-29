@@ -36,13 +36,15 @@ app = FastAPI(title="MusicMind", version="0.1.0", lifespan=lifespan)
 app.include_router(api_router)
 
 # CORS — allow frontend origins to make credentialed requests
+# Default localhost origins + any extra from MUSICMIND_CORS_ORIGINS env var
+_cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+if _settings.cors_origins:
+    _cors_origins.extend(
+        origin.strip() for origin in _settings.cors_origins.split(",") if origin.strip()
+    )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://live.menghi.dev",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

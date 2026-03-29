@@ -176,7 +176,7 @@ song_metadata_cache = sa.Table(
 artist_cache = sa.Table(
     "artist_cache",
     metadata,
-    sa.Column("artist_id", sa.Text, primary_key=True),
+    sa.Column("artist_id", sa.Text, nullable=False),
     sa.Column(
         "user_id",
         sa.Text,
@@ -194,6 +194,7 @@ artist_cache = sa.Table(
         server_default=sa.func.now(),
     ),
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
+    sa.PrimaryKeyConstraint("artist_id", "user_id"),
 )
 
 taste_profile_snapshots = sa.Table(
@@ -250,7 +251,7 @@ recommendation_feedback = sa.Table(
 audio_features_cache = sa.Table(
     "audio_features_cache",
     metadata,
-    sa.Column("catalog_id", sa.Text, primary_key=True),
+    sa.Column("catalog_id", sa.Text, nullable=False),
     sa.Column(
         "user_id",
         sa.Text,
@@ -270,12 +271,13 @@ audio_features_cache = sa.Table(
         nullable=False,
         server_default=sa.func.now(),
     ),
+    sa.PrimaryKeyConstraint("catalog_id", "user_id"),
 )
 
 sound_classification_cache = sa.Table(
     "sound_classification_cache",
     metadata,
-    sa.Column("catalog_id", sa.Text, primary_key=True),
+    sa.Column("catalog_id", sa.Text, nullable=False),
     sa.Column(
         "user_id",
         sa.Text,
@@ -290,6 +292,7 @@ sound_classification_cache = sa.Table(
         server_default=sa.func.now(),
     ),
     sa.Column("analyzer_version", sa.Text, server_default=""),
+    sa.PrimaryKeyConstraint("catalog_id", "user_id"),
 )
 
 play_count_proxy = sa.Table(
