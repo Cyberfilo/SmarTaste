@@ -114,6 +114,49 @@ def audio_feature_similarity(
     return float(dot / (norm_a * norm_b))
 
 
+def embedding_cosine_similarity(
+    embedding_a: list[float] | None,
+    embedding_b: list[float] | None,
+) -> float:
+    """Cosine similarity between two audio embeddings (128-dim).
+
+    Primary similarity metric when Discogs-EffNet embeddings are available.
+    Returns 0.5 (neutral) if either embedding is None or mismatched length.
+    """
+    if not embedding_a or not embedding_b:
+        return 0.5
+    if len(embedding_a) != len(embedding_b):
+        return 0.5
+
+    a = np.array(embedding_a)
+    b = np.array(embedding_b)
+    norm_a = float(np.linalg.norm(a))
+    norm_b = float(np.linalg.norm(b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.5
+    return float(np.dot(a, b) / (norm_a * norm_b))
+
+
+def combined_audio_similarity(
+    features_a: dict[str, float] | None,
+    features_b: dict[str, float] | None,
+    embedding_a: list[float] | None = None,
+    embedding_b: list[float] | None = None,
+) -> float:
+    """Combined audio similarity: embeddings primary, scalar fallback.
+
+    When embeddings are available, uses 70% embedding cosine + 30% scalar.
+    Falls back to 100% scalar features when embeddings are absent.
+    """
+    scalar_sim = audio_feature_similarity(features_a, features_b)
+
+    if embedding_a and embedding_b:
+        embed_sim = embedding_cosine_similarity(embedding_a, embedding_b)
+        return 0.7 * embed_sim + 0.3 * scalar_sim
+
+    return scalar_sim
+
+
 def classification_similarity(
     labels_a: dict[str, float] | None,
     labels_b: dict[str, float] | None,

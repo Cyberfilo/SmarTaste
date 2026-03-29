@@ -370,6 +370,104 @@ chat_messages = sa.Table(
     ),
 )
 
+audio_embeddings = sa.Table(
+    "audio_embeddings",
+    metadata,
+    sa.Column("catalog_id", sa.Text, nullable=False),
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("embedding", sa.JSON, nullable=False, server_default="[]"),
+    sa.Column("isrc", sa.Text, nullable=True),
+    sa.Column("model_version", sa.Text, server_default="discogs-effnet-bs64"),
+    sa.Column(
+        "analyzed_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.PrimaryKeyConstraint("catalog_id", "user_id"),
+)
+
+# ── Knowledge Graph Tables ─────────────────────────────────────────────────
+
+kg_artists = sa.Table(
+    "kg_artists",
+    metadata,
+    sa.Column("mbid", sa.Text, primary_key=True),
+    sa.Column("name", sa.Text, nullable=False),
+    sa.Column("disambiguation", sa.Text, server_default=""),
+    sa.Column("genres", sa.JSON, server_default="[]"),
+    sa.Column("embedding", sa.JSON, nullable=True),
+    sa.Column(
+        "fetched_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
+kg_relationships = sa.Table(
+    "kg_relationships",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("source_mbid", sa.Text, nullable=False, index=True),
+    sa.Column("target_mbid", sa.Text, nullable=False, index=True),
+    sa.Column("relation_type", sa.Text, nullable=False),
+    sa.Column("weight", sa.Float, server_default="1.0"),
+    sa.Column(
+        "fetched_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
+# ── Bandit State Table ─────────────────────────────────────────────────────
+
+bandit_arms = sa.Table(
+    "bandit_arms",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("context_key", sa.Text, nullable=False),
+    sa.Column("alpha", sa.Float, nullable=False, server_default="1.0"),
+    sa.Column("beta", sa.Float, nullable=False, server_default="1.0"),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.UniqueConstraint("user_id", "context_key", name="uq_bandit_user_context"),
+)
+
+# ── Last.fm Tags Cache ─────────────────────────────────────────────────────
+
+lastfm_tags_cache = sa.Table(
+    "lastfm_tags_cache",
+    metadata,
+    sa.Column("entity_type", sa.Text, nullable=False),
+    sa.Column("entity_id", sa.Text, nullable=False),
+    sa.Column("tags", sa.JSON, nullable=False, server_default="{}"),
+    sa.Column(
+        "fetched_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.PrimaryKeyConstraint("entity_type", "entity_id"),
+)
+
 generated_playlists = sa.Table(
     "generated_playlists",
     metadata,
