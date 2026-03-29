@@ -17,5 +17,5 @@ RUN uv sync --frozen --no-dev
 # Expose port
 EXPOSE 8000
 
-# Run migrations then start server
-CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn musicmind.app:app --host 0.0.0.0 --port 8000"]
+# Run migrations (tolerate failure so the server still starts) then start server
+CMD ["sh", "-c", "uv run alembic upgrade head || echo 'WARNING: migrations failed, starting anyway'; uv run uvicorn musicmind.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
