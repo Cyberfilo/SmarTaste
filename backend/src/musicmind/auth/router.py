@@ -20,6 +20,7 @@ from musicmind.auth.service import (
     set_auth_cookies,
     verify_password,
 )
+from musicmind.api.rate_limit import AUTH_LIMIT, limiter
 from musicmind.db.schema import refresh_tokens, users
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
+@limiter.limit(AUTH_LIMIT)
 async def signup(request: Request, response: Response, body: SignupRequest) -> dict:
     """Register a new user account."""
     engine = request.app.state.engine
@@ -77,6 +79,7 @@ async def signup(request: Request, response: Response, body: SignupRequest) -> d
 
 
 @router.post("/login")
+@limiter.limit(AUTH_LIMIT)
 async def login(request: Request, response: Response, body: LoginRequest) -> dict:
     """Authenticate with email and password."""
     engine = request.app.state.engine

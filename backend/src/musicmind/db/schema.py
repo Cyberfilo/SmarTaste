@@ -348,6 +348,28 @@ chat_conversations = sa.Table(
     ),
 )
 
+chat_messages = sa.Table(
+    "chat_messages",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column(
+        "conversation_id",
+        sa.Text,
+        sa.ForeignKey("chat_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("role", sa.Text, nullable=False),
+    sa.Column("content", sa.Text, nullable=False, server_default=""),
+    sa.Column("tool_calls", sa.JSON, nullable=True),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 generated_playlists = sa.Table(
     "generated_playlists",
     metadata,
