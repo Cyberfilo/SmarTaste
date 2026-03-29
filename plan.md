@@ -34,7 +34,30 @@ Phase 10 (Last.fm) is independent and can slot in anywhere.
 - Profile builder: temporal decay, regional genre prioritization, Shannon entropy familiarity
 
 ## Phase Progress
-[Claude updates this section after each phase]
+
+### Phase 1 — Critical Bug Fixes ✅ (af14182)
+- Fixed composite PKs for artist_cache, audio_features_cache, sound_classification_cache (migration 006)
+- Merged auth transactions into atomic blocks (signup: 2→1, login: 2→1, refresh: 4→1)
+- Fixed SSE parser falsy check → boolean flag
+- Made CORS configurable via MUSICMIND_CORS_ORIGINS env var
+
+### Phase 2 — Performance ✅ (4fa3fbc)
+- Rewrote rank_candidates: precompute base scores, greedy MMR only recomputes diversity penalty
+- Built staleness index for O(1) lookup instead of O(n) scan
+- Rewrote weight optimizer with real coordinate descent using stored breakdowns + early stopping
+
+### Phase 3 — Type Safety ✅ (dba3ab2)
+- Created engine/models.py: Candidate, ScoreBreakdown, ScoredCandidate, UserProfile, ScoringWeights, AudioFeatures
+- Added 12 model tests + 12 performance tests
+- Typed models work alongside existing dict interface (from_dict/to_dict roundtrip)
+
+### Phase 4 — Infrastructure ✅ (b85553b)
+- Added slowapi rate limiting: auth 5/min, chat 20/min, recommendations 30/min
+- Added POST /api/taste/profile/refresh (202) + GET /api/taste/profile/status for background rebuilds
+- Created chat_messages table (migration 007) with normalized writes + JSON blob backward compat
+- 287 tests passing (28 pre-existing uuid7 failures excluded — Python 3.11 issue)
 
 ## Decisions Log
-[Record architectural decisions here with rationale]
+- **chat_messages not in DATA_TABLE_NAMES**: chat_messages has conversation_id FK (not user_id directly), so excluded from test_user_id_on_all_data_tables
+- **Rate limit key**: Uses authenticated user_id when available, falls back to IP for unauthenticated endpoints
+- **Background rebuild status**: In-memory dict (not DB) — acceptable for single-instance deployment targeting small friend group

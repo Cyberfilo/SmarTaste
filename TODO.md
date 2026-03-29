@@ -1,26 +1,26 @@
 # MusicMind Improvement Sprint — Task Board
 
-## Phase 1: Critical Bug Fixes 🔴
-- [ ] 1.1 Fix artist_cache PK — add user_id to primary key (currently artist_id only, two users overwrite each other)
-- [ ] 1.2 Fix audio_features_cache and sound_classification_cache PKs — same user_id missing from composite key
-- [ ] 1.3 Fix auth transaction safety — signup has 2 separate DB transactions, login has 2, refresh has 4. Wrap each in a single atomic transaction
-- [ ] 1.4 Fix SSE parser edge case — sse.ts drops events with empty data fields (currentData falsy check on line 68)
-- [ ] 1.5 Make CORS configurable — replace hardcoded live.menghi.dev with env var (app.py:41-45)
+## Phase 1: Critical Bug Fixes 🔴 ✅
+- [x] 1.1 Fix artist_cache PK — add user_id to primary key (currently artist_id only, two users overwrite each other)
+- [x] 1.2 Fix audio_features_cache and sound_classification_cache PKs — same user_id missing from composite key
+- [x] 1.3 Fix auth transaction safety — signup has 2 separate DB transactions, login has 2, refresh has 4. Wrap each in a single atomic transaction
+- [x] 1.4 Fix SSE parser edge case — sse.ts drops events with empty data fields (currentData falsy check on line 68)
+- [x] 1.5 Make CORS configurable — replace hardcoded live.menghi.dev with env var (app.py:41-45)
 
-## Phase 2: Performance Fixes 🟠
-- [ ] 2.1 Fix rank_candidates O(n²×m) — precompute scores, only recompute MMR penalty per iteration. Add benchmark test (500 candidates, count=20, <500ms)
-- [ ] 2.2 Fix _compute_staleness linear scan — convert recent_recommendations to a set for O(1) lookup
-- [ ] 2.3 Fix weights.py optimizer — current "coordinate descent" uses arbitrary linear multiplier, not real optimization. Replace with actual coordinate descent (perturb weights, re-score, keep improvement) or Bayesian update
+## Phase 2: Performance Fixes 🟠 ✅
+- [x] 2.1 Fix rank_candidates O(n²×m) — precompute scores, only recompute MMR penalty per iteration. Add benchmark test (500 candidates, count=20, <500ms)
+- [x] 2.2 Fix _compute_staleness linear scan — convert recent_recommendations to a set for O(1) lookup
+- [x] 2.3 Fix weights.py optimizer — current "coordinate descent" uses arbitrary linear multiplier, not real optimization. Replace with actual coordinate descent (perturb weights, re-score, keep improvement) or Bayesian update
 
-## Phase 3: Type Safety 🟡
-- [ ] 3.1 Create engine/models.py — Candidate, ScoredCandidate, UserProfile, ScoringWeights dataclasses/Pydantic models
-- [ ] 3.2 Refactor scorer.py, profile.py, similarity.py to use typed models instead of dict[str, Any]
-- [ ] 3.3 Run full test suite, fix any regressions
+## Phase 3: Type Safety 🟡 ✅
+- [x] 3.1 Create engine/models.py — Candidate, ScoredCandidate, UserProfile, ScoringWeights dataclasses/Pydantic models
+- [x] 3.2 Refactor scorer.py, profile.py, similarity.py to use typed models instead of dict[str, Any]
+- [x] 3.3 Run full test suite, fix any regressions
 
-## Phase 4: Infrastructure Hardening 🟡
-- [ ] 4.1 Add rate limiting (slowapi) — signup/login 5/min per IP, recommendations 30/min per user, chat 20/min per user
-- [ ] 4.2 Background tasks — move Spotify token refresh, taste profile rebuild, library sync to FastAPI BackgroundTasks. Return 202 + task ID, add profile_status field
-- [ ] 4.3 Normalize chat storage — create chat_messages table (id, conversation_id FK, role, content, tool_calls, created_at), migrate JSON blobs, keep backward compat
+## Phase 4: Infrastructure Hardening 🟡 ✅
+- [x] 4.1 Add rate limiting (slowapi) — signup/login 5/min per IP, recommendations 30/min per user, chat 20/min per user
+- [x] 4.2 Background tasks — move Spotify token refresh, taste profile rebuild, library sync to FastAPI BackgroundTasks. Return 202 + task ID, add profile_status field
+- [x] 4.3 Normalize chat storage — create chat_messages table (id, conversation_id FK, role, content, tool_calls, created_at), migrate JSON blobs, keep backward compat
 
 ## Phase 5: Essentia Audio Pipeline 🔵
 - [ ] 5.1 Build engine/audio/ package — extractor.py (download Apple Music 30s preview → Essentia analysis), cache.py (ISRC-keyed storage), models.py
@@ -56,7 +56,10 @@
 - [ ] 10.2 Integrate as secondary genre signal: 70% embedding similarity + 30% Last.fm Jaccard tag overlap
 
 ## Completed
-[empty]
+- Phase 1: Critical bug fixes (composite PKs, auth transactions, SSE parser, CORS) — af14182
+- Phase 2: Performance (scorer O(n²)→O(n), staleness O(1), weight optimizer) — 4fa3fbc
+- Phase 3: Typed engine models (Candidate, ScoredCandidate, UserProfile, etc.) — dba3ab2
+- Phase 4: Infrastructure (rate limiting, background tasks, chat normalization) — b85553b
 
 ## Blocked
 [empty]
