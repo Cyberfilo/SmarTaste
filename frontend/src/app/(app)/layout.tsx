@@ -63,9 +63,12 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen flex-col lg:flex-row">
       {/* Desktop sidebar */}
       <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 border-r border-border bg-card">
-        <div className="flex h-16 items-center px-6 border-b border-border">
-          <Link href="/dashboard" className="text-xl font-bold tracking-tight">
-            <span className="text-emerald-500">Smar</span>Taste
+        <div className="flex h-16 items-center gap-2.5 px-6 border-b border-border">
+          <Link href="/dashboard" className="flex items-center gap-2.5">
+            <img src="/logo-white.svg" alt="SmarTaste" className="h-7 w-7" />
+            <span className="text-xl font-bold tracking-tight" style={{ fontFamily: "var(--font-heading)" }}>
+              <span className="text-purple-500">Smar</span>Taste
+            </span>
           </Link>
         </div>
         <nav className="flex-1 space-y-1 px-3 py-4">
@@ -109,8 +112,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <div className="flex flex-1 flex-col lg:pl-64">
         {/* Mobile top bar */}
         <header className="flex h-14 items-center justify-between border-b border-border px-4 lg:hidden">
-          <Link href="/dashboard" className="text-lg font-bold tracking-tight">
-            <span className="text-emerald-500">Smar</span>Taste
+          <Link href="/dashboard" className="flex items-center gap-2">
+            <img src="/logo-white.svg" alt="SmarTaste" className="h-6 w-6" />
+            <span className="text-lg font-bold tracking-tight" style={{ fontFamily: "var(--font-heading)" }}>
+              <span className="text-purple-500">Smar</span>Taste
+            </span>
           </Link>
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">

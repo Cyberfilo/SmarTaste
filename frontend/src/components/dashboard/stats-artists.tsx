@@ -101,7 +101,7 @@ export function StatsArtists({ period }: StatsArtistsProps) {
                     {artist.genres.slice(0, 3).map((genre) => (
                       <span
                         key={genre}
-                        className="inline-block rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-400"
+                        className="inline-block rounded-full bg-purple-500/10 px-2 py-0.5 text-xs text-purple-400"
                       >
                         {genre}
                       </span>

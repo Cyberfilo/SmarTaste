@@ -42,7 +42,7 @@ export function ToolActivityIndicator({
   return (
     <div className="flex w-full justify-center px-4 py-2">
       <div className="flex items-center gap-2 rounded-full bg-zinc-800/60 px-4 py-2">
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-500" />
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-purple-500" />
         <span className="text-xs text-muted-foreground">
           {activeTools.length === 1
             ? getToolLabel(activeTools[0].tool)

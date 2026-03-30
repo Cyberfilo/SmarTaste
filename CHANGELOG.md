@@ -8,6 +8,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Synesthesia visual identity** — new color palette (deep purple backgrounds, electric violet primary, magenta energy, coral warmth, mint freshness), Sora Bold headings + DM Sans body typography, logo integration in sidebar/header/auth. Replaces the emerald theme entirely.
 - **Audio enrichment pipeline** — progressive background enrichment from free external APIs:
   - Deezer (ISRC-native, free) for BPM/tempo
   - ReccoBeats (Spotify ID, free) for energy, danceability, valence, acousticness

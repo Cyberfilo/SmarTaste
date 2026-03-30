@@ -49,7 +49,7 @@ export default function SignupPage() {
   }
 
   return (
-    <Card className="border-border/50 bg-card/80 shadow-xl shadow-emerald-500/5 backdrop-blur">
+    <Card className="border-border/50 bg-card/80 shadow-xl shadow-purple-500/5 backdrop-blur">
       <CardHeader className="space-y-1 p-4 sm:p-6">
         <CardTitle className="text-xl sm:text-2xl">
           Create your account
@@ -101,7 +101,7 @@ export default function SignupPage() {
           </div>
           <Button
             type="submit"
-            className="w-full bg-emerald-600 text-white hover:bg-emerald-500"
+            className="w-full bg-purple-600 text-white hover:bg-purple-500"
             disabled={isLoading}
           >
             {isLoading ? "Creating account..." : "Create account"}
@@ -111,7 +111,7 @@ export default function SignupPage() {
           Already have an account?{" "}
           <Link
             href="/login"
-            className="font-medium text-emerald-500 hover:text-emerald-400"
+            className="font-medium text-purple-500 hover:text-purple-400"
           >
             Sign in
           </Link>

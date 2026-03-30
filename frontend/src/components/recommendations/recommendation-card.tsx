@@ -16,7 +16,7 @@ interface RecommendationCardProps {
 function scoreColor(score: number): string {
   if (score < 0.5) return "bg-red-500/15 text-red-400 border-red-500/30";
   if (score < 0.7) return "bg-amber-500/15 text-amber-400 border-amber-500/30";
-  return "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
+  return "bg-purple-500/15 text-purple-400 border-purple-500/30";
 }
 
 const MAX_VISIBLE_GENRES = 3;
@@ -129,7 +129,7 @@ export function RecommendationCard({ item }: RecommendationCardProps) {
             disabled={feedbackMutation.isPending}
             className={cn(
               "gap-1.5",
-              feedback === "thumbs_up" && "bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600"
+              feedback === "thumbs_up" && "bg-purple-600 hover:bg-purple-700 text-white border-purple-600"
             )}
           >
             <ThumbsUp className="h-3.5 w-3.5" />

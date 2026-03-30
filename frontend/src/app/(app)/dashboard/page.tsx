@@ -44,10 +44,10 @@ const tabs = [
   { href: "/dashboard/recommendations", label: "Recommendations" },
 ];
 
-// Emerald-based palette for charts (dark mode friendly)
+// Purple-based palette for charts (dark mode friendly)
 // Distinct colors for dark backgrounds — high contrast, colorblind-safe
 const CHART_COLORS = [
-  "#10b981", // emerald
+  "#A855F7", // electric violet
   "#3b82f6", // blue
   "#f59e0b", // amber
   "#ef4444", // red
@@ -333,7 +333,7 @@ export default function DashboardPage() {
                         <div className="w-20 sm:w-28">
                           <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                             <div
-                              className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                              className="h-full rounded-full bg-purple-500 transition-all duration-500"
                               style={{ width: `${Math.round(artist.score * 100)}%` }}
                             />
                           </div>
@@ -375,8 +375,8 @@ export default function DashboardPage() {
                       />
                       <Radar
                         dataKey="value"
-                        stroke="#10b981"
-                        fill="#10b981"
+                        stroke="#A855F7"
+                        fill="#A855F7"
                         fillOpacity={0.2}
                         strokeWidth={2}
                       />
@@ -434,7 +434,7 @@ export default function DashboardPage() {
                       />
                       <Bar
                         dataKey="songs"
-                        fill="#10b981"
+                        fill="#A855F7"
                         radius={[4, 4, 0, 0]}
                         maxBarSize={32}
                       />

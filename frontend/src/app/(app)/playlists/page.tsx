@@ -143,7 +143,7 @@ function PlaylistList({ onSelect }: { onSelect: (id: number) => void }) {
             </div>
             {pl.ai_context && (
               <div className="mt-2 flex items-start gap-1.5">
-                <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-emerald-400" />
+                <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-purple-400" />
                 <p className="line-clamp-2 text-xs text-muted-foreground">
                   {pl.ai_context}
                 </p>
@@ -226,7 +226,7 @@ function CreatePlaylistForm({
           </div>
           <div>
             <label className="mb-1 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <Sparkles className="h-3 w-3 text-emerald-400" />
+              <Sparkles className="h-3 w-3 text-purple-400" />
               AI Context
             </label>
             <textarea
@@ -320,9 +320,9 @@ function PlaylistDetail({
           </p>
         )}
         {playlist.ai_context && (
-          <div className="mt-2 flex items-start gap-2 rounded-lg bg-emerald-500/10 px-3 py-2">
-            <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-            <p className="text-xs text-emerald-300">{playlist.ai_context}</p>
+          <div className="mt-2 flex items-start gap-2 rounded-lg bg-purple-500/10 px-3 py-2">
+            <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-purple-400" />
+            <p className="text-xs text-purple-300">{playlist.ai_context}</p>
           </div>
         )}
         <p className="mt-2 text-xs text-muted-foreground">
@@ -380,7 +380,7 @@ function PlaylistDetail({
                 </div>
 
                 {item.added_by !== "user" && (
-                  <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
+                  <span className="shrink-0 rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-medium text-purple-400">
                     AI
                   </span>
                 )}

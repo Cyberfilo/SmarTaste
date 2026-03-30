@@ -90,7 +90,7 @@ export function StatsTimeline() {
             <div key={month}>
               {/* Month header */}
               <div className="sticky top-0 z-10 mb-2 bg-card pb-1">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-purple-400">
                   {month}
                 </h3>
               </div>
@@ -140,7 +140,7 @@ export function StatsTimeline() {
                       <span
                         className={`text-[10px] uppercase tracking-wider ${
                           song.date_type === "added"
-                            ? "text-emerald-400"
+                            ? "text-purple-400"
                             : song.date_type === "release"
                               ? "text-blue-400"
                               : "text-muted-foreground"

@@ -15,7 +15,7 @@ interface ScoreBreakdownProps {
 }
 
 const dimensionColors: Record<string, string> = {
-  genre_match: "bg-emerald-500",
+  genre_match: "bg-purple-500",
   audio_similarity: "bg-blue-500",
   novelty: "bg-purple-500",
   freshness: "bg-amber-500",
