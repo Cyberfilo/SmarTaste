@@ -84,6 +84,32 @@ docker compose up -d
 # Frontend: cd frontend && npm install && npm run dev
 ```
 
+### Deploy to Vercel + Railway (cloud)
+
+**Frontend → Vercel:**
+
+1. Import the GitHub repo at [vercel.com/new](https://vercel.com/new)
+2. Vercel auto-detects `rootDirectory: frontend` from `vercel.json`
+3. Set environment variable: `NEXT_PUBLIC_API_URL` = your Railway backend URL (e.g., `https://musicmind-backend.up.railway.app`)
+4. Deploy
+
+**Backend → Railway:**
+
+1. Create a new project at [railway.app](https://railway.app)
+2. Add a **PostgreSQL** service (Railway provisions it automatically)
+3. Add a **service from GitHub** → point to `backend/` directory
+4. Set environment variables in Railway:
+   - `MUSICMIND_DATABASE_URL` — Railway auto-fills this from the PostgreSQL service (use the `DATABASE_URL` variable with `postgresql+asyncpg://` prefix)
+   - `MUSICMIND_FERNET_KEY` — generate with `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+   - `MUSICMIND_JWT_SECRET_KEY` — generate with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
+   - `MUSICMIND_FRONTEND_URL` — your Vercel URL (e.g., `https://musicmind.vercel.app`)
+   - `MUSICMIND_SPOTIFY_REDIRECT_URI` — `https://your-vercel-url.vercel.app/api/services/spotify/callback`
+   - `MUSICMIND_DEBUG` = `false`
+   - Plus Spotify/Apple Music keys if needed
+5. Railway builds from the Dockerfile and runs migrations automatically on deploy
+
+**Important:** Update your Spotify Developer Dashboard redirect URI to match the Vercel URL.
+
 ## Commands Reference
 
 | Command | What it does |

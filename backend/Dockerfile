@@ -14,8 +14,10 @@ COPY alembic/ alembic/
 # Install dependencies
 RUN uv sync --frozen --no-dev
 
-# Expose port
-EXPOSE 8000
+# Railway provides PORT env var; default to 8000 for local docker
+ENV PORT=8000
+EXPOSE ${PORT}
 
 # Run migrations then start server
-CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn musicmind.app:app --host 0.0.0.0 --port 8000"]
+# Railway sets PORT dynamically; Vercel/local uses 8000
+CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn musicmind.app:app --host 0.0.0.0 --port ${PORT}"]
