@@ -523,7 +523,7 @@ class RecommendationService:
             developer_token = generate_apple_developer_token(
                 settings.apple_team_id,
                 settings.apple_key_id,
-                settings.apple_private_key_path,
+                settings.apple_private_key_path, private_key_b64=settings.apple_private_key_b64,
             )
 
         return service, access_token, developer_token
