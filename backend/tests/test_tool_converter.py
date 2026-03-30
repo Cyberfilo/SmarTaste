@@ -1,7 +1,7 @@
 """Tests for Anthropic-to-OpenAI tool definition converter (12-01).
 
 Verifies that to_openai_functions correctly maps Anthropic tool schemas
-to OpenAI function-calling format for all 8 MusicMind tool definitions.
+to OpenAI function-calling format for all 8 SmarTaste tool definitions.
 """
 
 from __future__ import annotations

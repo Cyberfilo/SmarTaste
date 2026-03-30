@@ -29,7 +29,7 @@ class TrackService:
 
         Args:
             engine: SQLAlchemy async engine.
-            user_id: MusicMind user ID (for access scoping).
+            user_id: SmarTaste user ID (for access scoping).
             catalog_id: Catalog ID of the track.
 
         Returns:

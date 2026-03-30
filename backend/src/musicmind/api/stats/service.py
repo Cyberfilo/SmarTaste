@@ -55,7 +55,7 @@ class StatsService:
             engine: SQLAlchemy async engine.
             encryption: EncryptionService for token decryption.
             settings: Application settings.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             service: Target service (spotify or apple_music). Auto-detected
                 if None.
             period: Time period -- "month", "6months", or "alltime".
@@ -129,7 +129,7 @@ class StatsService:
             engine: SQLAlchemy async engine.
             encryption: EncryptionService for token decryption.
             settings: Application settings.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             service: Target service (spotify or apple_music). Auto-detected
                 if None.
             period: Time period -- "month", "6months", or "alltime".
@@ -211,7 +211,7 @@ class StatsService:
             engine: SQLAlchemy async engine.
             encryption: EncryptionService for token decryption.
             settings: Application settings.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             service: Target service (spotify or apple_music). Auto-detected
                 if None.
             period: Time period -- "month", "6months", or "alltime".
@@ -284,7 +284,7 @@ class StatsService:
 
         Args:
             engine: SQLAlchemy async engine.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             service: Explicit service name or None for auto-detection.
 
         Returns:
@@ -320,7 +320,7 @@ class StatsService:
             engine: SQLAlchemy async engine.
             encryption: EncryptionService for token decryption.
             settings: Application settings (for Spotify client_id).
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             service: Service name (spotify or apple_music).
 
         Returns:

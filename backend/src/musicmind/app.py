@@ -1,4 +1,4 @@
-"""FastAPI application factory with async lifespan managing engine and encryption."""
+"""SmarTaste FastAPI application factory with async lifespan managing engine and encryption."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
 
 
-app = FastAPI(title="MusicMind", version=__version__, lifespan=lifespan)
+app = FastAPI(title="SmarTaste", version=__version__, lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(api_router)

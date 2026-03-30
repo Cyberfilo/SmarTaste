@@ -1,6 +1,6 @@
 """Tests for ChatService agentic loop, SSE streaming, and conversation persistence (09-02).
 
-Tests the core ChatService: sending messages to Anthropic API with MusicMind tool
+Tests the core ChatService: sending messages to Anthropic API with SmarTaste tool
 definitions, executing tool calls, streaming SSE events, managing context windows,
 and persisting conversations.
 """
@@ -968,16 +968,16 @@ class TestChatServiceContextWindow:
 class TestChatServiceSystemPrompt:
     """Tests for system prompt construction."""
 
-    async def test_system_prompt_includes_musicmind_identity(
+    async def test_system_prompt_includes_smartaste_identity(
         self,
         seeded_engine: AsyncEngine,
         encryption: EncryptionService,
         test_settings: MagicMock,
     ) -> None:
-        """System prompt includes MusicMind assistant identity."""
+        """System prompt includes SmarTaste assistant identity."""
         from musicmind.api.chat.service import ChatService
 
-        stream = _build_text_response_stream("I am MusicMind!")
+        stream = _build_text_response_stream("I am SmarTaste!")
         mock_client = AsyncMock()
         mock_client.messages = MagicMock()
         mock_client.messages.stream = MagicMock(return_value=stream)
@@ -999,7 +999,7 @@ class TestChatServiceSystemPrompt:
 
         call_args = mock_client.messages.stream.call_args
         system_prompt = call_args.kwargs.get("system", "")
-        assert "musicmind" in system_prompt.lower()
+        assert "smartaste" in system_prompt.lower()
 
     async def test_system_prompt_includes_connected_services(
         self,

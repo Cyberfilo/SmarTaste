@@ -1,4 +1,4 @@
-# MusicMind Improvement Sprint — Implementation Plan
+# SmarTaste Improvement Sprint — Implementation Plan
 
 ## Branch: claude/musicmind-sprint-setup-hbH3p
 ## Started: 2026-03-29

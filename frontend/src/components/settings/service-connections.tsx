@@ -224,7 +224,7 @@ export function ServiceConnections() {
       // 3. Configure MusicKit with our developer token (v3 returns a promise)
       const music = await window.MusicKit.configure({
         developerToken: tokenRes.developer_token,
-        app: { name: "MusicMind", build: "1.0.0" },
+        app: { name: "SmarTaste", build: "1.0.0" },
       });
 
       // 4. Authorize — opens Apple's sign-in popup

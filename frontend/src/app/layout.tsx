@@ -10,7 +10,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "MusicMind",
+  title: "SmarTaste",
   description: "Your music, understood",
 };
 

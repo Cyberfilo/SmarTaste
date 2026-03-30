@@ -25,7 +25,7 @@ def _default_database_url() -> str:
 
 
 class Settings(BaseSettings):
-    """MusicMind Web application settings.
+    """SmarTaste application settings.
 
     All settings are loaded from environment variables with the MUSICMIND_ prefix.
     Example: MUSICMIND_DATABASE_URL sets database_url.

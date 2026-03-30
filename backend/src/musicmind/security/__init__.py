@@ -1,4 +1,4 @@
-"""Security utilities for MusicMind Web."""
+"""Security utilities for SmarTaste."""
 
 from __future__ import annotations
 

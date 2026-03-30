@@ -1,4 +1,4 @@
-"""MusicMind Web backend."""
+"""SmarTaste backend (musicmind package)."""
 
 from __future__ import annotations
 

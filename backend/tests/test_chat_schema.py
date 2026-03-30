@@ -1,7 +1,7 @@
 """Tests for Claude chat integration schema, Pydantic models, and tool registry (09-01).
 
 Covers database schema (chat_conversations table), Pydantic chat models,
-and the curated tool registry that maps Claude tool_use calls to MusicMind services.
+and the curated tool registry that maps Claude tool_use calls to SmarTaste services.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-# MusicMind Improvement Sprint — Task Board
+# SmarTaste Improvement Sprint — Task Board
 
 ## Phase 1: Critical Bug Fixes 🔴 ✅
 - [x] 1.1 Fix artist_cache PK — add user_id to primary key (currently artist_id only, two users overwrite each other)

@@ -1,3 +1,3 @@
-"""Database layer for MusicMind Web."""
+"""Database layer for SmarTaste."""
 
 from __future__ import annotations

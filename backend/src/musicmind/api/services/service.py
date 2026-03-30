@@ -262,7 +262,7 @@ async def upsert_service_connection(
     Args:
         engine: SQLAlchemy async engine.
         encryption: EncryptionService for token encryption.
-        user_id: MusicMind user ID.
+        user_id: SmarTaste user ID.
         service: Service name (spotify or apple_music).
         access_token: Plaintext access token to encrypt and store.
         refresh_token: Plaintext refresh token to encrypt (or None).
@@ -327,7 +327,7 @@ async def delete_service_connection(
 
     Args:
         engine: SQLAlchemy async engine.
-        user_id: MusicMind user ID.
+        user_id: SmarTaste user ID.
         service: Service name to disconnect.
 
     Returns:
@@ -361,7 +361,7 @@ async def get_user_connections(
 
     Args:
         engine: SQLAlchemy async engine.
-        user_id: MusicMind user ID.
+        user_id: SmarTaste user ID.
 
     Returns:
         List of connection dicts with service, token, and metadata fields.

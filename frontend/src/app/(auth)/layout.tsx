@@ -11,7 +11,7 @@ export default function AuthLayout({
     <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4">
       <div className="mb-8 text-center">
         <h1 className="text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
-          MusicMind
+          SmarTaste
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
           Your music, understood

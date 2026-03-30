@@ -1,4 +1,4 @@
-"""Schema validation tests for MusicMind Web database."""
+"""Schema validation tests for SmarTaste database."""
 
 from __future__ import annotations
 
