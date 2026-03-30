@@ -22,3 +22,32 @@ class AudioFeaturesResponse(BaseModel):
     )
     beat_strength: float | None = Field(default=None, description="Beat strength 0-1")
     brightness: float | None = Field(default=None, description="Brightness 0-1")
+
+
+class AnalyzeRequest(BaseModel):
+    """Request to analyze seed tracks with Essentia."""
+
+    catalog_ids: list[str] = Field(
+        description="Track catalog IDs to analyze (max 10)",
+        min_length=1,
+        max_length=10,
+    )
+
+
+class AnalysisResult(BaseModel):
+    """Result for a single analyzed track."""
+
+    catalog_id: str = Field(description="Track ID")
+    status: str = Field(description="analyzed, cached, no_preview, download_failed, partial")
+    embedding_dim: int = Field(description="Embedding dimensions (128 or 0)")
+    features_extracted: bool = Field(description="Whether scalar features were extracted")
+
+
+class AnalyzeResponse(BaseModel):
+    """Response from the seed track analysis endpoint."""
+
+    results: list[AnalysisResult] = Field(description="Per-track analysis results")
+    analyzed: int = Field(description="Tracks newly analyzed")
+    cached: int = Field(description="Tracks with existing analysis")
+    total: int = Field(description="Total tracks processed")
+    essentia_available: bool = Field(description="Whether Essentia is installed")
