@@ -67,3 +67,15 @@ class Settings(BaseSettings):
     apple_private_key_b64: str | None = None
 
     model_config = {"env_prefix": "MUSICMIND_", "env_file": ".env"}
+
+    def model_post_init(self, __context: object) -> None:
+        """Fix database URL after loading from env.
+
+        Railway/Heroku provide postgresql:// but asyncpg needs postgresql+asyncpg://.
+        """
+        if self.database_url.startswith("postgresql://"):
+            object.__setattr__(
+                self,
+                "database_url",
+                self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1),
+            )
