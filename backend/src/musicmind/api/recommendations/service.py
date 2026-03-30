@@ -24,6 +24,7 @@ from musicmind.api.recommendations.fetch import (
     discover_similar_artists,
 )
 from musicmind.api.services.service import (
+    detect_apple_music_storefront,
     generate_apple_developer_token,
     get_user_connections,
     refresh_spotify_token,
@@ -165,12 +166,14 @@ class RecommendationService:
         # Step 4: Run discovery strategies (against all connected services)
         candidates: list[dict[str, Any]] = []
         discovery_tasks = []
-        for svc, access_token, developer_token in all_creds:
+        for svc, access_token, developer_token, storefront in all_creds:
             discovery_tasks.append(
                 self._run_discovery(
                     svc, access_token, seed_artist_names, top_genre_names,
                     strategy=strategy,
                     developer_token=developer_token,
+                    storefront=storefront,
+                    profile_genres=top_genre_names,
                 )
             )
 
@@ -422,21 +425,21 @@ class RecommendationService:
         settings,
         *,
         user_id: str,
-    ) -> list[tuple[str, str, str | None]]:
+    ) -> list[tuple[str, str, str | None, str]]:
         """Resolve credentials for all connected services.
 
-        Returns a list of (service, access_token, developer_token) tuples,
-        one per connected service. For unified recommendations, this returns
-        credentials for both Spotify and Apple Music.
+        Returns a list of (service, access_token, developer_token, storefront)
+        tuples, one per connected service. For unified recommendations, this
+        returns credentials for both Spotify and Apple Music.
 
         Returns:
-            List of (service, access_token, developer_token) tuples.
+            List of (service, access_token, developer_token, storefront) tuples.
         """
         connections = await get_user_connections(engine, user_id=user_id)
         if not connections:
             raise ValueError("No connected service found")
 
-        results: list[tuple[str, str, str | None]] = []
+        results: list[tuple[str, str, str | None, str]] = []
 
         for conn_data in connections:
             service = conn_data["service"]
@@ -465,11 +468,11 @@ class RecommendationService:
         *,
         user_id: str,
         service: str,
-    ) -> tuple[str, str, str | None]:
+    ) -> tuple[str, str, str | None, str]:
         """Resolve credentials for a single service.
 
         Returns:
-            Tuple of (service, access_token, developer_token).
+            Tuple of (service, access_token, developer_token, storefront).
         """
         async with engine.begin() as db_conn:
             result = await db_conn.execute(
@@ -517,16 +520,21 @@ class RecommendationService:
                                 service_user_id=row.service_user_id,
                             )
 
-        # Generate Apple Music developer token if needed
+        # Generate Apple Music developer token and detect storefront
         developer_token = None
+        storefront = "us"
         if service == "apple_music":
             developer_token = generate_apple_developer_token(
                 settings.apple_team_id,
                 settings.apple_key_id,
                 settings.apple_private_key_path, private_key_b64=settings.apple_private_key_b64,
             )
+            storefront = await detect_apple_music_storefront(
+                access_token, developer_token,
+            )
+            logger.info("Detected Apple Music storefront: %s", storefront)
 
-        return service, access_token, developer_token
+        return service, access_token, developer_token, storefront
 
     async def _run_discovery(
         self,
@@ -537,14 +545,33 @@ class RecommendationService:
         *,
         strategy: str,
         developer_token: str | None,
+        storefront: str = "us",
+        profile_genres: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Run discovery strategies and tag candidates with source strategy."""
         candidates: list[dict[str, Any]] = []
+
+        # Build genre set for post-filtering (lowercased for matching)
+        genre_filter = set(g.lower() for g in (profile_genres or top_genre_names))
+
+        def _filter_by_genre_overlap(
+            results: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            """Keep only candidates with at least one genre overlapping the profile."""
+            if not genre_filter:
+                return results
+            filtered = []
+            for c in results:
+                track_genres = set(g.lower() for g in c.get("genre_names", []))
+                if track_genres & genre_filter:
+                    filtered.append(c)
+            return filtered if filtered else results[:5]  # fallback to top 5 if all filtered
 
         async def _run_similar_artists() -> list[dict[str, Any]]:
             results = await discover_similar_artists(
                 service, access_token, seed_artist_names,
                 developer_token=developer_token,
+                storefront=storefront,
             )
             for c in results:
                 c["_strategy_source"] = "similar_artist"
@@ -554,7 +581,9 @@ class RecommendationService:
             results = await discover_genre_adjacent(
                 service, access_token, top_genre_names,
                 developer_token=developer_token,
+                storefront=storefront,
             )
+            results = _filter_by_genre_overlap(results)
             for c in results:
                 c["_strategy_source"] = "genre_adjacent"
             return results
@@ -563,7 +592,9 @@ class RecommendationService:
             results = await discover_editorial(
                 service, access_token, top_genre_names,
                 developer_token=developer_token,
+                storefront=storefront,
             )
+            results = _filter_by_genre_overlap(results)
             for c in results:
                 c["_strategy_source"] = "editorial"
             return results
@@ -572,6 +603,7 @@ class RecommendationService:
             results = await discover_chart_filter(
                 service, access_token, top_genre_names,
                 developer_token=developer_token,
+                storefront=storefront,
             )
             for c in results:
                 c["_strategy_source"] = "chart"
