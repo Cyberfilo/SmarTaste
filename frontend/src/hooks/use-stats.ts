@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import type {
   Period,
+  TimelineResponse,
   TopTracksResponse,
   TopArtistsStatsResponse,
   TopGenresStatsResponse,
@@ -35,6 +36,15 @@ export function useTopGenresStats(period: Period) {
     queryKey: ["stats", "genres", period],
     queryFn: () =>
       apiFetch<TopGenresStatsResponse>(`/api/stats/genres?period=${period}`),
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+export function useTimeline(limit: number = 50) {
+  return useQuery<TimelineResponse>({
+    queryKey: ["stats", "timeline", limit],
+    queryFn: () =>
+      apiFetch<TimelineResponse>(`/api/stats/timeline?limit=${limit}`),
     staleTime: 5 * 60 * 1000,
   });
 }

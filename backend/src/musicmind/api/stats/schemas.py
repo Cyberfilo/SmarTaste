@@ -66,3 +66,27 @@ class TopGenresResponse(BaseModel):
     period: str = Field(description="Time period (month, 6months, or alltime)")
     items: list[StatGenreEntry] = Field(description="Ranked genre entries")
     total: int = Field(description="Total number of items returned")
+
+
+class TimelineEntry(BaseModel):
+    """A single song in the listening timeline."""
+
+    catalog_id: str = Field(description="Service-specific track ID")
+    name: str = Field(description="Track name")
+    artist_name: str = Field(description="Primary artist name")
+    album_name: str = Field(description="Album name")
+    genre_names: list[str] = Field(default_factory=list, description="Genre list")
+    date: str | None = Field(default=None, description="ISO date (added or release)")
+    date_type: str = Field(
+        default="unknown",
+        description="What the date represents: added, release, or unknown",
+    )
+    artwork_url: str = Field(default="", description="Album artwork URL")
+
+
+class TimelineResponse(BaseModel):
+    """Response for timeline endpoint."""
+
+    service: str = Field(description="Source service (spotify or apple_music)")
+    items: list[TimelineEntry] = Field(description="Songs ordered chronologically")
+    total: int = Field(description="Total number of items returned")

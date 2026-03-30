@@ -11,6 +11,7 @@ import { PeriodSelector } from "@/components/dashboard/period-selector";
 import { StatsTracks } from "@/components/dashboard/stats-tracks";
 import { StatsArtists } from "@/components/dashboard/stats-artists";
 import { StatsGenres } from "@/components/dashboard/stats-genres";
+import { StatsTimeline } from "@/components/dashboard/stats-timeline";
 import type { Period } from "@/types/api";
 
 export default function ListeningStatsPage() {
@@ -30,6 +31,7 @@ export default function ListeningStatsPage() {
         <PeriodSelector period={period} onPeriodChange={setPeriod} />
       </div>
 
+      <StatsTimeline />
       <StatsTracks period={period} />
       <StatsArtists period={period} />
       <StatsGenres period={period} />

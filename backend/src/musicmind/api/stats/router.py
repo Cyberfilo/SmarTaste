@@ -10,6 +10,8 @@ from musicmind.api.stats.schemas import (
     StatArtistEntry,
     StatGenreEntry,
     StatTrackEntry,
+    TimelineEntry,
+    TimelineResponse,
     TopArtistsResponse,
     TopGenresResponse,
     TopTracksResponse,
@@ -204,6 +206,61 @@ async def get_top_genres(
     return TopGenresResponse(
         service=result.get("service", ""),
         period=result.get("period", period),
+        items=items,
+        total=result.get("total", len(items)),
+    )
+
+
+@router.get("/timeline")
+async def get_timeline(
+    request: Request,
+    service: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: dict = Depends(get_current_user),
+) -> TimelineResponse:
+    """Get a chronological timeline of songs (most recent first).
+
+    Params:
+        service: Target service (spotify or apple_music). Auto-detected if omitted.
+        limit: Maximum items to return (default 50, max 200).
+    """
+    try:
+        result = await stats_service.get_timeline(
+            request.app.state.engine,
+            request.app.state.encryption,
+            request.app.state.settings,
+            user_id=current_user["user_id"],
+            service=service,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception("Unexpected error fetching timeline")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch timeline",
+        )
+
+    items = [
+        TimelineEntry(
+            catalog_id=item.get("catalog_id", ""),
+            name=item.get("name", ""),
+            artist_name=item.get("artist_name", ""),
+            album_name=item.get("album_name", ""),
+            genre_names=item.get("genre_names", []),
+            date=item.get("date"),
+            date_type=item.get("date_type", "unknown"),
+            artwork_url=item.get("artwork_url", ""),
+        )
+        for item in result.get("items", [])
+    ]
+
+    return TimelineResponse(
+        service=result.get("service", ""),
         items=items,
         total=result.get("total", len(items)),
     )

@@ -268,6 +268,124 @@ class StatsService:
             "total": len(items),
         }
 
+    async def get_timeline(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Get a chronological timeline of songs.
+
+        Returns songs ordered by best available date (dateAdded or releaseDate),
+        most recent first. Provides date_type to indicate what the date represents.
+
+        Args:
+            engine: SQLAlchemy async engine.
+            encryption: EncryptionService for token decryption.
+            settings: Application settings.
+            user_id: SmarTaste user ID.
+            service: Target service. Auto-detected if None.
+            limit: Maximum items to return (default 50).
+
+        Returns:
+            Dict with service, items (list of timeline dicts), total.
+        """
+        from musicmind.api.stats.fetch import _parse_date, _song_date
+
+        resolved_service = await self._resolve_service(
+            engine, user_id=user_id, service=service
+        )
+        access_token = await self._get_access_token(
+            engine, encryption, settings,
+            user_id=user_id, service=resolved_service,
+        )
+
+        if resolved_service == "spotify":
+            songs = await fetch_spotify_top_tracks_for_period(
+                access_token, period="alltime", limit=limit
+            )
+            # Spotify top tracks don't have dates — rank by position
+            items = []
+            for i, song in enumerate(songs[:limit]):
+                items.append({
+                    "catalog_id": song.get("catalog_id", ""),
+                    "name": song.get("name", ""),
+                    "artist_name": song.get("artist_name", ""),
+                    "album_name": song.get("album_name", ""),
+                    "genre_names": [],
+                    "date": None,
+                    "date_type": "rank",
+                    "artwork_url": "",
+                })
+        elif resolved_service == "apple_music":
+            developer_token = generate_apple_developer_token(
+                settings.apple_team_id,
+                settings.apple_key_id,
+                settings.apple_private_key_path,
+                private_key_b64=settings.apple_private_key_b64,
+            )
+            songs = await fetch_apple_music_library(
+                developer_token, access_token
+            )
+
+            # Sort by best available date (added → release fallback)
+            def _sort_key(s: dict) -> str:
+                d = _song_date(s)
+                return d.isoformat() if d else ""
+
+            songs.sort(key=_sort_key, reverse=True)
+
+            items = []
+            for song in songs[:limit]:
+                date_added = _parse_date(song.get("date_added_to_library"))
+                release_date = _parse_date(song.get("release_date"))
+
+                if date_added:
+                    date_str = date_added.strftime("%Y-%m-%d")
+                    date_type = "added"
+                elif release_date:
+                    date_str = release_date.strftime("%Y-%m-%d")
+                    date_type = "release"
+                else:
+                    date_str = None
+                    date_type = "unknown"
+
+                genres = song.get("genre_names", [])
+                if isinstance(genres, str):
+                    import json as _json
+
+                    try:
+                        genres = _json.loads(genres)
+                    except (ValueError, TypeError):
+                        genres = []
+
+                items.append({
+                    "catalog_id": song.get("catalog_id", ""),
+                    "name": song.get("name", ""),
+                    "artist_name": song.get("artist_name", ""),
+                    "album_name": song.get("album_name", ""),
+                    "genre_names": genres,
+                    "date": date_str,
+                    "date_type": date_type,
+                    "artwork_url": song.get("artwork_url_template", ""),
+                })
+        else:
+            raise ValueError(f"Unsupported service: {resolved_service}")
+
+        logger.info(
+            "Returning %d timeline entries for user %s service %s",
+            len(items), user_id, resolved_service,
+        )
+        return {
+            "service": resolved_service,
+            "items": items,
+            "total": len(items),
+        }
+
     # -- Private Helpers ------------------------------------------------------
 
     async def _resolve_service(
