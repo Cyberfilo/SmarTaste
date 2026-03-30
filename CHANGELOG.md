@@ -1,0 +1,28 @@
+# Changelog
+
+All notable changes to SmarTaste (formerly MusicMind) will be documented in this file.
+
+Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.0] - 2026-03-30
+
+### Added
+- Complete project documentation (`what.md`)
+- Centralized `VERSION` file — single source of truth for version numbers
+- `CHANGELOG.md` for tracking changes
+- Version reported in `/health` endpoint response
+
+### Removed
+- ~1,350 lines of dead code:
+  - `engine/bandit.py` — Thompson Sampling (never wired into scorer)
+  - `engine/clap_mood.py` — CLAP mood embeddings (dependency missing)
+  - `engine/lastfm.py` — Last.fm tag enrichment (never integrated)
+  - `engine/knowledge_graph/` — MusicBrainz graph (tables never populated)
+  - `engine/audio/extractor.py` — Essentia extraction (never called)
+  - `frontend/src/proxy.ts` — replaced by `next.config.ts` rewrites
+
+### Changed
+- Backend `__version__` now reads from root `VERSION` file
+- FastAPI app version now dynamic (reads from `__version__`)
+- `pyproject.toml` uses Hatch dynamic versioning from `VERSION` file
