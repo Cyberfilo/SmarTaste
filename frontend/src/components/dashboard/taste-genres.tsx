@@ -93,7 +93,7 @@ export function TasteGenres() {
                       className="h-full rounded-full transition-all duration-500"
                       style={{
                         width: `${pct}%`,
-                        background: `linear-gradient(90deg, var(--color-emerald-500), var(--color-emerald-600))`,
+                        background: `linear-gradient(90deg, #A855F7, #7B5EA7)`,
                         opacity: 1 - index * 0.04,
                       }}
                     />

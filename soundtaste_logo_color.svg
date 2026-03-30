@@ -1,0 +1,27 @@
+<svg width="100%" viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="50%" stop-color="#E040A0"/>
+      <stop offset="100%" stop-color="#FF6B6B"/>
+    </linearGradient>
+    <linearGradient id="lg1b" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#E040A0"/>
+    </linearGradient>
+  </defs>
+  <text x="340" y="24" text-anchor="middle" opacity="0.5" style="fill:rgb(61, 61, 58);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.5;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:12px;font-weight:400;text-anchor:middle;dominant-baseline:auto">Full color</text>
+  <!-- Outer rings -->
+  <circle cx="340" cy="158" r="90" fill="none" stroke="url(#lg1)" stroke-width="2.5" opacity="0.3" style="fill:none;color:rgb(0, 0, 0);stroke-width:2.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.3;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <circle cx="340" cy="158" r="77" fill="none" stroke="url(#lg1)" stroke-width="1.5" opacity="0.15" style="fill:none;color:rgb(0, 0, 0);stroke-width:1.5px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.15;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <!-- Wave -->
+  <path d="M270 160 Q282 128, 300 148 Q312 160, 316 138 Q320 116, 330 142 Q340 162, 354 122 Q364 142, 370 150 Q378 158, 410 152" fill="none" stroke="url(#lg1)" stroke-width="5" stroke-linecap="round" style="fill:none;color:rgb(0, 0, 0);stroke-width:5px;stroke-linecap:round;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <!-- Flavor dots -->
+  <circle cx="294" cy="178" r="5.5" fill="#E040A0" opacity="0.8" style="fill:rgb(224, 64, 160);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.8;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <circle cx="316" cy="188" r="4" fill="#A855F7" opacity="0.7" style="fill:rgb(168, 85, 247);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.7;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <circle cx="344" cy="185" r="4.5" fill="#FF6B6B" opacity="0.75" style="fill:rgb(255, 107, 107);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.75;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <circle cx="370" cy="176" r="5.5" fill="#6EE7B7" opacity="0.7" style="fill:rgb(110, 231, 183);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.7;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <!-- Central pulse -->
+  <circle cx="340" cy="206" r="6.5" fill="url(#lg1)" opacity="0.9" style="stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.9;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+  <circle cx="340" cy="206" r="11" fill="none" stroke="url(#lg1)" stroke-width="1" opacity="0.3" style="fill:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:0.3;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
+</svg>

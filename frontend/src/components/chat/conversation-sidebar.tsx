@@ -98,7 +98,7 @@ function SidebarContent({
       <div className="flex-1 overflow-y-auto">
         {isLoading ? (
           <div className="flex items-center justify-center py-8">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-purple-500 border-t-transparent" />
           </div>
         ) : !conversations || conversations.length === 0 ? (
           <div className="px-4 py-8 text-center text-xs text-muted-foreground">
@@ -119,13 +119,13 @@ function SidebarContent({
                   onKeyDown={(e) => e.key === "Enter" && onSelectConversation(conv.id)}
                   className={`group flex w-full cursor-pointer items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors ${
                     isActive
-                      ? "bg-emerald-600/10 text-foreground"
+                      ? "bg-purple-600/10 text-foreground"
                       : "text-muted-foreground hover:bg-zinc-800/50 hover:text-foreground"
                   }`}
                 >
                   <MessageCircle
                     className={`mt-0.5 h-4 w-4 shrink-0 ${
-                      isActive ? "text-emerald-500" : ""
+                      isActive ? "text-purple-500" : ""
                     }`}
                   />
                   <div className="min-w-0 flex-1">

@@ -106,14 +106,14 @@ export function ModelSelector() {
               onClick={() => handleSelect(model.id)}
               className={`flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-colors ${
                 isSelected
-                  ? "border-emerald-500/50 bg-emerald-500/5"
+                  ? "border-purple-500/50 bg-purple-500/5"
                   : "border-border bg-transparent hover:border-border/80 hover:bg-zinc-800/30"
               }`}
             >
               {/* Radio indicator */}
               <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 border-current">
                 {isSelected && (
-                  <div className="h-2 w-2 rounded-full bg-emerald-500" />
+                  <div className="h-2 w-2 rounded-full bg-purple-500" />
                 )}
               </div>
 

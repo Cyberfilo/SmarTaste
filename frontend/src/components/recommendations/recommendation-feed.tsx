@@ -33,7 +33,7 @@ export function RecommendationFeed() {
 
       {/* Adapted weights indicator */}
       {data?.weights_adapted && (
-        <p className="text-xs text-emerald-400">
+        <p className="text-xs text-purple-400">
           Scoring weights adapted from your feedback
         </p>
       )}

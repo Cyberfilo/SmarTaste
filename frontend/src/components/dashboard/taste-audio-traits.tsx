@@ -111,8 +111,8 @@ export function TasteAudioTraits() {
               <Radar
                 name="Your Traits"
                 dataKey="value"
-                stroke="var(--color-emerald-400)"
-                fill="var(--color-emerald-500)"
+                stroke="#A855F7"
+                fill="#A855F7"
                 fillOpacity={0.3}
                 strokeWidth={2}
               />

@@ -29,8 +29,8 @@ function EmptyState() {
   return (
     <div className="flex flex-1 items-center justify-center px-6">
       <div className="max-w-md text-center">
-        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-600/10">
-          <Sparkles className="h-8 w-8 text-emerald-500" />
+        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-purple-600/10">
+          <Sparkles className="h-8 w-8 text-purple-500" />
         </div>
         <h2 className="mb-2 text-lg font-semibold text-foreground">
           Ask about your music
@@ -55,7 +55,7 @@ function ExamplePrompt({ text }: { text: string }) {
   return (
     <button
       onClick={() => sendMessage(text)}
-      className="w-full rounded-xl border border-border bg-zinc-800/30 px-4 py-3 text-left text-sm text-muted-foreground transition-colors hover:border-emerald-500/30 hover:bg-zinc-800/60 hover:text-foreground"
+      className="w-full rounded-xl border border-border bg-zinc-800/30 px-4 py-3 text-left text-sm text-muted-foreground transition-colors hover:border-purple-500/30 hover:bg-zinc-800/60 hover:text-foreground"
     >
       {text}
     </button>
@@ -84,7 +84,7 @@ function NoKeyState({ selectedModel }: { selectedModel: string }) {
         </p>
         <Link
           href="/settings"
-          className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-700"
+          className="inline-flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-700"
         >
           <Settings className="h-4 w-4" />
           Go to Settings
@@ -129,7 +129,7 @@ function ChatModelSelector() {
     <div className="relative">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-1.5 rounded-lg border border-border bg-zinc-800/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-emerald-500/30 hover:text-foreground"
+        className="flex items-center gap-1.5 rounded-lg border border-border bg-zinc-800/50 px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-purple-500/30 hover:text-foreground"
       >
         <Sparkles className="h-3 w-3" />
         {currentModel.name}
@@ -148,7 +148,7 @@ function ChatModelSelector() {
             }}
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs transition-colors ${
               selectedModel === model.id
-                ? "bg-emerald-500/10 text-emerald-400"
+                ? "bg-purple-500/10 text-purple-400"
                 : "text-muted-foreground hover:bg-zinc-800/60 hover:text-foreground"
             }`}
           >
@@ -159,7 +159,7 @@ function ChatModelSelector() {
               </p>
             </div>
             {selectedModel === model.id && (
-              <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              <div className="h-1.5 w-1.5 rounded-full bg-purple-500" />
             )}
           </button>
         ))}

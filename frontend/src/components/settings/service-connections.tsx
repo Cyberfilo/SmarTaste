@@ -81,7 +81,7 @@ function loadMusicKitJS(): Promise<void> {
 function statusBadge(status: string) {
   switch (status) {
     case "connected":
-      return <Badge variant="outline" className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30">Connected</Badge>;
+      return <Badge variant="outline" className="bg-purple-500/15 text-purple-400 border-purple-500/30">Connected</Badge>;
     case "expired":
       return <Badge variant="outline" className="bg-amber-500/15 text-amber-400 border-amber-500/30">Expired</Badge>;
     default:

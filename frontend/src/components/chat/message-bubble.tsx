@@ -3,7 +3,7 @@
 /**
  * Chat message bubble component.
  *
- * User messages: right-aligned, emerald-600 background.
+ * User messages: right-aligned, purple-600 background.
  * Assistant messages: left-aligned, zinc-800 background.
  * Tool messages: small, muted, collapsible.
  * Streaming indicator: blinking cursor on last assistant message.
@@ -135,7 +135,7 @@ function formatInline(text: string): React.ReactNode[] {
       nodes.push(
         <code
           key={`c-${match.index}`}
-          className="rounded bg-zinc-800 px-1.5 py-0.5 text-sm text-emerald-400"
+          className="rounded bg-zinc-800 px-1.5 py-0.5 text-sm text-purple-400"
         >
           {match[4]}
         </code>,
@@ -211,7 +211,7 @@ export function MessageBubble({
           md:max-w-[70%]
           ${
             isUser
-              ? "rounded-br-sm bg-emerald-600 text-white"
+              ? "rounded-br-sm bg-purple-600 text-white"
               : "rounded-bl-sm bg-zinc-800 text-foreground"
           }
         `}

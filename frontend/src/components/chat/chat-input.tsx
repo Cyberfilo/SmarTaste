@@ -81,7 +81,7 @@ export function ChatInput({
           placeholder="Ask about your music..."
           disabled={disabled}
           rows={1}
-          className="flex-1 resize-none rounded-xl border border-border bg-zinc-800/50 px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:border-emerald-500/50 focus:outline-none focus:ring-1 focus:ring-emerald-500/30 disabled:opacity-50"
+          className="flex-1 resize-none rounded-xl border border-border bg-zinc-800/50 px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:border-purple-500/50 focus:outline-none focus:ring-1 focus:ring-purple-500/30 disabled:opacity-50"
         />
         {isStreaming ? (
           <Button
@@ -98,7 +98,7 @@ export function ChatInput({
             size="icon"
             onClick={handleSubmit}
             disabled={!canSend}
-            className="h-10 w-10 shrink-0 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-30"
+            className="h-10 w-10 shrink-0 rounded-xl bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-30"
             aria-label="Send message"
           >
             <ArrowUp className="h-4 w-4" />

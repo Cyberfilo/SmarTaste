@@ -130,7 +130,7 @@ export function OpenAIKeyManager() {
                   {keyStatus?.masked_key || "sk-..."}
                 </p>
               </div>
-              <Badge variant="outline" className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30">
+              <Badge variant="outline" className="bg-purple-500/15 text-purple-400 border-purple-500/30">
                 <Check className="h-3 w-3 mr-1" />
                 Configured
               </Badge>
