@@ -104,6 +104,25 @@ export interface TopGenresStatsResponse {
   total: number;
 }
 
+// ── Timeline ─────────────────────────────────────────────
+
+export interface TimelineEntry {
+  catalog_id: string;
+  name: string;
+  artist_name: string;
+  album_name: string;
+  genre_names: string[];
+  date: string | null;
+  date_type: "added" | "release" | "rank" | "unknown";
+  artwork_url: string;
+}
+
+export interface TimelineResponse {
+  service: string;
+  items: TimelineEntry[];
+  total: number;
+}
+
 // ── Recommendations ──────────────────────────────────────
 
 export interface RecommendationItem {
