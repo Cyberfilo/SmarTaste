@@ -222,6 +222,7 @@ taste_profile_snapshots = sa.Table(
     sa.Column("total_songs_analyzed", sa.Integer, server_default="0"),
     sa.Column("listening_hours_estimated", sa.Float, server_default="0.0"),
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
+    sa.Column("audio_centroid", sa.JSON, server_default="{}"),
 )
 
 recommendation_feedback = sa.Table(
@@ -265,13 +266,35 @@ audio_features_cache = sa.Table(
     sa.Column("acousticness", sa.Float, nullable=True),
     sa.Column("valence_proxy", sa.Float, nullable=True),
     sa.Column("beat_strength", sa.Float, nullable=True),
+    # Extended fields (added in migration 009)
+    sa.Column("key", sa.Text, nullable=True),
+    sa.Column("scale", sa.Text, nullable=True),
+    sa.Column("instrumentalness", sa.Float, nullable=True),
+    sa.Column("loudness", sa.Float, nullable=True),
+    # Per-field provenance: {"tempo": "deezer", "energy": "soundstat", ...}
+    sa.Column("feature_source", sa.JSON, server_default="{}"),
     sa.Column(
         "analyzed_at",
         sa.DateTime(timezone=True),
         nullable=False,
         server_default=sa.func.now(),
     ),
+    sa.Column("enriched_at", sa.DateTime(timezone=True), nullable=True),
     sa.PrimaryKeyConstraint("catalog_id", "user_id"),
+)
+
+isrc_spotify_mapping = sa.Table(
+    "isrc_spotify_mapping",
+    metadata,
+    sa.Column("isrc", sa.Text, primary_key=True),
+    sa.Column("spotify_id", sa.Text, nullable=True),
+    sa.Column("resolved_via", sa.Text, nullable=False, server_default="unknown"),
+    sa.Column(
+        "resolved_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
 )
 
 sound_classification_cache = sa.Table(

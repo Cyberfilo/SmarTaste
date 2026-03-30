@@ -32,6 +32,7 @@ from musicmind.api.services.service import (
 )
 from musicmind.api.taste.service import TasteService
 from musicmind.db.schema import (
+    audio_features_cache,
     recommendation_feedback,
     service_connections,
     song_metadata_cache,
@@ -204,7 +205,13 @@ class RecommendationService:
             engine, user_id=user_id,
         )
 
-        # Step 7: Apply mood filter
+        # Step 6b: Load audio features for candidates (enriched by background pipeline)
+        audio_features_map = await self._load_audio_features_map(
+            engine, unique, user_id=user_id,
+        )
+        user_audio_centroid = profile.get("audio_centroid") or None
+
+        # Step 7: Apply mood filter (now with audio features)
         resolved_mood: str | None = None
         if mood:
             mapped = MOOD_ALIAS.get(mood, mood)
@@ -212,11 +219,17 @@ class RecommendationService:
                 available = ", ".join(sorted(VALID_MOODS))
                 msg = f"Unknown mood '{mood}'. Available: {available}"
                 raise ValueError(msg)
-            unique = filter_candidates_by_mood(unique, mapped)
+            unique = filter_candidates_by_mood(
+                unique, mapped, audio_features_map=audio_features_map
+            )
             resolved_mood = mood
 
-        # Step 8: Score and rank
-        ranked = rank_candidates(unique, profile, count=limit, weights=weights)
+        # Step 8: Score and rank (with audio features activated)
+        ranked = rank_candidates(
+            unique, profile, count=limit, weights=weights,
+            audio_features_map=audio_features_map,
+            user_audio_centroid=user_audio_centroid,
+        )
 
         # Step 9: Build explanations
         items = []
@@ -694,6 +707,47 @@ class RecommendationService:
             return weights, True
 
         return dict(DEFAULT_WEIGHTS), False
+
+    @staticmethod
+    async def _load_audio_features_map(
+        engine,
+        candidates: list[dict[str, Any]],
+        *,
+        user_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Load cached audio features for candidate tracks.
+
+        Returns a catalog_id → features dict for use in scoring and mood filtering.
+        Only includes tracks that have been enriched.
+        """
+        catalog_ids = [c.get("catalog_id", "") for c in candidates if c.get("catalog_id")]
+        if not catalog_ids:
+            return {}
+
+        af_map: dict[str, dict[str, Any]] = {}
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(audio_features_cache).where(
+                    sa.and_(
+                        audio_features_cache.c.catalog_id.in_(catalog_ids),
+                        audio_features_cache.c.user_id == user_id,
+                    )
+                )
+            )
+            for row in result:
+                features: dict[str, Any] = {}
+                for field in (
+                    "tempo", "energy", "brightness", "danceability",
+                    "acousticness", "valence_proxy", "beat_strength",
+                    "key", "scale", "instrumentalness", "loudness",
+                ):
+                    val = getattr(row, field, None)
+                    if val is not None:
+                        features[field] = val
+                if features:
+                    af_map[row.catalog_id] = features
+
+        return af_map
 
     @staticmethod
     async def _compute_predicted_score(
