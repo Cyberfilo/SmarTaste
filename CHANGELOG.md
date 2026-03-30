@@ -19,6 +19,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Expanded `audio_features_cache` with: key, scale, instrumentalness, loudness, feature_source (provenance), enriched_at
 - `audio_centroid` saved in taste profile snapshots
 - `MUSICMIND_SOUNDSTAT_API_KEY` env var for optional paid enrichment
+- **Featuring artist parsing** — `parse_artists()` splits "Artist feat. B & C" into weighted tuples. Primary artists get 1.0 weight, featuring artists get 0.3. Applied to taste profile artist affinity and stats top artists.
 
 ### Fixed
 - **Recommendation strategies fail with 400 error** — frontend sent `auto`/`similar_artists`/`charts` but backend expects `all`/`similar_artist`/`chart`. Fixed strategy-selector.tsx values and default state.

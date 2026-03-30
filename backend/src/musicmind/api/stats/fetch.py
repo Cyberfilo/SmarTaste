@@ -337,11 +337,15 @@ def compute_apple_music_top_artists(
     artist_tracks: dict[str, int] = {}
     artist_genres: dict[str, set[str]] = {}
 
+    from musicmind.engine.profile import parse_artists
+
     for song in filtered:
-        artist_name = song.get("artist_name", "")
-        if not artist_name:
+        raw_artist = song.get("artist_name", "")
+        if not raw_artist:
             continue
-        artist_tracks[artist_name] = artist_tracks.get(artist_name, 0) + 1
+        # Credit both primary and featuring artists
+        for name, _weight in parse_artists(raw_artist):
+            artist_tracks[name] = artist_tracks.get(name, 0) + 1
         genres = song.get("genre_names", [])
         if isinstance(genres, str):
             import json
@@ -350,9 +354,10 @@ def compute_apple_music_top_artists(
                 genres = json.loads(genres)
             except (json.JSONDecodeError, TypeError):
                 genres = []
-        if artist_name not in artist_genres:
-            artist_genres[artist_name] = set()
-        artist_genres[artist_name].update(genres)
+        for name, _weight in parse_artists(raw_artist):
+            if name not in artist_genres:
+                artist_genres[name] = set()
+            artist_genres[name].update(genres)
 
     # Sort by track count descending
     sorted_artists = sorted(
