@@ -244,6 +244,39 @@ export interface AudioFeaturesResponse {
   brightness: number | null;
 }
 
+// ── Playlists ───────────────────────────────────────────
+
+export interface PlaylistItem {
+  id: number;
+  catalog_id: string;
+  position: number;
+  name: string;
+  artist_name: string;
+  album_name: string;
+  artwork_url: string;
+  genre_names: string[];
+  added_by: string;
+}
+
+export interface Playlist {
+  id: number;
+  name: string;
+  description: string;
+  ai_context: string;
+  track_count: number;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface PlaylistDetail extends Playlist {
+  items: PlaylistItem[];
+}
+
+export interface PlaylistListResponse {
+  playlists: Playlist[];
+  total: number;
+}
+
 // ── Common ───────────────────────────────────────────────
 
 export type Period = "month" | "6months" | "alltime";

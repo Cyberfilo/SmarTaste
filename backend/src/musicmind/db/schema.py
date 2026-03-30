@@ -520,4 +520,39 @@ generated_playlists = sa.Table(
         nullable=True,
     ),
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
+    # AI-powered playlist fields (added in migration 010)
+    sa.Column("ai_context", sa.Text, server_default=""),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=True,
+    ),
+    sa.Column("track_count", sa.Integer, server_default="0"),
+)
+
+playlist_items = sa.Table(
+    "playlist_items",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column(
+        "playlist_id",
+        sa.Integer,
+        sa.ForeignKey("generated_playlists.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("catalog_id", sa.Text, nullable=False),
+    sa.Column("position", sa.Integer, nullable=False),
+    sa.Column("name", sa.Text, server_default=""),
+    sa.Column("artist_name", sa.Text, server_default=""),
+    sa.Column("album_name", sa.Text, server_default=""),
+    sa.Column("artwork_url", sa.Text, server_default=""),
+    sa.Column("genre_names", sa.JSON, server_default="[]"),
+    sa.Column(
+        "added_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column("added_by", sa.Text, server_default="user"),  # user, ai_expand, ai_improve
 )

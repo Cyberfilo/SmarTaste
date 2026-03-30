@@ -23,6 +23,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Dashboard filled with visualizations** — genre donut chart, top 8 artists with affinity bars, audio traits radar, release year bar chart. All from existing taste profile API data.
 - **Listening timeline** — `GET /api/stats/timeline` endpoint returns songs in chronological order with date type labels (added/release). Frontend component groups by month with artwork, song details, and date badges.
 - **On-demand Essentia deep analysis** — `POST /api/tracks/analyze` accepts up to 10 seed track IDs, downloads 30s previews (Apple Music AAC / Deezer MP3 fallback), extracts 128-dim Discogs-EffNet embeddings + scalar features. Gracefully degrades when Essentia is not installed.
+- **Playlists page** — full CRUD for playlists with AI context field. Backend: `GET/POST /api/playlists`, `GET/PATCH/DELETE /api/playlists/{id}`, `POST/DELETE` tracks. Frontend: playlist grid, create form with AI context textarea, detail view with track list and remove. New sidebar nav item.
 
 ### Fixed
 - **Recommendation strategies fail with 400 error** — frontend sent `auto`/`similar_artists`/`charts` but backend expects `all`/`similar_artist`/`chart`. Fixed strategy-selector.tsx values and default state.
