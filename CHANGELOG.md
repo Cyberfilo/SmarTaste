@@ -26,6 +26,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Playlists page** — full CRUD for playlists with AI context field. Backend: `GET/POST /api/playlists`, `GET/PATCH/DELETE /api/playlists/{id}`, `POST/DELETE` tracks. Frontend: playlist grid, create form with AI context textarea, detail view with track list and remove. New sidebar nav item.
 
 ### Fixed
+- **Recommendations still showing non-Italian artists** — genre overlap filter now distinguishes regional genres ("Italian Hip-Hop/Rap") from parent genres ("Hip-Hop/Rap"). Prefers exact regional matches, limits parent-only fallback to 5. Applied to all 4 discovery strategies.
+- **Scorer weight mismatch** — inline fallback weights in `score_candidate()` didn't match `DEFAULT_WEIGHTS`. Fixed to use consistent values.
+- **Chart colors indistinguishable** — replaced all-green palette with 8 distinct colors (emerald, blue, amber, red, violet, pink, cyan, orange).
+
+### Changed
+- **Audio features now 75% of recommendation score** — `DEFAULT_WEIGHTS.audio` increased from 0.20 to 0.75. Genre reduced to 0.10, other dimensions proportionally reduced. This makes musical similarity (BPM, energy, danceability, etc.) the dominant scoring signal.
+
+### Fixed
 - **Recommendation strategies fail with 400 error** — frontend sent `auto`/`similar_artists`/`charts` but backend expects `all`/`similar_artist`/`chart`. Fixed strategy-selector.tsx values and default state.
 - **Apple Music listening stats always empty** — `dateAdded` field missing from API response caused `_filter_songs_by_period()` to skip every song. Added `releaseDate` fallback and robust date parsing.
 - **Recommendations irrelevant for regional listeners** — discovery strategies used US storefront (`storefront="us"`) instead of user's actual region, and `genre_adjacent`/`editorial` had no genre overlap filtering. Now auto-detects storefront via `/v1/me/storefront` and filters candidates by genre overlap with user profile.

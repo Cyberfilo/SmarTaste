@@ -193,15 +193,15 @@ def score_candidate(
     # 9. Mood boost (set by filter_candidates_by_mood)
     mood_boost = candidate.get("_mood_boost", 0.0)
 
-    # Weighted combination
+    # Weighted combination — fallbacks match DEFAULT_WEIGHTS
     overall = (
-        w.get("genre", 0.25) * genre_score
-        + w.get("artist", 0.15) * artist_match
-        + w.get("audio", 0.15) * audio_sim
-        + w.get("novelty", 0.13) * novelty
-        + w.get("freshness", 0.12) * freshness
-        + w.get("diversity", 0.10) * (1.0 - diversity_penalty)
-        + w.get("staleness", 0.10) * (1.0 - staleness)
+        w.get("genre", 0.10) * genre_score
+        + w.get("artist", 0.03) * artist_match
+        + w.get("audio", 0.75) * audio_sim
+        + w.get("novelty", 0.04) * novelty
+        + w.get("freshness", 0.03) * freshness
+        + w.get("diversity", 0.03) * (1.0 - diversity_penalty)
+        + w.get("staleness", 0.02) * (1.0 - staleness)
         + cross_bonus
         + mood_boost * 0.1
     )

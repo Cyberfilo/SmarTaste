@@ -45,15 +45,16 @@ const tabs = [
 ];
 
 // Emerald-based palette for charts (dark mode friendly)
+// Distinct colors for dark backgrounds — high contrast, colorblind-safe
 const CHART_COLORS = [
-  "#10b981", // emerald-500
-  "#34d399", // emerald-400
-  "#6ee7b7", // emerald-300
-  "#059669", // emerald-600
-  "#047857", // emerald-700
-  "#a7f3d0", // emerald-200
-  "#065f46", // emerald-800
-  "#d1fae5", // emerald-100
+  "#10b981", // emerald
+  "#3b82f6", // blue
+  "#f59e0b", // amber
+  "#ef4444", // red
+  "#8b5cf6", // violet
+  "#ec4899", // pink
+  "#06b6d4", // cyan
+  "#f97316", // orange
 ];
 
 function SkeletonCard() {
