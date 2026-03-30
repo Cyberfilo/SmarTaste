@@ -217,10 +217,11 @@ async def apple_music_developer_token(
     """Return an Apple Developer Token for MusicKit JS authorization."""
     settings = request.app.state.settings
 
+    has_key = settings.apple_private_key_path or settings.apple_private_key_b64
     if (
         not settings.apple_team_id
         or not settings.apple_key_id
-        or not settings.apple_private_key_path
+        or not has_key
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -231,6 +232,7 @@ async def apple_music_developer_token(
         settings.apple_team_id,
         settings.apple_key_id,
         settings.apple_private_key_path,
+        private_key_b64=settings.apple_private_key_b64,
     )
     return AppleMusicDeveloperTokenResponse(developer_token=token)
 
