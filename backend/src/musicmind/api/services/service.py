@@ -240,6 +240,36 @@ async def check_apple_music_token(
         return False
 
 
+async def detect_apple_music_storefront(
+    music_user_token: str,
+    developer_token: str,
+) -> str:
+    """Detect the user's Apple Music storefront (country code).
+
+    Calls /v1/me/storefront to determine the user's regional store.
+    Falls back to "us" on any error.
+
+    Returns:
+        Two-letter storefront code (e.g. "it", "us", "gb").
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                APPLE_MUSIC_STOREFRONT_URL,
+                headers={
+                    "Authorization": f"Bearer {developer_token}",
+                    "Music-User-Token": music_user_token,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            if data:
+                return data[0].get("id", "us")
+    except (httpx.HTTPStatusError, httpx.HTTPError):
+        logger.warning("Failed to detect Apple Music storefront, defaulting to 'us'")
+    return "us"
+
+
 # ── Async DB Operations ──────────────────────────────────────────────────────
 
 
