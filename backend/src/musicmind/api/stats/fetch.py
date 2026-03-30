@@ -199,12 +199,51 @@ async def fetch_spotify_top_artists_for_period(
 # -- Apple Music Compute Functions --------------------------------------------
 
 
+def _parse_date(value: Any) -> datetime | None:
+    """Parse a date string or datetime into a timezone-aware datetime.
+
+    Handles ISO 8601 strings (with or without timezone), bare date strings
+    (YYYY-MM-DD), and datetime objects.  Returns None for unparseable input.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            pass
+        # Bare date like "2024-06-15"
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def _song_date(song: dict[str, Any]) -> datetime | None:
+    """Best-effort date for a song: dateAdded → releaseDate fallback.
+
+    Apple Music's library API often returns dateAdded as null.  When that
+    happens, fall back to releaseDate so period filtering still works.
+    """
+    parsed = _parse_date(song.get("date_added_to_library"))
+    if parsed is not None:
+        return parsed
+    return _parse_date(song.get("release_date"))
+
+
 def _filter_songs_by_period(
     songs: list[dict[str, Any]],
     *,
     period: str,
 ) -> list[dict[str, Any]]:
-    """Filter songs by date_added_to_library based on the requested period.
+    """Filter songs by date based on the requested period.
+
+    Uses date_added_to_library when available, falling back to release_date.
+    Songs with no usable date are included in "alltime" and excluded from
+    shorter periods (since we can't determine when they were added).
 
     Args:
         songs: List of song_metadata_cache-compatible dicts.
@@ -215,24 +254,16 @@ def _filter_songs_by_period(
     """
     days = PERIOD_DAYS_MAP.get(period)
     if days is None:
-        # alltime -- no filtering
+        # alltime -- return everything
         return list(songs)
 
     cutoff = datetime.now(UTC) - timedelta(days=days)
 
     filtered: list[dict[str, Any]] = []
     for song in songs:
-        date_added = song.get("date_added_to_library")
-        if date_added is None:
-            continue
-        if isinstance(date_added, str):
-            try:
-                parsed = datetime.fromisoformat(date_added.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                continue
-        elif isinstance(date_added, datetime):
-            parsed = date_added if date_added.tzinfo else date_added.replace(tzinfo=UTC)
-        else:
+        parsed = _song_date(song)
+        if parsed is None:
+            # No date at all — skip for period filtering
             continue
         if parsed >= cutoff:
             filtered.append(song)
@@ -259,12 +290,12 @@ def compute_apple_music_top_tracks(
     """
     filtered = _filter_songs_by_period(songs, period=period)
 
-    # Sort by date_added_to_library descending (most recently added first)
+    # Sort by best available date descending (most recent first)
     def _sort_key(s: dict[str, Any]) -> str:
-        date_added = s.get("date_added_to_library", "")
-        if isinstance(date_added, datetime):
-            return date_added.isoformat()
-        return str(date_added) if date_added else ""
+        parsed = _song_date(s)
+        if parsed is not None:
+            return parsed.isoformat()
+        return ""
 
     filtered.sort(key=_sort_key, reverse=True)
 
