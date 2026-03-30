@@ -114,6 +114,7 @@ class TasteService:
             service=resolved_service,
             songs=songs,
             history=history,
+            settings=settings,
         )
         return profile
 
@@ -206,6 +207,7 @@ class TasteService:
             service="unified",
             songs=deduplicated_songs,
             history=all_history,
+            settings=settings,
         )
 
         profile["services_included"] = services_included
@@ -273,6 +275,7 @@ class TasteService:
             "familiarity_score": mapping["familiarity_score"] or 0.0,
             "total_songs_analyzed": mapping["total_songs_analyzed"] or 0,
             "listening_hours_estimated": mapping["listening_hours_estimated"] or 0.0,
+            "audio_centroid": _parse_json(mapping.get("audio_centroid"), {}),
         }
 
     async def _fetch_and_cache_data(
@@ -505,12 +508,64 @@ class TasteService:
         service: str,
         songs: list[dict],
         history: list[dict],
+        settings: Any = None,
     ) -> dict[str, Any]:
         """Compute taste profile and save snapshot to database.
 
         Uses build_taste_profile with temporal decay enabled (D-12).
+        Triggers background audio enrichment for all songs.
         """
-        profile = build_taste_profile(songs, history, use_temporal_decay=True)
+        # Background enrichment: enrich tracks with audio features from free APIs
+        try:
+            from musicmind.engine.enrichment.orchestrator import enrich_tracks
+
+            await enrich_tracks(
+                engine,
+                songs,
+                user_id=user_id,
+                soundstat_api_key=(
+                    settings.soundstat_api_key if settings else None
+                ),
+                budget_mode=False,  # Never use paid API during background enrichment
+            )
+        except Exception:
+            logger.warning("Background audio enrichment failed, continuing without it")
+
+        # Load enriched audio features for centroid computation
+        audio_features_map: dict[str, dict] = {}
+        try:
+            async with engine.begin() as conn:
+                from musicmind.db.schema import audio_features_cache
+
+                catalog_ids = [s.get("catalog_id", "") for s in songs if s.get("catalog_id")]
+                if catalog_ids:
+                    result = await conn.execute(
+                        sa.select(audio_features_cache).where(
+                            sa.and_(
+                                audio_features_cache.c.catalog_id.in_(catalog_ids),
+                                audio_features_cache.c.user_id == user_id,
+                            )
+                        )
+                    )
+                    for row in result:
+                        features: dict[str, Any] = {}
+                        for field in (
+                            "tempo", "energy", "brightness", "danceability",
+                            "acousticness", "valence_proxy", "beat_strength",
+                        ):
+                            val = getattr(row, field, None)
+                            if val is not None:
+                                features[field] = val
+                        if features:
+                            audio_features_map[row.catalog_id] = features
+        except Exception:
+            logger.warning("Failed to load audio features for centroid, continuing without")
+
+        profile = build_taste_profile(
+            songs, history,
+            use_temporal_decay=True,
+            audio_features_map=audio_features_map or None,
+        )
 
         now = datetime.now(UTC)
         # Save snapshot -- strip tzinfo for SQLite compat
@@ -533,6 +588,7 @@ class TasteService:
                     familiarity_score=profile["familiarity_score"],
                     total_songs_analyzed=profile["total_songs_analyzed"],
                     listening_hours_estimated=profile["listening_hours_estimated"],
+                    audio_centroid=json.dumps(profile.get("audio_centroid", {})),
                 )
             )
 

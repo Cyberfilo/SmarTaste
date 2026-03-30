@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # Base64-encoded .p8 key contents (alternative to file path for cloud deploys)
     apple_private_key_b64: str | None = None
 
+    # Audio Enrichment APIs (optional — degrades gracefully)
+    # SoundStat: paid API (0.01 EUR/track), used only for specific recommendations
+    soundstat_api_key: str | None = None
+
     model_config = {"env_prefix": "MUSICMIND_", "env_file": ".env"}
 
     def model_post_init(self, __context: object) -> None:

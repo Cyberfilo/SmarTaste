@@ -291,6 +291,7 @@ def build_taste_profile(
     *,
     use_temporal_decay: bool = False,
     half_life_days: float = 90.0,
+    audio_features_map: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Build a complete taste profile from cached data.
 
@@ -299,6 +300,7 @@ def build_taste_profile(
         history: Listening history entries
         use_temporal_decay: Apply exponential decay to older songs
         half_life_days: Half-life in days for temporal decay
+        audio_features_map: Optional catalog_id → audio features dict
 
     Returns:
         Dict ready for saving as a taste_profile_snapshot
@@ -323,6 +325,16 @@ def build_taste_profile(
     )
     listening_hours = round(total_duration_ms / 3_600_000, 1)
 
+    # Build audio centroid from enriched features
+    audio_centroid: dict[str, float] = {}
+    if audio_features_map:
+        feature_list = [
+            audio_features_map[s.get("catalog_id", "")]
+            for s in songs
+            if s.get("catalog_id", "") in audio_features_map
+        ]
+        audio_centroid = build_audio_centroid(feature_list)
+
     return {
         "genre_vector": genre_vector,
         "top_artists": top_artists,
@@ -331,4 +343,5 @@ def build_taste_profile(
         "familiarity_score": familiarity,
         "total_songs_analyzed": len(songs),
         "listening_hours_estimated": listening_hours,
+        "audio_centroid": audio_centroid,
     }

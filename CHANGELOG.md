@@ -7,6 +7,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Audio enrichment pipeline** — progressive background enrichment from free external APIs:
+  - Deezer (ISRC-native, free) for BPM/tempo
+  - ReccoBeats (Spotify ID, free) for energy, danceability, valence, acousticness
+  - SoundStat (Spotify ID, paid, budget-gated) for complete features including key/scale
+  - MusicBrainz ISRC→Spotify ID resolver with permanent caching
+- **Audio features now active in scoring** — the 20% audio_similarity weight is no longer neutral. User audio centroid computed from enriched features and used in `rank_candidates()`.
+- **Mood filtering with audio features** — `filter_candidates_by_mood` now receives actual audio features.
+- New DB tables: `isrc_spotify_mapping` for permanent ISRC→Spotify ID cache
+- Expanded `audio_features_cache` with: key, scale, instrumentalness, loudness, feature_source (provenance), enriched_at
+- `audio_centroid` saved in taste profile snapshots
+- `MUSICMIND_SOUNDSTAT_API_KEY` env var for optional paid enrichment
+
 ### Fixed
 - **Recommendation strategies fail with 400 error** — frontend sent `auto`/`similar_artists`/`charts` but backend expects `all`/`similar_artist`/`chart`. Fixed strategy-selector.tsx values and default state.
 - **Apple Music listening stats always empty** — `dateAdded` field missing from API response caused `_filter_songs_by_period()` to skip every song. Added `releaseDate` fallback and robust date parsing.
