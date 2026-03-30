@@ -564,21 +564,43 @@ class RecommendationService:
         """Run discovery strategies and tag candidates with source strategy."""
         candidates: list[dict[str, Any]] = []
 
-        # Build genre set for post-filtering (lowercased for matching)
-        genre_filter = set(g.lower() for g in (profile_genres or top_genre_names))
+        # Build genre sets for post-filtering
+        # Full genre names (regional) get priority over parent genres
+        full_genre_filter = set(g.lower() for g in (profile_genres or top_genre_names))
+        # Also build parent-only set for looser fallback
+        from musicmind.engine.profile import expand_genres as _expand
+
+        parent_genres = set()
+        for g in (profile_genres or top_genre_names):
+            for expanded in _expand([g]):
+                parent_genres.add(expanded.lower())
 
         def _filter_by_genre_overlap(
             results: list[dict[str, Any]],
         ) -> list[dict[str, Any]]:
-            """Keep only candidates with at least one genre overlapping the profile."""
-            if not genre_filter:
+            """Keep candidates with regional genre overlap. Strict: prefer exact
+            regional match, fall back to parent match only if needed."""
+            if not full_genre_filter:
                 return results
-            filtered = []
+
+            exact_matches: list[dict[str, Any]] = []
+            parent_matches: list[dict[str, Any]] = []
+
             for c in results:
                 track_genres = set(g.lower() for g in c.get("genre_names", []))
-                if track_genres & genre_filter:
-                    filtered.append(c)
-            return filtered if filtered else results[:5]  # fallback to top 5 if all filtered
+                # Exact match on full regional genre names
+                if track_genres & full_genre_filter:
+                    exact_matches.append(c)
+                # Looser: parent genre overlap (e.g. "Hip-Hop/Rap")
+                elif track_genres & parent_genres:
+                    parent_matches.append(c)
+
+            # Prefer exact regional matches; add parent matches only to fill
+            if exact_matches:
+                return exact_matches
+            if parent_matches:
+                return parent_matches[:5]  # Limit loose matches
+            return results[:3]  # Absolute fallback
 
         async def _run_similar_artists() -> list[dict[str, Any]]:
             results = await discover_similar_artists(
@@ -586,6 +608,7 @@ class RecommendationService:
                 developer_token=developer_token,
                 storefront=storefront,
             )
+            results = _filter_by_genre_overlap(results)
             for c in results:
                 c["_strategy_source"] = "similar_artist"
             return results
