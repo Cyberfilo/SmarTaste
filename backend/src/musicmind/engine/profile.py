@@ -61,6 +61,56 @@ def temporal_decay_weight(
     return 2.0 ** (-age_days / half_life_days)
 
 
+# ── Featuring Artist Parsing ──────────────────────────────────────────────
+
+# Weight for featured artists relative to primary (0.3 = 30%)
+FEATURING_WEIGHT = 0.3
+
+import re  # noqa: E402
+
+_FEAT_PATTERN = re.compile(
+    r"\s*(?:\(|\[)?\s*(?:feat\.?|ft\.?|featuring)\s+",
+    re.IGNORECASE,
+)
+_MULTI_ARTIST_SEP = re.compile(r"\s*(?:,\s*|\s+&\s+|\s+x\s+|\s+X\s+)")
+
+
+def parse_artists(artist_name: str) -> list[tuple[str, float]]:
+    """Parse an artist name string into (name, weight) tuples.
+
+    Primary artist gets weight 1.0, featuring artists get FEATURING_WEIGHT.
+    Handles patterns: "Artist A feat. Artist B", "A ft. B & C",
+    "A (feat. B, C & D)", "A, B & C".
+
+    Returns:
+        List of (artist_name, weight) tuples. Never empty if input is non-empty.
+    """
+    if not artist_name or not artist_name.strip():
+        return []
+
+    # Split on feat./ft./featuring
+    parts = _FEAT_PATTERN.split(artist_name, maxsplit=1)
+    primary_part = parts[0].strip()
+    featuring_part = parts[1].strip().rstrip(")").rstrip("]") if len(parts) > 1 else ""
+
+    result: list[tuple[str, float]] = []
+
+    # Primary artist(s) — may contain "A & B" or "A, B" (co-primaries)
+    for name in _MULTI_ARTIST_SEP.split(primary_part):
+        name = name.strip()
+        if name:
+            result.append((name, 1.0))
+
+    # Featuring artist(s)
+    if featuring_part:
+        for name in _MULTI_ARTIST_SEP.split(featuring_part):
+            name = name.strip()
+            if name:
+                result.append((name, FEATURING_WEIGHT))
+
+    return result if result else [(artist_name.strip(), 1.0)]
+
+
 def build_genre_vector(
     songs: list[dict[str, Any]],
     history: list[dict[str, Any]],
@@ -146,30 +196,39 @@ def build_artist_affinity(
     now = datetime.now(tz=UTC)
 
     for song in songs:
-        artist = song.get("artist_name", "")
-        if not artist:
+        raw_artist = song.get("artist_name", "")
+        if not raw_artist:
             continue
         decay = 1.0
         if use_temporal_decay:
             ts = song.get("date_added_to_library") or song.get("fetched_at")
             decay = temporal_decay_weight(ts, now, half_life_days)
 
-        artist_scores[artist] += 1.0 * decay
-        artist_song_counts[artist] += 1
+        # Parse primary + featuring artists with weighted contribution
+        parsed = parse_artists(raw_artist)
+        for name, weight in parsed:
+            artist_scores[name] += 1.0 * decay * weight
+            artist_song_counts[name] += 1
+
+        # Love/dislike ratings apply to primary artist only
         rating = song.get("user_rating")
+        primary_name = parsed[0][0] if parsed else raw_artist
         if rating == 1:
-            artist_scores[artist] += 3.0 * decay
+            artist_scores[primary_name] += 3.0 * decay
         elif rating == -1:
-            artist_scores[artist] -= 2.0 * decay
+            artist_scores[primary_name] -= 2.0 * decay
 
     for entry in history:
-        artist = entry.get("artist_name", "")
-        if artist:
-            decay = 1.0
-            if use_temporal_decay:
-                ts = entry.get("observed_at")
-                decay = temporal_decay_weight(ts, now, half_life_days)
-            artist_scores[artist] += 2.0 * decay
+        raw_artist = entry.get("artist_name", "")
+        if not raw_artist:
+            continue
+        decay = 1.0
+        if use_temporal_decay:
+            ts = entry.get("observed_at")
+            decay = temporal_decay_weight(ts, now, half_life_days)
+        # Recent plays also credit featuring artists
+        for name, weight in parse_artists(raw_artist):
+            artist_scores[name] += 2.0 * decay * weight
 
     # Normalize by max score
     if not artist_scores:
