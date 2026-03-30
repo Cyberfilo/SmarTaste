@@ -1,3 +1,3 @@
-"""API routes for MusicMind Web."""
+"""API routes for SmarTaste."""
 
 from __future__ import annotations

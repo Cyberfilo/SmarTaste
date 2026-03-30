@@ -72,7 +72,7 @@ async def store_api_key(
     Args:
         engine: SQLAlchemy async engine.
         encryption: EncryptionService for key encryption.
-        user_id: MusicMind user ID.
+        user_id: SmarTaste user ID.
         api_key: Plaintext OpenAI API key to encrypt and store.
     """
     encrypted_key = encryption.encrypt(api_key)
@@ -128,7 +128,7 @@ async def get_api_key_status(
     Args:
         engine: SQLAlchemy async engine.
         encryption: EncryptionService for key decryption (to generate masked preview).
-        user_id: MusicMind user ID.
+        user_id: SmarTaste user ID.
 
     Returns:
         Dict with configured (bool), masked_key (str|None), service (str).
@@ -163,7 +163,7 @@ async def get_decrypted_api_key(
     Args:
         engine: SQLAlchemy async engine.
         encryption: EncryptionService for key decryption.
-        user_id: MusicMind user ID.
+        user_id: SmarTaste user ID.
 
     Returns:
         Plaintext API key, or None if no key is stored.
@@ -194,7 +194,7 @@ async def delete_api_key(
 
     Args:
         engine: SQLAlchemy async engine.
-        user_id: MusicMind user ID.
+        user_id: SmarTaste user ID.
 
     Returns:
         True if a key was deleted, False if no key existed.

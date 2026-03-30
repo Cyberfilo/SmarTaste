@@ -1,15 +1,15 @@
-# MusicMind — Complete Project Documentation
+# SmarTaste — Complete Project Documentation
 
 > Last updated: 2026-03-30 | Version: 0.1.0 | Status: Production (alpha)
 
-## What Is MusicMind?
+## What Is SmarTaste?
 
-MusicMind is a hybrid dashboard + AI chat webapp for music discovery. Users connect their Spotify and/or Apple Music accounts, bring their own Claude or OpenAI API key, and get a unified taste profile with personalized recommendations — plus a conversational AI interface for deeper musical exploration.
+SmarTaste is a hybrid dashboard + AI chat webapp for music discovery. Users connect their Spotify and/or Apple Music accounts, bring their own Claude or OpenAI API key, and get a unified taste profile with personalized recommendations — plus a conversational AI interface for deeper musical exploration.
 
 Built for a small group of friends, not a public product. The core value: genuinely good music recommendations powered by real listening data and a 7-dimension adaptive scoring engine — not just "people who liked X also liked Y."
 
 **Live at:** https://music.menghi.dev
-**Repository:** https://github.com/Cyberfilo/MusicMind
+**Repository:** https://github.com/Cyberfilo/SmarTaste
 **License:** MIT (Copyright 2026 Filippo Mattia Menghi)
 
 ---

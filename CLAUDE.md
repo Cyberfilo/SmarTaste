@@ -1,4 +1,4 @@
-# MusicMind MCP
+# SmarTaste (formerly MusicMind)
 
 ## Quick Commands
 - `uv run python -m musicmind.server` — Start MCP server (stdio)
@@ -99,7 +99,7 @@ If a known artist appears in a genre with cosine score < 0.2, their artist_match
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
-**MusicMind Web**
+**SmarTaste**
 
 A hybrid dashboard + AI chat webapp for music discovery, built on top of an existing MCP-based recommendation engine. Users connect their Spotify and/or Apple Music accounts, bring their own Claude API key, and get a unified taste profile with personalized recommendations — plus a Claude chat interface for deeper musical exploration. Designed for a small group of friends, not a public product.
 
@@ -228,7 +228,7 @@ A hybrid dashboard + AI chat webapp for music discovery, built on top of an exis
 ## Logging
 - Never use `print()` or write to stdout (MCP protocol uses stdio)
 - Use `logger.info()` for normal operations, `logger.warning()` for recoverable issues, `logger.error()` for failures
-- Use %-formatting in log calls (not f-strings): `logger.info("MusicMind MCP v%s starting up", __version__)`
+- Use %-formatting in log calls (not f-strings): `logger.info("SmarTaste v%s starting up", __version__)`
 ## Comments
 - Every `.py` file has a top-level docstring: `"""Async Apple Music API client."""`
 - Docstrings use triple-quoted strings, single line for brief or multi-line for detailed
@@ -421,7 +421,7 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 
 ---
 
-# MusicMind — Improvement Sprint
+# SmarTaste — Improvement Sprint
 
 ## Quick Commands
 - `cd backend && uvicorn app:app --reload` — Start backend

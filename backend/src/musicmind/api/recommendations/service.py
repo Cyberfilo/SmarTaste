@@ -129,7 +129,7 @@ class RecommendationService:
             engine: SQLAlchemy async engine.
             encryption: EncryptionService for token decryption.
             settings: Application settings.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             strategy: Discovery strategy ("all", "similar_artist",
                 "genre_adjacent", "editorial", "chart").
             mood: Optional mood filter (e.g. "chill", "workout", "energy").
@@ -260,7 +260,7 @@ class RecommendationService:
             engine: SQLAlchemy async engine.
             encryption: EncryptionService for token decryption.
             settings: Application settings.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             catalog_id: Catalog ID of the track to score.
 
         Returns:
@@ -388,7 +388,7 @@ class RecommendationService:
 
         Args:
             engine: SQLAlchemy async engine.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             catalog_id: Catalog ID of the track.
             feedback_type: One of thumbs_up, thumbs_down, skip.
         """

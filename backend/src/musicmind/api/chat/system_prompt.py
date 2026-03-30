@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 async def build_system_prompt(engine: Any, user_id: str) -> str:
     """Build the system prompt with user context.
 
-    Includes MusicMind identity, connected services, brief taste summary,
+    Includes SmarTaste identity, connected services, brief taste summary,
     and available tool descriptions.
 
     Args:
@@ -32,7 +32,7 @@ async def build_system_prompt(engine: Any, user_id: str) -> str:
         Complete system prompt string.
     """
     parts = [
-        "You are MusicMind, an AI music discovery assistant. You have access to "
+        "You are SmarTaste, an AI music discovery assistant. You have access to "
         "the user's real listening data from Spotify and Apple Music. You can "
         "analyze their taste profile, find new music they'll love, explain why "
         "songs match their preferences, and adjust recommendations based on "

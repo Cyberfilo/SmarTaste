@@ -1,4 +1,4 @@
-"""Claude tool definitions and executor mapping for MusicMind chat.
+"""Claude tool definitions and executor mapping for SmarTaste chat.
 
 Defines 8 curated tools that Claude can invoke via tool_use during chat.
 Each tool maps to an existing service function (TasteService, RecommendationService,
@@ -60,7 +60,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "get_recommendations",
         "description": (
             "Get personalized music recommendations scored and ranked by the "
-            "MusicMind engine. Returns tracks with match scores, explanations, "
+            "SmarTaste engine. Returns tracks with match scores, explanations, "
             "and genre information. Supports different discovery strategies and "
             "mood filtering."
         ),

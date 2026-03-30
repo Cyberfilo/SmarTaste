@@ -1,7 +1,7 @@
-"""ChatService: dispatches to LLM providers with MusicMind tools.
+"""ChatService: dispatches to LLM providers with SmarTaste tools.
 
 Sends user messages to the selected LLM provider (Claude or OpenAI) with
-MusicMind tool definitions, streams responses as SSE events, manages
+SmarTaste tool definitions, streams responses as SSE events, manages
 context windows, and persists conversations to the database.
 """
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChatService:
-    """Orchestrates LLM provider <-> MusicMind tool bridge with streaming output.
+    """Orchestrates LLM provider <-> SmarTaste tool bridge with streaming output.
 
     Dispatches to ClaudeProvider or OpenAIProvider based on the model parameter,
     manages conversation state, and yields SSE events.

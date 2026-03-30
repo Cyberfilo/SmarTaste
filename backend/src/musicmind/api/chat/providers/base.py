@@ -71,7 +71,7 @@ class LLMProvider(ABC):
         user_id: str,
         tool_input: dict[str, Any],
     ) -> dict[str, Any]:
-        """Execute a MusicMind tool via the TOOL_EXECUTORS mapping.
+        """Execute a SmarTaste tool via the TOOL_EXECUTORS mapping.
 
         Args:
             tool_name: Name of the tool to execute.

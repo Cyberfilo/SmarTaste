@@ -23,6 +23,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `frontend/src/proxy.ts` — replaced by `next.config.ts` rewrites
 
 ### Changed
+- **Rebranded from MusicMind to SmarTaste** — all user-facing text, UI, docs, test docstrings
+  - Python package name (`musicmind`) and env prefix (`MUSICMIND_`) kept for backward compatibility
+  - Docker/DB credentials unchanged to avoid migration issues
 - Backend `__version__` now reads from root `VERSION` file
 - FastAPI app version now dynamic (reads from `__version__`)
 - `pyproject.toml` uses Hatch dynamic versioning from `VERSION` file

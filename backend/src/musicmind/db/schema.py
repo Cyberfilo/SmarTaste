@@ -1,4 +1,4 @@
-"""SQLAlchemy Core table definitions for MusicMind Web.
+"""SQLAlchemy Core table definitions for SmarTaste.
 
 Multi-user PostgreSQL schema with user_id foreign keys on all data tables.
 Adapted from the original single-user SQLite schema with timezone-aware timestamps

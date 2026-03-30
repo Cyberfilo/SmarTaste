@@ -1,4 +1,4 @@
-# MusicMind
+# SmarTaste
 
 A music discovery webapp that connects to your Spotify and Apple Music accounts, analyzes your listening habits, and delivers genuinely personalized recommendations — powered by a 7-dimension adaptive scoring engine and conversational AI via Claude.
 
@@ -35,8 +35,8 @@ backend/           FastAPI · SQLAlchemy Core · asyncpg · Alembic
 
 ```bash
 # Clone
-git clone https://github.com/Cyberfilo/MusicMind.git
-cd MusicMind
+git clone https://github.com/Cyberfilo/SmarTaste.git
+cd SmarTaste
 
 # Start database
 docker compose up db -d
@@ -90,7 +90,7 @@ docker compose up -d
 
 1. Import the GitHub repo at [vercel.com/new](https://vercel.com/new)
 2. Vercel auto-detects `rootDirectory: frontend` from `vercel.json`
-3. Set environment variable: `NEXT_PUBLIC_API_URL` = your Railway backend URL (e.g., `https://musicmind-backend.up.railway.app`)
+3. Set environment variable: `NEXT_PUBLIC_API_URL` = your Railway backend URL (e.g., `https://smartaste-backend.up.railway.app`)
 4. Deploy
 
 **Backend → Railway:**
@@ -102,7 +102,7 @@ docker compose up -d
    - `MUSICMIND_DATABASE_URL` — Railway auto-fills this from the PostgreSQL service (use the `DATABASE_URL` variable with `postgresql+asyncpg://` prefix)
    - `MUSICMIND_FERNET_KEY` — generate with `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
    - `MUSICMIND_JWT_SECRET_KEY` — generate with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
-   - `MUSICMIND_FRONTEND_URL` — your Vercel URL (e.g., `https://musicmind.vercel.app`)
+   - `MUSICMIND_FRONTEND_URL` — your Vercel URL (e.g., `https://smartaste.vercel.app`)
    - `MUSICMIND_SPOTIFY_REDIRECT_URI` — `https://your-vercel-url.vercel.app/api/services/spotify/callback`
    - `MUSICMIND_DEBUG` = `false`
    - Plus Spotify/Apple Music keys if needed

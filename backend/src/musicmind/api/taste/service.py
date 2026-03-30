@@ -68,7 +68,7 @@ class TasteService:
             engine: SQLAlchemy async engine.
             encryption: EncryptionService for token decryption.
             settings: Application settings.
-            user_id: MusicMind user ID.
+            user_id: SmarTaste user ID.
             service: Target service (spotify or apple_music). Auto-detected if None.
             force_refresh: Bypass staleness check and re-fetch.
 

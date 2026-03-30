@@ -250,7 +250,7 @@ export function OpenAIKeyManager() {
                 <span className="font-mono text-muted-foreground">{costEstimate.output_token_price}</span>
               </div>
               <p className="text-[10px] text-muted-foreground/70 pt-1">
-                You pay OpenAI directly. MusicMind does not charge anything.
+                You pay OpenAI directly. SmarTaste does not charge anything.
               </p>
             </div>
           </>

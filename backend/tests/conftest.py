@@ -1,4 +1,4 @@
-"""Shared test fixtures for MusicMind Web backend tests."""
+"""Shared test fixtures for SmarTaste backend tests."""
 
 from __future__ import annotations
 

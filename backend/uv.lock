@@ -737,7 +737,6 @@ wheels = [
 
 [[package]]
 name = "musicmind-web-backend"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

@@ -1,7 +1,7 @@
 [project]
 name = "musicmind-web-backend"
 dynamic = ["version"]
-description = "MusicMind Web backend API"
+description = "SmarTaste backend API"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [

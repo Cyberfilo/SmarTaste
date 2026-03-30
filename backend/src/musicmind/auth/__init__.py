@@ -1,1 +1,1 @@
-"""Authentication and session management for MusicMind Web."""
+"""Authentication and session management for SmarTaste."""
