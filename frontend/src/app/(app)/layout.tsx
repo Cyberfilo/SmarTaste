@@ -8,6 +8,7 @@ import { authApi } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   LayoutDashboard,
+  ListMusic,
   MessageCircle,
   Settings,
   LogOut,
@@ -53,6 +54,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   const navItems = [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/playlists", label: "Playlists", icon: ListMusic },
     { href: "/chat", label: "Chat", icon: MessageCircle },
     { href: "/settings", label: "Settings", icon: Settings },
   ];
