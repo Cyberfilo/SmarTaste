@@ -14,9 +14,13 @@ from musicmind.db.schema import metadata as target_metadata
 # Alembic Config object
 config = context.config
 
-# Override URL from environment if set (used in docker-compose and CI)
-database_url = os.environ.get("MUSICMIND_DATABASE_URL")
+# Override URL from environment if set (used in docker-compose, CI, Railway)
+# Check MUSICMIND_DATABASE_URL first, then DATABASE_URL (Railway convention)
+database_url = os.environ.get("MUSICMIND_DATABASE_URL") or os.environ.get("DATABASE_URL")
 if database_url:
+    # Railway/Heroku provide postgresql:// but asyncpg needs postgresql+asyncpg://
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     config.set_main_option("sqlalchemy.url", database_url)
 
 

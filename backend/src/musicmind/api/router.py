@@ -10,6 +10,7 @@ from musicmind.api.health import router as health_router
 from musicmind.api.openai.router import router as openai_router
 from musicmind.api.recommendations.router import router as recommendations_router
 from musicmind.api.services.router import router as services_router
+from musicmind.api.session.router import router as session_router
 from musicmind.api.stats.router import router as stats_router
 from musicmind.api.taste.router import router as taste_router
 from musicmind.api.tracks.router import router as tracks_router
@@ -26,3 +27,4 @@ api_router.include_router(taste_router)
 api_router.include_router(stats_router)
 api_router.include_router(recommendations_router)
 api_router.include_router(tracks_router)
+api_router.include_router(session_router)

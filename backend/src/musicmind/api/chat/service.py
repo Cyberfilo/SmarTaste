@@ -21,7 +21,7 @@ from musicmind.api.chat.providers.claude import ClaudeProvider
 from musicmind.api.chat.providers.openai import OpenAIProvider
 from musicmind.api.chat.system_prompt import build_system_prompt
 from musicmind.api.chat.tools import TOOL_DEFINITIONS, TOOL_EXECUTORS
-from musicmind.db.schema import chat_conversations
+from musicmind.db.schema import chat_conversations, chat_messages
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ class ChatService:
         context_messages: list[dict[str, Any]],
         response_messages: list[dict[str, Any]],
     ) -> None:
-        """Persist the full message history to the database."""
+        """Persist messages to both JSON blob (backward compat) and normalized table."""
         all_messages = context_messages + response_messages
 
         serializable_messages = []
@@ -218,6 +218,7 @@ class ChatService:
 
         now = datetime.now(UTC)
         async with engine.begin() as conn:
+            # Backward compat: update JSON blob
             await conn.execute(
                 chat_conversations.update()
                 .where(chat_conversations.c.id == conversation_id)
@@ -226,6 +227,33 @@ class ChatService:
                     updated_at=now,
                 )
             )
+
+            # Normalized: write new messages to chat_messages table
+            # Only write response messages (context was already persisted)
+            for msg in response_messages:
+                serialized = self._serialize_message(msg)
+                tool_data = None
+                if serialized.get("tool_use"):
+                    tool_data = json.dumps(serialized["tool_use"])
+                elif serialized.get("tool_result"):
+                    tool_data = json.dumps(serialized["tool_result"])
+
+                try:
+                    await conn.execute(
+                        chat_messages.insert().values(
+                            conversation_id=conversation_id,
+                            role=serialized.get("role", "assistant"),
+                            content=serialized.get("content", ""),
+                            tool_calls=tool_data,
+                            created_at=now,
+                        )
+                    )
+                except Exception:
+                    # Don't fail the whole flow if normalized write fails
+                    logger.warning(
+                        "Failed to write to chat_messages for conversation %s",
+                        conversation_id,
+                    )
 
     def _serialize_message(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Serialize a message dict for JSON storage.

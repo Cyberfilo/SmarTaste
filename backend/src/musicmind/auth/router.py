@@ -20,6 +20,7 @@ from musicmind.auth.service import (
     set_auth_cookies,
     verify_password,
 )
+from musicmind.api.rate_limit import AUTH_LIMIT, limiter
 from musicmind.db.schema import refresh_tokens, users
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
+@limiter.limit(AUTH_LIMIT)
 async def signup(request: Request, response: Response, body: SignupRequest) -> dict:
     """Register a new user account."""
     engine = request.app.state.engine
@@ -36,8 +38,15 @@ async def signup(request: Request, response: Response, body: SignupRequest) -> d
     user_id = str(uuid.uuid7())
     display_name = body.display_name or body.email.split("@")[0]
 
+    access_token = create_access_token(
+        user_id, body.email, secret_key=settings.jwt_secret_key
+    )
+    refresh_token, token_id = create_refresh_token(
+        user_id, secret_key=settings.jwt_secret_key
+    )
+
     async with engine.begin() as conn:
-        # Check for duplicate email
+        # Check for duplicate email, create user, and store refresh token atomically
         result = await conn.execute(
             sa.select(users.c.id).where(users.c.email == body.email)
         )
@@ -55,15 +64,6 @@ async def signup(request: Request, response: Response, body: SignupRequest) -> d
                 display_name=display_name,
             )
         )
-
-    access_token = create_access_token(
-        user_id, body.email, secret_key=settings.jwt_secret_key
-    )
-    refresh_token, token_id = create_refresh_token(
-        user_id, secret_key=settings.jwt_secret_key
-    )
-
-    async with engine.begin() as conn:
         await conn.execute(
             refresh_tokens.insert().values(
                 id=token_id,
@@ -79,6 +79,7 @@ async def signup(request: Request, response: Response, body: SignupRequest) -> d
 
 
 @router.post("/login")
+@limiter.limit(AUTH_LIMIT)
 async def login(request: Request, response: Response, body: LoginRequest) -> dict:
     """Authenticate with email and password."""
     engine = request.app.state.engine
@@ -95,20 +96,19 @@ async def login(request: Request, response: Response, body: LoginRequest) -> dic
         )
         user = result.first()
 
-    if user is None or not verify_password(body.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
+        if user is None or not verify_password(body.password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+            )
+
+        access_token = create_access_token(
+            user.id, user.email, secret_key=settings.jwt_secret_key
+        )
+        refresh_token, token_id = create_refresh_token(
+            user.id, secret_key=settings.jwt_secret_key
         )
 
-    access_token = create_access_token(
-        user.id, user.email, secret_key=settings.jwt_secret_key
-    )
-    refresh_token, token_id = create_refresh_token(
-        user.id, secret_key=settings.jwt_secret_key
-    )
-
-    async with engine.begin() as conn:
         await conn.execute(
             refresh_tokens.insert().values(
                 id=token_id,
@@ -189,6 +189,9 @@ async def refresh(request: Request, response: Response) -> dict:
         )
 
     jti = payload.get("jti")
+    user_id = payload["sub"]
+
+    # Single atomic transaction: validate old token, revoke it, fetch user, insert new token
     async with engine.begin() as conn:
         result = await conn.execute(
             sa.select(refresh_tokens.c.id, refresh_tokens.c.revoked).where(
@@ -197,42 +200,38 @@ async def refresh(request: Request, response: Response) -> dict:
         )
         db_token = result.first()
 
-    if db_token is None or db_token.revoked:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid refresh token",
-        )
+        if db_token is None or db_token.revoked:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
 
-    # Revoke old token
-    async with engine.begin() as conn:
+        # Revoke old token
         await conn.execute(
             refresh_tokens.update()
             .where(refresh_tokens.c.id == jti)
             .values(revoked=True)
         )
 
-    user_id = payload["sub"]
-    # Fetch email from DB for new access token
-    async with engine.begin() as conn:
+        # Fetch email from DB for new access token
         result = await conn.execute(
             sa.select(users.c.email).where(users.c.id == user_id)
         )
         user = result.first()
 
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+
+        new_access_token = create_access_token(
+            user_id, user.email, secret_key=settings.jwt_secret_key
+        )
+        new_refresh_token, new_token_id = create_refresh_token(
+            user_id, secret_key=settings.jwt_secret_key
         )
 
-    new_access_token = create_access_token(
-        user_id, user.email, secret_key=settings.jwt_secret_key
-    )
-    new_refresh_token, new_token_id = create_refresh_token(
-        user_id, secret_key=settings.jwt_secret_key
-    )
-
-    async with engine.begin() as conn:
         await conn.execute(
             refresh_tokens.insert().values(
                 id=new_token_id,

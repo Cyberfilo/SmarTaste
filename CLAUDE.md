@@ -418,3 +418,47 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 > Profile not yet configured. Run `/gsd:profile-user` to generate your developer profile.
 > This section is managed by `generate-claude-profile` -- do not edit manually.
 <!-- GSD:profile-end -->
+
+---
+
+# MusicMind — Improvement Sprint
+
+## Quick Commands
+- `cd backend && uvicorn app:app --reload` — Start backend
+- `cd frontend && npm run dev` — Start frontend
+- `pytest` — Run tests
+- `git status && git diff --stat` — Check changes before commit
+
+## Sprint Overview
+10 phases, 17 improvements from two technical audits. Ordered by dependency — bugs → performance → types → infra → features.
+
+## Architecture Context
+- Backend: Python, FastAPI, SQLAlchemy async, PostgreSQL
+- Frontend: React, TypeScript (Next.js), TanStack Query, Zustand, SSE via fetch+ReadableStream
+- Engine: engine/ — scorer.py, profile.py, weights.py, similarity.py, genres.py, dedup.py, mood.py
+- Auth: auth/router.py — signup, login, refresh, BYOK Fernet encryption
+- DB: SQLAlchemy async (Core, no ORM), JSON columns for chat history
+- Tests: pytest, 294 tests
+- Deployment: Vercel (frontend) + Docker Compose (backend + PostgreSQL)
+
+## Code Style
+- All new Python: type hints mandatory, async def for DB/API calls
+- Functions under 80 lines, split if longer
+- Commit format: `feat(engine): phase N.M — description`
+
+## New Dependencies Added
+[Update as you install them]
+
+## Known Issues
+- artist_cache PK: only artist_id as primary key, missing user_id — two users overwrite each other (schema.py:179)
+- audio_features_cache PK: same issue — catalog_id only, no user_id in PK (schema.py:253)
+- sound_classification_cache PK: same issue (schema.py:278)
+- CORS: hardcoded origins in app.py:41-45 (localhost:3000, live.menghi.dev)
+- Auth: signup/login/refresh use multiple separate DB transactions instead of atomic
+- SSE parser: sse.ts:68 drops events with empty data fields (falsy check on currentData)
+- Weights optimizer: uses linear ratio approximation, not real coordinate descent (weights.py:92-95)
+- rank_candidates: O(n²×m) — rescores all remaining candidates each iteration (scorer.py:254-263)
+- _compute_staleness: linear scan through list instead of set lookup (scorer.py:71-72)
+
+## Decisions Log
+[Record every architectural choice and why]
