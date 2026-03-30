@@ -3,11 +3,11 @@
 import { cn } from "@/lib/utils";
 
 const strategies = [
-  { value: "auto", label: "Auto" },
-  { value: "similar_artists", label: "Similar Artists" },
+  { value: "all", label: "All" },
+  { value: "similar_artist", label: "Similar Artists" },
   { value: "genre_adjacent", label: "Genre Adjacent" },
   { value: "editorial", label: "Editorial" },
-  { value: "charts", label: "Charts" },
+  { value: "chart", label: "Charts" },
 ] as const;
 
 interface StrategySelectorProps {

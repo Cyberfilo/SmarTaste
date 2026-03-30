@@ -34,7 +34,7 @@ class RecommendationsResponse(BaseModel):
         description="Scored recommendations sorted by match quality"
     )
     strategy: str = Field(
-        description="Requested strategy (auto, similar_artists, genre_adjacent, editorial, charts)"
+        description="Requested strategy (all, similar_artist, genre_adjacent, editorial, chart)"
     )
     mood: str | None = Field(
         default=None,

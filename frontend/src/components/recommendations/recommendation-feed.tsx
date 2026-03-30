@@ -12,7 +12,7 @@ import { Music } from "lucide-react";
 import { useEffect } from "react";
 
 export function RecommendationFeed() {
-  const [strategy, setStrategy] = useState("auto");
+  const [strategy, setStrategy] = useState("all");
   const [mood, setMood] = useState<string | null>(null);
 
   const { data, isLoading, isError, error } = useRecommendations(strategy, mood);
