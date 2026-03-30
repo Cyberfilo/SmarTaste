@@ -4,9 +4,9 @@
  * Handles CSRF tokens, cookie-based auth, and automatic token refresh.
  */
 
-// Use relative URLs — Next.js rewrites /api/* to the backend.
-// This avoids cross-origin issues when accessed via tunnel or any domain.
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+// Always use relative URLs. Next.js rewrites proxy /api/* to the backend
+// (both locally and on Vercel), keeping everything same-origin for cookies.
+export const API_URL = "";
 
 /**
  * Read the CSRF token from document.cookie.
