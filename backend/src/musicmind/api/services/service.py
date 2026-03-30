@@ -85,6 +85,7 @@ def generate_apple_developer_token(
     team_id: str,
     key_id: str,
     private_key_path: str,
+    private_key_b64: str | None = None,
 ) -> str:
     """Generate an ES256-signed Apple Developer Token for MusicKit.
 
@@ -94,11 +95,17 @@ def generate_apple_developer_token(
         team_id: Apple Developer Team ID.
         key_id: MusicKit private key ID.
         private_key_path: Path to the .p8 private key file.
+        private_key_b64: Base64-encoded .p8 key contents (for cloud deploys).
 
     Returns:
         Signed JWT developer token valid for ~6 months.
     """
-    private_key = Path(private_key_path).expanduser().read_text().strip()
+    import base64
+
+    if private_key_b64:
+        private_key = base64.b64decode(private_key_b64).decode().strip()
+    else:
+        private_key = Path(private_key_path).expanduser().read_text().strip()
     now = int(time.time())
     payload = {
         "iss": team_id,

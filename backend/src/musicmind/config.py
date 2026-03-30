@@ -63,5 +63,7 @@ class Settings(BaseSettings):
     apple_team_id: str | None = None
     apple_key_id: str | None = None
     apple_private_key_path: str | None = None
+    # Base64-encoded .p8 key contents (alternative to file path for cloud deploys)
+    apple_private_key_b64: str | None = None
 
     model_config = {"env_prefix": "MUSICMIND_", "env_file": ".env"}
