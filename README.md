@@ -6,11 +6,11 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License">
 </p>
 
-# SmarTaste
+# SmarTaste <sup><sub>formerly MusicMind</sub></sup>
 
 > Your music, understood. A music discovery platform that connects to Spotify and Apple Music, analyzes your actual listening data, and delivers genuinely personalized recommendations — powered by a 7-dimension adaptive scoring engine and conversational AI.
 
-**Live:** [music.menghi.dev](https://music.menghi.dev) · **Docs:** [`what.md`](what.md)
+**Live:** [music.menghi.dev](https://music.menghi.dev) · **Docs:** [`what.md`](what.md) · *Previously known as MusicMind*
 
 ---
 
