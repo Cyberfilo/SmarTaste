@@ -24,6 +24,7 @@ from musicmind.api.chat.schemas import (
     SendMessageRequest,
 )
 from musicmind.api.chat.service import ChatService
+from musicmind.api.rate_limit import CHAT_LIMIT, limiter
 from musicmind.auth.dependencies import get_current_user
 from musicmind.db.schema import chat_conversations
 
@@ -52,6 +53,7 @@ async def _sse_generator(events):
 
 
 @router.post("/message")
+@limiter.limit(CHAT_LIMIT)
 async def send_message(
     request: Request,
     body: SendMessageRequest,

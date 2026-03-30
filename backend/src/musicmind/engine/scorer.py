@@ -56,37 +56,48 @@ def _genre_cosine(
     return float(dot / (norm_a * norm_b))
 
 
+def _build_staleness_index(
+    recent_recommendations: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Pre-index recent recommendations by catalog_id for O(1) lookup."""
+    index: dict[str, dict[str, Any]] = {}
+    for rec in recent_recommendations:
+        cid = rec.get("catalog_id")
+        if cid and cid not in index:
+            index[cid] = rec
+    return index
+
+
 def _compute_staleness(
     catalog_id: str,
-    recent_recommendations: list[dict[str, Any]],
+    staleness_index: dict[str, dict[str, Any]],
 ) -> float:
     """Compute staleness penalty based on recent recommendations.
 
     Returns 0.0 (no penalty) to 0.8 (recently recommended).
+    Uses pre-built index for O(1) lookup instead of linear scan.
     """
-    if not recent_recommendations:
+    rec = staleness_index.get(catalog_id)
+    if rec is None:
         return 0.0
 
-    now = datetime.now(tz=UTC)
-    for rec in recent_recommendations:
-        if rec.get("catalog_id") != catalog_id:
-            continue
-        created = rec.get("created_at")
-        if created is None:
-            continue
-        if isinstance(created, str):
-            try:
-                created = datetime.fromisoformat(created)
-            except (ValueError, TypeError):
-                continue
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=UTC)
+    created = rec.get("created_at")
+    if created is None:
+        return 0.0
+    if isinstance(created, str):
+        try:
+            created = datetime.fromisoformat(created)
+        except (ValueError, TypeError):
+            return 0.0
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
 
-        age_days = (now - created).total_seconds() / 86400.0
-        if age_days < 7:
-            return 0.8
-        elif age_days < 30:
-            return 0.4
+    now = datetime.now(tz=UTC)
+    age_days = (now - created).total_seconds() / 86400.0
+    if age_days < 7:
+        return 0.8
+    elif age_days < 30:
+        return 0.4
     return 0.0
 
 
@@ -99,6 +110,7 @@ def score_candidate(
     audio_features: dict[str, Any] | None = None,
     user_audio_centroid: dict[str, float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
+    staleness_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Score a single candidate song against a taste profile.
 
@@ -164,10 +176,15 @@ def score_candidate(
         diversity_penalty = max_sim * 0.3
 
     # 7. Staleness penalty
-    staleness = _compute_staleness(
-        candidate.get("catalog_id", ""),
-        recent_recommendations or [],
-    )
+    if staleness_index is not None:
+        staleness = _compute_staleness(
+            candidate.get("catalog_id", ""), staleness_index
+        )
+    else:
+        # Fallback: build index on the fly (backward compat)
+        recs = recent_recommendations or []
+        idx = _build_staleness_index(recs) if recs else {}
+        staleness = _compute_staleness(candidate.get("catalog_id", ""), idx)
 
     # 8. Cross-strategy bonus
     strategy_count = candidate.get("_strategy_count", 1)
@@ -240,34 +257,70 @@ def rank_candidates(
 ) -> list[dict[str, Any]]:
     """Rank candidates using MMR-style scoring with diversity.
 
-    Selects top candidates one at a time, applying diversity penalty
-    based on similarity to already-selected songs.
+    Optimized: precomputes base scores (without diversity penalty), then
+    applies diversity penalty incrementally during greedy selection.
+    Complexity: O(k * n) instead of O(k * n * score_candidate).
     """
     if not candidates:
         return []
 
     af_map = audio_features_map or {}
+    staleness_idx = _build_staleness_index(recent_recommendations or [])
+
+    # Step 1: Precompute base scores for all candidates (no diversity penalty)
+    base_scored: list[dict[str, Any]] = []
+    for c in candidates:
+        scored = score_candidate(
+            c, profile, already_selected=None,
+            weights=weights,
+            audio_features=af_map.get(c.get("catalog_id", "")),
+            user_audio_centroid=user_audio_centroid,
+            staleness_index=staleness_idx,
+        )
+        base_scored.append(scored)
+
+    # Step 2: Greedy MMR selection — only recompute diversity penalty per iteration
+    from musicmind.engine.similarity import song_similarity
+
+    w = weights or DEFAULT_WEIGHTS
+    diversity_weight = w.get("diversity", 0.10)
     selected: list[dict[str, Any]] = []
-    remaining = list(candidates)
+    remaining = list(base_scored)
 
-    for _ in range(min(count, len(remaining))):
-        scored = [
-            score_candidate(
-                c, profile, selected,
-                weights=weights,
-                audio_features=af_map.get(c.get("catalog_id", "")),
-                user_audio_centroid=user_audio_centroid,
-                recent_recommendations=recent_recommendations,
+    for _ in range(min(count, len(base_scored))):
+        best_idx = -1
+        best_score = -1.0
+
+        for i, c in enumerate(remaining):
+            base_score = c["_score"]
+            # Recompute only the diversity component
+            if selected:
+                max_sim = max(song_similarity(c, s) for s in selected)
+                diversity_penalty = max_sim * 0.3
+            else:
+                diversity_penalty = 0.0
+
+            # Adjust score: remove old diversity contribution, add new one
+            # Base score was computed with diversity=0 (no penalty),
+            # so the base includes diversity_weight * 1.0. Subtract and re-add.
+            adjusted = base_score - diversity_weight * 1.0 + diversity_weight * (
+                1.0 - diversity_penalty
             )
-            for c in remaining
-        ]
-        scored.sort(key=lambda x: x["_score"], reverse=True)
+            adjusted = max(0.0, min(1.0, adjusted))
 
-        best = scored[0]
+            if adjusted > best_score:
+                best_score = adjusted
+                best_idx = i
+
+        best = remaining.pop(best_idx)
+        # Update the score and breakdown with final diversity penalty
+        if selected:
+            max_sim = max(song_similarity(best, s) for s in selected)
+            final_penalty = max_sim * 0.3
+        else:
+            final_penalty = 0.0
+        best["_score"] = round(best_score, 3)
+        best["_breakdown"]["diversity_penalty"] = round(final_penalty, 3)
         selected.append(best)
-        remaining = [
-            c for c in remaining
-            if c.get("catalog_id") != best.get("catalog_id")
-        ]
 
     return selected

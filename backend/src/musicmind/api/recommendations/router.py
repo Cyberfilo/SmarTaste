@@ -19,6 +19,7 @@ from musicmind.api.recommendations.service import (
     VALID_STRATEGIES,
     RecommendationService,
 )
+from musicmind.api.rate_limit import RECOMMENDATIONS_LIMIT, limiter
 from musicmind.auth.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ recommendation_service = RecommendationService()
 
 
 @router.get("")
+@limiter.limit(RECOMMENDATIONS_LIMIT)
 async def get_recommendations(
     request: Request,
     strategy: str = Query(default="all", description="Discovery strategy"),

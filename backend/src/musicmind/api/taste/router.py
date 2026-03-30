@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 
 from musicmind.api.taste.schemas import (
     ArtistEntry,
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/taste", tags=["taste"])
 taste_service = TasteService()
+
+# Track in-progress background rebuilds (user_id -> status)
+_rebuild_status: dict[str, str] = {}
 
 
 @router.get("/profile")
@@ -80,6 +83,54 @@ async def get_profile(
         release_year_distribution=profile.get("release_year_distribution", {}),
         services_included=profile.get("services_included", []),
     )
+
+
+@router.post("/profile/refresh", status_code=status.HTTP_202_ACCEPTED)
+async def refresh_profile(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    service: str | None = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Trigger a background taste profile rebuild.
+
+    Returns 202 immediately. Poll GET /api/taste/profile/status for completion.
+    """
+    user_id = current_user["user_id"]
+
+    if _rebuild_status.get(user_id) == "in_progress":
+        return {"status": "in_progress", "message": "Profile rebuild already in progress"}
+
+    async def _rebuild() -> None:
+        _rebuild_status[user_id] = "in_progress"
+        try:
+            await taste_service.get_profile(
+                request.app.state.engine,
+                request.app.state.encryption,
+                request.app.state.settings,
+                user_id=user_id,
+                service=service,
+                force_refresh=True,
+            )
+            _rebuild_status[user_id] = "completed"
+            logger.info("Background profile rebuild completed for user %s", user_id)
+        except Exception:
+            _rebuild_status[user_id] = "failed"
+            logger.exception("Background profile rebuild failed for user %s", user_id)
+
+    background_tasks.add_task(_rebuild)
+    _rebuild_status[user_id] = "in_progress"
+    return {"status": "accepted", "message": "Profile rebuild started"}
+
+
+@router.get("/profile/status")
+async def get_profile_status(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Check status of a background profile rebuild."""
+    user_id = current_user["user_id"]
+    status_val = _rebuild_status.get(user_id, "idle")
+    return {"status": status_val}
 
 
 @router.get("/genres")

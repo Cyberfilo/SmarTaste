@@ -59,13 +59,15 @@ function parseSSEEvents(
   const lines = raw.split("\n");
   let currentEvent = "";
   let currentData = "";
+  let hasData = false;
 
   for (const line of lines) {
     if (line.startsWith("event:")) {
       currentEvent = line.slice(6).trim();
     } else if (line.startsWith("data:")) {
       currentData += line.slice(5).trim();
-    } else if (line === "" && currentEvent && currentData) {
+      hasData = true;
+    } else if (line === "" && currentEvent && hasData) {
       // Event boundary -- dispatch
       try {
         const parsed = JSON.parse(currentData);
@@ -99,6 +101,7 @@ function parseSSEEvents(
       }
       currentEvent = "";
       currentData = "";
+      hasData = false;
     }
   }
 }
