@@ -400,6 +400,7 @@ class TasteService:
             settings.apple_team_id,
             settings.apple_key_id,
             settings.apple_private_key_path,
+            private_key_b64=settings.apple_private_key_b64,
         )
         music_user_token = access_token  # stored as access_token in service_connections
 
