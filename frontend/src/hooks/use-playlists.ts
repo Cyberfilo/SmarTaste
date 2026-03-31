@@ -28,3 +28,34 @@ export function usePlaylistTracks(
     staleTime: 2 * 60 * 1000,
   });
 }
+
+interface PlaylistRecItem {
+  catalog_id: string;
+  name: string;
+  artist_name: string;
+  album_name: string;
+  artwork_url: string;
+  score: number;
+  explanation: string;
+  genre_names: string[];
+}
+
+interface PlaylistRecsResponse {
+  items: PlaylistRecItem[];
+  total: number;
+}
+
+export function usePlaylistRecommendations(
+  playlistId: string | null,
+  service: string | null
+) {
+  return useQuery<PlaylistRecsResponse>({
+    queryKey: ["playlists", playlistId, "recommendations"],
+    queryFn: () =>
+      apiFetch<PlaylistRecsResponse>(
+        `/api/playlists/${playlistId}/recommendations?service=${service}&limit=10`
+      ),
+    enabled: playlistId !== null && service !== null,
+    staleTime: 5 * 60 * 1000,
+  });
+}

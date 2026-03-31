@@ -15,6 +15,7 @@ import {
   LogOut,
   Code,
   User,
+  Sparkles,
 } from "lucide-react";
 
 /**
@@ -59,6 +60,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   const navItems = [
     { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { href: "/recommendations", label: "Suggested", icon: Sparkles },
     { href: "/playlists", label: "Playlists", icon: ListMusic },
     { href: "/chat", label: "Chat", icon: MessageCircle },
     { href: "/settings", label: "Settings", icon: Settings },

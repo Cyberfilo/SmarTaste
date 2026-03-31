@@ -100,3 +100,41 @@ async def get_playlist_tracks(
         items=items,
         total=len(items),
     )
+
+
+@router.get("/{playlist_id}/recommendations")
+async def get_playlist_recommendations(
+    request: Request,
+    playlist_id: str,
+    service: str = Query(description="Service: spotify or apple_music"),
+    limit: int = Query(default=10, ge=1, le=30),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Get recommendations based on a specific playlist's songs.
+
+    Builds a mini taste profile from the playlist's tracks only, then
+    runs discovery + scoring against that profile instead of the overall one.
+    """
+    try:
+        result = await playlist_service.get_playlist_recommendations(
+            request.app.state.engine,
+            request.app.state.encryption,
+            request.app.state.settings,
+            user_id=current_user["user_id"],
+            service=service,
+            playlist_id=playlist_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception("Failed to get playlist recommendations")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get recommendations",
+        )
+
+    return result

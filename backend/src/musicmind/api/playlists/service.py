@@ -185,3 +185,104 @@ class PlaylistService:
                             )
 
         return access_token
+
+    async def get_playlist_recommendations(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+        playlist_id: str,
+        limit: int = 10,
+    ) -> dict:
+        """Get recommendations based on a specific playlist's songs.
+
+        Builds a mini taste profile from the playlist's genres and artists,
+        then uses the recommendation engine to score candidates.
+        """
+        from collections import Counter
+
+        from musicmind.engine.profile import build_genre_vector, expand_genres
+        from musicmind.engine.scorer import rank_candidates
+
+        # Fetch playlist tracks
+        tracks = await self.get_playlist_tracks(
+            engine, encryption, settings,
+            user_id=user_id, service=service, playlist_id=playlist_id,
+        )
+
+        if not tracks:
+            return {"items": [], "total": 0}
+
+        # Build mini genre vector from playlist songs
+        genre_counter: Counter[str] = Counter()
+        artist_counter: Counter[str] = Counter()
+        for t in tracks:
+            for g in t.get("genre_names", []):
+                genre_counter[g] += 1
+            for eg in expand_genres(t.get("genre_names", [])):
+                genre_counter[eg] += 0.3
+            artist_name = t.get("artist_name", "")
+            if artist_name:
+                artist_counter[artist_name] += 1
+
+        total_genre = sum(genre_counter.values())
+        genre_vector = (
+            {g: c / total_genre for g, c in genre_counter.items()}
+            if total_genre > 0 else {}
+        )
+
+        max_artist = max(artist_counter.values()) if artist_counter else 1
+        top_artists = [
+            {"name": name, "score": count / max_artist, "song_count": count}
+            for name, count in artist_counter.most_common(20)
+        ]
+
+        playlist_profile = {
+            "genre_vector": genre_vector,
+            "top_artists": top_artists,
+            "release_year_distribution": {},
+            "familiarity_score": 0.5,
+        }
+
+        # Use the existing recommendation service to discover candidates
+        from musicmind.api.recommendations.service import RecommendationService
+
+        rec_svc = RecommendationService()
+        try:
+            full_result = await rec_svc.get_recommendations(
+                engine, encryption, settings,
+                user_id=user_id, limit=limit * 3,  # Fetch more to filter
+            )
+        except Exception:
+            return {"items": [], "total": 0}
+
+        # Re-score candidates against the playlist profile
+        candidates = []
+        for item in full_result.get("items", []):
+            # Skip songs already in the playlist
+            if item.get("catalog_id") in {t.get("catalog_id") for t in tracks}:
+                continue
+            candidates.append(item)
+
+        if not candidates:
+            return {"items": [], "total": 0}
+
+        ranked = rank_candidates(candidates, playlist_profile, count=limit)
+
+        items = []
+        for r in ranked:
+            items.append({
+                "catalog_id": r.get("catalog_id", ""),
+                "name": r.get("name", ""),
+                "artist_name": r.get("artist_name", ""),
+                "album_name": r.get("album_name", ""),
+                "artwork_url": r.get("artwork_url", ""),
+                "score": r.get("_score", 0.0),
+                "explanation": r.get("_explanation", ""),
+                "genre_names": r.get("genre_names", []),
+            })
+
+        return {"items": items, "total": len(items)}
