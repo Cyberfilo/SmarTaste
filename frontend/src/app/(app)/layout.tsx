@@ -57,7 +57,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     if (!enrichmentActive) return;
     const interval = setInterval(() => {
       authApi.me().catch(() => {});
-    }, 15000); // Every 15s while enrichment is active
+    }, 30000); // Every 30s while enrichment is active
     return () => clearInterval(interval);
   }, [enrichmentActive]);
 

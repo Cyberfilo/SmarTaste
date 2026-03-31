@@ -194,6 +194,12 @@ async def _enrich_single_track(
 
     if feature_source:
         await _store_features(engine, catalog_id, user_id, features, feature_source)
+    elif enriched_by == "failed":
+        # Mark as attempted so it's not retried forever
+        await _store_features(
+            engine, catalog_id, user_id,
+            {}, {"_status": "no_data_available"},
+        )
 
     return enriched_by
 
