@@ -31,6 +31,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = _settings
     app.state.encryption = encryption
 
+    # Install admin log handler for live log streaming
+    from musicmind.api.admin.log_stream import install_admin_handler
+    install_admin_handler()
+
     yield
 
     await engine.dispose()

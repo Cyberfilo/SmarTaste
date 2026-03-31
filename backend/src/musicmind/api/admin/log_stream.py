@@ -1,0 +1,70 @@
+"""In-memory log buffer that broadcasts to admin SSE clients.
+
+Captures Python logging messages and stores the last N in a ring buffer.
+Admin SSE endpoint reads from this buffer and streams new entries.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections import deque
+from datetime import UTC, datetime
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Ring buffer of recent log entries (last 500)
+_log_buffer: deque[dict[str, Any]] = deque(maxlen=500)
+
+# Connected admin SSE clients get notified of new logs
+_subscribers: list[asyncio.Queue[dict[str, Any]]] = []
+
+
+class AdminLogHandler(logging.Handler):
+    """Custom logging handler that captures messages for admin streaming."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        entry = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        _log_buffer.append(entry)
+
+        # Notify all connected subscribers (non-blocking)
+        for queue in _subscribers:
+            try:
+                queue.put_nowait(entry)
+            except asyncio.QueueFull:
+                pass  # Drop if subscriber is slow
+
+
+def install_admin_handler() -> None:
+    """Install the admin log handler on the root musicmind logger."""
+    handler = AdminLogHandler()
+    handler.setLevel(logging.INFO)
+    root = logging.getLogger("musicmind")
+    root.addHandler(handler)
+
+
+def get_recent_logs(limit: int = 100) -> list[dict[str, Any]]:
+    """Get the most recent log entries from the buffer."""
+    entries = list(_log_buffer)
+    return entries[-limit:]
+
+
+def subscribe() -> asyncio.Queue[dict[str, Any]]:
+    """Create a new subscriber queue for SSE streaming."""
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
+    _subscribers.append(queue)
+    return queue
+
+
+def unsubscribe(queue: asyncio.Queue[dict[str, Any]]) -> None:
+    """Remove a subscriber queue."""
+    try:
+        _subscribers.remove(queue)
+    except ValueError:
+        pass

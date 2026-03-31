@@ -32,6 +32,7 @@ users = sa.Table(
         nullable=False,
         server_default=sa.func.now(),
     ),
+    sa.Column("is_admin", sa.Boolean, nullable=False, server_default="false"),
 )
 
 service_connections = sa.Table(
