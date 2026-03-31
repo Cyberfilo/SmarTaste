@@ -264,7 +264,7 @@ async def me(
     async with engine.begin() as conn:
         result = await conn.execute(
             sa.select(
-                users.c.id, users.c.email, users.c.display_name
+                users.c.id, users.c.email, users.c.display_name, users.c.is_admin
             ).where(users.c.id == current_user["user_id"])
         )
         user = result.first()
@@ -291,6 +291,7 @@ async def me(
         "user_id": user.id,
         "email": user.email,
         "display_name": user.display_name,
+        "is_admin": bool(user.is_admin),
     }
 
 
