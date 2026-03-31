@@ -31,7 +31,8 @@ SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_ME_URL = "https://api.spotify.com/v1/me"
 SPOTIFY_SCOPES = (
     "user-read-private user-read-email user-library-read "
-    "user-read-recently-played user-top-read"
+    "user-read-recently-played user-top-read "
+    "playlist-read-private playlist-read-collaborative"
 )
 APPLE_MUSIC_STOREFRONT_URL = "https://api.music.apple.com/v1/me/storefront"
 APPLE_TOKEN_EXPIRY_SECONDS = 15_777_000  # ~6 months
