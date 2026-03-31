@@ -69,7 +69,14 @@ async def analyze_audio_features(audio_bytes: bytes) -> dict[str, Any] | None:
             return result if result else None
 
     except httpx.HTTPStatusError as exc:
-        logger.warning("ReccoBeats HTTP error: %s", exc.response.status_code)
+        code = exc.response.status_code
+        if code == 429:
+            logger.info("ReccoBeats rate limited (429)")
+        else:
+            logger.warning("ReccoBeats HTTP error: %s", code)
+        return None
+    except httpx.ReadTimeout:
+        logger.info("ReccoBeats timeout — will retry")
         return None
     except httpx.HTTPError:
         logger.warning("ReccoBeats connection error")

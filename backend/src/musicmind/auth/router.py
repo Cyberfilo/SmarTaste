@@ -368,7 +368,7 @@ async def _background_sync_library(
                         song_metadata_cache.c.user_id == user_id,
                         song_metadata_cache.c.catalog_id.notin_(enriched_ids_q),
                     )
-                ).limit(50)  # Process in batches of 50
+                ).limit(10)  # Small batch per /me call (runs every page load)
             )
             rows = result.fetchall()
 

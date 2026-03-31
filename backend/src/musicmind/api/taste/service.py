@@ -513,25 +513,11 @@ class TasteService:
         """Compute taste profile and save snapshot to database.
 
         Uses build_taste_profile with temporal decay enabled (D-12).
-        Triggers background audio enrichment for all songs.
+        Audio enrichment is NOT run here — it runs separately via
+        _background_sync_library (on /me) or _background_initial_sync
+        (on service connection) to avoid OOM in constrained containers.
         """
-        # Background enrichment: enrich tracks with audio features from free APIs
-        try:
-            from musicmind.engine.enrichment.orchestrator import enrich_tracks
-
-            await enrich_tracks(
-                engine,
-                songs,
-                user_id=user_id,
-                soundstat_api_key=(
-                    settings.soundstat_api_key if settings else None
-                ),
-                budget_mode=False,  # Never use paid API during background enrichment
-            )
-        except Exception:
-            logger.warning("Background audio enrichment failed, continuing without it")
-
-        # Load enriched audio features for centroid computation
+        # Load any previously enriched audio features for centroid computation
         audio_features_map: dict[str, dict] = {}
         try:
             async with engine.begin() as conn:
