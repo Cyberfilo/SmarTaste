@@ -19,6 +19,9 @@ const sora = Sora({
 export const metadata: Metadata = {
   title: "SmarTaste",
   description: "Your music, understood",
+  icons: {
+    icon: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({
