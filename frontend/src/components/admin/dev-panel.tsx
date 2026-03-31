@@ -100,12 +100,12 @@ export function DevPanel({ isOpen }: { isOpen: boolean }) {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // Enrichment progress query
+  // Enrichment progress query — always runs when panel is open (for counter)
   const { data: progressData } = useQuery<{ users: UserProgress[] }>({
     queryKey: ["admin", "progress"],
     queryFn: () => apiFetch("/api/admin/progress"),
-    enabled: isOpen && tab === "progress",
-    refetchInterval: 5000,
+    enabled: isOpen,
+    refetchInterval: 3000,
   });
 
   // System status query
@@ -142,6 +142,15 @@ export function DevPanel({ isOpen }: { isOpen: boolean }) {
             {t === "logs" ? "Live Logs" : t === "progress" ? "Enrichment" : "System"}
           </button>
         ))}
+        {/* Live enrichment counter */}
+        {progressData && progressData.users.length > 0 && (
+          <span className="ml-2 rounded bg-purple-500/15 px-2 py-0.5 text-[10px] font-mono font-medium text-purple-300">
+            {progressData.users.reduce((a, u) => a + u.enriched_songs, 0)}
+            /
+            {progressData.users.reduce((a, u) => a + u.total_songs, 0)}
+            {" features"}
+          </span>
+        )}
         <span className="ml-auto text-[10px] text-muted-foreground">
           DEV PANEL
         </span>

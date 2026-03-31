@@ -42,11 +42,13 @@ class AdminLogHandler(logging.Handler):
 
 
 def install_admin_handler() -> None:
-    """Install the admin log handler on the root musicmind logger."""
+    """Install the admin log handler on both musicmind and root loggers."""
     handler = AdminLogHandler()
     handler.setLevel(logging.INFO)
-    root = logging.getLogger("musicmind")
-    root.addHandler(handler)
+    # Attach to musicmind namespace (catches all musicmind.* loggers)
+    logging.getLogger("musicmind").addHandler(handler)
+    # Also attach to root logger to catch uvicorn, sqlalchemy, etc.
+    logging.getLogger().addHandler(handler)
 
 
 def get_recent_logs(limit: int = 100) -> list[dict[str, Any]]:

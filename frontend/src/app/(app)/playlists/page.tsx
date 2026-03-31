@@ -6,7 +6,7 @@
  */
 
 import { useState } from "react";
-import { usePlaylists, usePlaylistTracks } from "@/hooks/use-playlists";
+import { usePlaylists, usePlaylistTracks, usePlaylistRecommendations } from "@/hooks/use-playlists";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -14,6 +14,7 @@ import {
   ArrowLeft,
   Music,
   ChevronRight,
+  Sparkles,
 } from "lucide-react";
 import type { ServicePlaylist } from "@/types/api";
 
@@ -141,6 +142,10 @@ function PlaylistDetail({
     playlist.service_playlist_id,
     playlist.service
   );
+  const { data: recsData, isLoading: recsLoading } = usePlaylistRecommendations(
+    playlist.service_playlist_id,
+    playlist.service
+  );
 
   return (
     <div className="space-y-4">
@@ -204,7 +209,7 @@ function PlaylistDetail({
         </Card>
       ) : data && data.items.length > 0 ? (
         <Card>
-          <CardContent className="divide-y divide-border pt-2">
+          <CardContent className="max-h-[60vh] divide-y divide-border overflow-y-auto pt-2">
             {data.items.map((track, i) => (
               <div
                 key={`${track.catalog_id}-${i}`}
@@ -254,6 +259,63 @@ function PlaylistDetail({
           </CardContent>
         </Card>
       )}
+
+      {/* Per-playlist recommendations */}
+      <div>
+        <div className="mb-3 flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-purple-400" />
+          <h2 className="text-sm font-semibold">Suggested for this playlist</h2>
+        </div>
+        {recsLoading ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Card key={i}>
+                <CardContent className="flex items-center gap-3 pt-3">
+                  <Skeleton className="h-10 w-10 rounded" />
+                  <div className="flex-1 space-y-1.5">
+                    <Skeleton className="h-3.5 w-3/4" />
+                    <Skeleton className="h-3 w-1/2" />
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        ) : recsData && recsData.items.length > 0 ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {recsData.items.map((rec) => (
+              <Card key={rec.catalog_id} className="transition-colors hover:bg-muted/50">
+                <CardContent className="flex items-center gap-3 pt-3">
+                  {rec.artwork_url ? (
+                    <img
+                      src={rec.artwork_url}
+                      alt=""
+                      className="h-10 w-10 shrink-0 rounded object-cover"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded bg-muted">
+                      <Music className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{rec.name}</p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {rec.artist_name}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-xs font-medium tabular-nums text-purple-400">
+                    {Math.round(rec.score * 100)}%
+                  </span>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            No recommendations available yet.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

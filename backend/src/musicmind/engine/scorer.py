@@ -235,11 +235,29 @@ def score_candidate(
     mood_boost = candidate.get("_mood_boost", 0.0)
 
     # Weighted combination: language 45%, audio 32%, genre 13%, artist 10%
+    # When audio features are unavailable, redistribute audio weight
+    # proportionally to other dimensions instead of scoring 0.5 (neutral)
+    has_audio = audio_features is not None and user_audio_centroid is not None
+    w_lang = w.get("language", 0.45)
+    w_audio = w.get("audio", 0.32)
+    w_genre = w.get("genre", 0.13)
+    w_artist = w.get("artist", 0.10)
+
+    if not has_audio:
+        # Redistribute audio weight proportionally
+        other_total = w_lang + w_genre + w_artist
+        if other_total > 0:
+            scale = (other_total + w_audio) / other_total
+            w_lang *= scale
+            w_genre *= scale
+            w_artist *= scale
+        w_audio = 0.0  # Don't count audio at all
+
     overall = (
-        w.get("language", 0.45) * language_score
-        + w.get("audio", 0.32) * audio_sim
-        + w.get("genre", 0.13) * genre_score
-        + w.get("artist", 0.10) * artist_match
+        w_lang * language_score
+        + w_audio * audio_sim
+        + w_genre * genre_score
+        + w_artist * artist_match
         - 0.05 * diversity_penalty
         - 0.03 * staleness
         + cross_bonus
@@ -249,9 +267,6 @@ def score_candidate(
 
     # Build explanation
     parts = []
-    if genre_score > 0.5:
-        top_genres = ", ".join(candidate.get("genre_names", [])[:3])
-        parts.append(f"strong genre match ({top_genres})")
     if language_score > 0.7:
         parts.append("matches your language/region")
     if genre_score > 0.5:
