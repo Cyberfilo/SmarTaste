@@ -17,6 +17,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from musicmind.db.schema import audio_features_cache
+from musicmind.engine.enrichment.deezer import fetch_deezer_features
 from musicmind.engine.enrichment.musicbrainz import resolve_spotify_id
 from musicmind.engine.enrichment.soundstat import fetch_soundstat_features
 
@@ -37,30 +38,31 @@ async def enrich_tracks(
     soundstat_api_key: str | None = None,
     budget_mode: bool = False,
 ) -> dict[str, int]:
-    """Enrich a batch of tracks with audio features from SoundStat.
+    """Enrich tracks with audio features from Deezer (free) + SoundStat (paid).
 
-    Only enriches tracks that have missing features. Requires a SoundStat
-    API key to function — degrades gracefully without one.
+    Cascade: Deezer first (free, BPM + preview URL), then SoundStat for
+    remaining gaps (paid, complete features). Deezer always runs.
+    SoundStat only runs if API key is provided.
 
     Args:
         engine: SQLAlchemy async engine.
-        tracks: List of song dicts with catalog_id, isrc, service_source.
+        tracks: List of song dicts with catalog_id, name, artist_name, isrc.
         user_id: User ID for scoping the feature cache.
-        soundstat_api_key: SoundStat API key (None = skip enrichment).
+        soundstat_api_key: SoundStat API key (None = Deezer-only mode).
         budget_mode: Not used (kept for backward compatibility).
 
     Returns:
-        Summary dict: {soundstat: N, skipped: N, no_spotify_id: N, total: N}
+        Summary dict with per-source counts.
     """
-    stats = {"soundstat": 0, "skipped": 0, "no_spotify_id": 0, "total": len(tracks)}
-
-    if not soundstat_api_key:
-        logger.info("No SoundStat API key — skipping audio enrichment")
-        stats["skipped"] = len(tracks)
-        return stats
+    stats = {
+        "deezer": 0, "soundstat": 0,
+        "skipped": 0, "no_spotify_id": 0, "total": len(tracks),
+    }
 
     for track in tracks:
         catalog_id = track.get("catalog_id", "")
+        name = track.get("name", "")
+        artist_name = track.get("artist_name", "")
         isrc = track.get("isrc") or ""
         service_source = track.get("service_source", "")
 
@@ -76,21 +78,7 @@ async def enrich_tracks(
                 stats["skipped"] += 1
                 continue
 
-        # Resolve Spotify ID
-        spotify_id = await _get_spotify_id(engine, track, isrc, service_source)
-        if not spotify_id:
-            stats["no_spotify_id"] += 1
-            continue
-
-        # Fetch from SoundStat
-        ss_result = await fetch_soundstat_features(
-            spotify_id, api_key=soundstat_api_key
-        )
-        if not ss_result:
-            stats["skipped"] += 1
-            continue
-
-        # Build feature dict with provenance
+        # Build feature dict
         features = dict(existing) if existing else {}
         feature_source = (
             existing.get("feature_source", {}) if existing else {}
@@ -101,14 +89,47 @@ async def enrich_tracks(
             except (json.JSONDecodeError, TypeError):
                 feature_source = {}
 
-        filled = _merge_features(features, feature_source, ss_result, "soundstat")
-        if filled:
-            await _store_features(engine, catalog_id, user_id, features, feature_source)
-            stats["soundstat"] += 1
+        # Stage 1: Deezer (free — BPM + preview URL via search)
+        if name and artist_name:
+            deezer_result = await fetch_deezer_features(
+                name=name, artist_name=artist_name,
+            )
+            if deezer_result:
+                filled = _merge_features(
+                    features, feature_source, deezer_result, "deezer"
+                )
+                if filled:
+                    stats["deezer"] += 1
+
+        # Stage 2: SoundStat (paid — complete features via Spotify ID)
+        missing = _missing_fields(features)
+        if missing and soundstat_api_key:
+            spotify_id = await _get_spotify_id(
+                engine, track, isrc, service_source
+            )
+            if spotify_id:
+                ss_result = await fetch_soundstat_features(
+                    spotify_id, api_key=soundstat_api_key
+                )
+                if ss_result:
+                    filled = _merge_features(
+                        features, feature_source, ss_result, "soundstat"
+                    )
+                    if filled:
+                        stats["soundstat"] += 1
+            else:
+                stats["no_spotify_id"] += 1
+
+        # Store if anything was enriched
+        if feature_source:
+            await _store_features(
+                engine, catalog_id, user_id, features, feature_source
+            )
 
     logger.info(
-        "Enriched %d/%d via SoundStat, %d skipped, %d no Spotify ID",
-        stats["soundstat"], stats["total"],
+        "Enriched %d/%d: %d Deezer, %d SoundStat, %d skipped, %d no Spotify ID",
+        stats["deezer"] + stats["soundstat"], stats["total"],
+        stats["deezer"], stats["soundstat"],
         stats["skipped"], stats["no_spotify_id"],
     )
     return stats
