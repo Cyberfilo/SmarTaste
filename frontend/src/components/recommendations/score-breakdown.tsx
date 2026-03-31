@@ -15,13 +15,10 @@ interface ScoreBreakdownProps {
 }
 
 const dimensionColors: Record<string, string> = {
-  genre_match: "bg-purple-500",
+  language_match: "bg-purple-500",
   audio_similarity: "bg-blue-500",
-  novelty: "bg-purple-500",
-  freshness: "bg-amber-500",
-  diversity: "bg-pink-500",
-  artist_affinity: "bg-cyan-500",
-  anti_staleness: "bg-orange-500",
+  genre_match: "bg-amber-500",
+  artist_match: "bg-cyan-500",
 };
 
 export function ScoreBreakdown({ catalogId }: ScoreBreakdownProps) {

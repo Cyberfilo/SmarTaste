@@ -211,7 +211,7 @@ async def test_breakdown_returns_7_dimensions(
     assert 0.0 <= data["overall_score"] <= 1.0
 
     assert "dimensions" in data
-    assert len(data["dimensions"]) == 7
+    assert len(data["dimensions"]) == 4
 
     # Each dimension has required fields
     for dim in data["dimensions"]:
@@ -225,8 +225,7 @@ async def test_breakdown_returns_7_dimensions(
     # Check expected dimension names
     dim_names = {d["name"] for d in data["dimensions"]}
     expected = {
-        "genre_match", "audio_similarity", "novelty", "freshness",
-        "diversity", "artist_affinity", "anti_staleness",
+        "language_match", "audio_similarity", "genre_match", "artist_match",
     }
     assert dim_names == expected
 
