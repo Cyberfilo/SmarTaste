@@ -340,10 +340,120 @@ async def _background_initial_sync(
         from musicmind.api.taste.service import TasteService
 
         taste_svc = TasteService()
-        await taste_svc.get_profile(
+        profile = await taste_svc.get_profile(
             engine, encryption, settings,
             user_id=user_id, force_refresh=True,
         )
         logger.info("Background initial sync complete for user %s", user_id)
+
+        # Phase 2: Pre-cache top artists' discographies with audio features
+        try:
+            await _cache_artist_discographies(
+                engine, encryption, settings,
+                user_id=user_id, profile=profile,
+            )
+        except Exception:
+            logger.warning("Artist discography caching failed for %s", user_id)
+
     except Exception:
         logger.warning("Background initial sync failed for user %s", user_id)
+
+
+async def _cache_artist_discographies(
+    *,
+    engine,
+    encryption,
+    settings,
+    user_id: str,
+    profile: dict,
+) -> None:
+    """Fetch top artists' discographies and enrich their songs.
+
+    For each of the user's top 10 artists, fetches their top songs
+    from the connected service and enriches them with audio features.
+    This pre-populates the feature cache for better recommendations.
+    """
+    from musicmind.api.recommendations.fetch import _fetch_artist_top_tracks
+    from musicmind.api.services.service import get_user_connections
+    from musicmind.engine.enrichment.orchestrator import enrich_tracks
+
+    top_artists = profile.get("top_artists", [])[:10]
+    if not top_artists:
+        return
+
+    connections = await get_user_connections(engine, user_id=user_id)
+    if not connections:
+        return
+
+    conn_data = connections[0]
+    service = conn_data["service"]
+
+    # Get credentials
+    import sqlalchemy as sa
+    from musicmind.db.schema import service_connections as sc_table
+
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(sc_table).where(
+                sa.and_(sc_table.c.user_id == user_id, sc_table.c.service == service)
+            )
+        )
+        row = result.first()
+
+    if not row:
+        return
+
+    access_token = encryption.decrypt(row.access_token_encrypted)
+    developer_token = None
+    storefront = "us"
+
+    if service == "apple_music":
+        developer_token = generate_apple_developer_token(
+            settings.apple_team_id, settings.apple_key_id,
+            settings.apple_private_key_path,
+            private_key_b64=settings.apple_private_key_b64,
+        )
+        storefront = await detect_apple_music_storefront(
+            access_token, developer_token,
+        )
+
+    # Resolve artist IDs and fetch their top songs
+    import httpx
+    from musicmind.api.recommendations.fetch import _search_artist_id
+
+    all_tracks: list[dict] = []
+    for artist_entry in top_artists:
+        artist_name = artist_entry.get("name", "")
+        if not artist_name:
+            continue
+
+        try:
+            artist_id = await _search_artist_id(
+                service, access_token, artist_name,
+                developer_token=developer_token,
+                storefront=storefront,
+            )
+            if not artist_id:
+                continue
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                tracks = await _fetch_artist_top_tracks(
+                    client, service, access_token, artist_id,
+                    developer_token=developer_token,
+                    storefront=storefront,
+                    limit=10,
+                )
+                all_tracks.extend(tracks)
+        except Exception:
+            logger.debug("Failed to fetch discography for %s", artist_name)
+            continue
+
+    if all_tracks:
+        logger.info(
+            "Pre-caching %d tracks from %d artists for user %s",
+            len(all_tracks), len(top_artists), user_id,
+        )
+        await enrich_tracks(
+            engine, all_tracks, user_id=user_id,
+            soundstat_api_key=settings.soundstat_api_key,
+        )

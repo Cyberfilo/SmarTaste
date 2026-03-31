@@ -198,6 +198,11 @@ class RecommendationService:
                     genres = [genres]
                 c["genre_names"] = normalize_genre_list(genres)
 
+        # Step 5b: Exclude songs already in user's library (unless added >2 years ago)
+        unique = await self._filter_library_songs(
+            engine, unique, user_id=user_id,
+        )
+
         # Step 6: Load adaptive weights
         weights, weights_adapted = await self._load_adaptive_weights(
             engine, user_id=user_id,
@@ -702,6 +707,66 @@ class RecommendationService:
             c["_strategy_count"] = strategy_counts.get(cid, 1)
 
         return list(by_id.values())
+
+    @staticmethod
+    async def _filter_library_songs(
+        engine,
+        candidates: list[dict[str, Any]],
+        *,
+        user_id: str,
+    ) -> list[dict[str, Any]]:
+        """Remove candidates already in user's library (unless added >2 years ago).
+
+        Songs older than 2 years in the library are allowed through as
+        potential rediscovery suggestions.
+        """
+        if not candidates:
+            return candidates
+
+        from datetime import UTC, datetime, timedelta
+
+        catalog_ids = [c.get("catalog_id", "") for c in candidates if c.get("catalog_id")]
+        if not catalog_ids:
+            return candidates
+
+        cutoff = datetime.now(UTC) - timedelta(days=730)  # 2 years
+
+        # Get library song IDs and their dates
+        library_ids: set[str] = set()
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.date_added_to_library,
+                ).where(
+                    sa.and_(
+                        song_metadata_cache.c.catalog_id.in_(catalog_ids),
+                        song_metadata_cache.c.user_id == user_id,
+                    )
+                )
+            )
+            for row in result:
+                date_added = row.date_added_to_library
+                # Keep songs added >2 years ago (rediscovery)
+                if date_added is not None:
+                    if hasattr(date_added, "tzinfo") and date_added.tzinfo is None:
+                        date_added = date_added.replace(tzinfo=UTC)
+                    if date_added > cutoff:
+                        library_ids.add(row.catalog_id)
+                else:
+                    # No date = assume recent, exclude
+                    library_ids.add(row.catalog_id)
+
+        if not library_ids:
+            return candidates
+
+        filtered = [c for c in candidates if c.get("catalog_id", "") not in library_ids]
+
+        logger.info(
+            "Filtered %d library songs from %d candidates",
+            len(candidates) - len(filtered), len(candidates),
+        )
+        return filtered if filtered else candidates[:5]  # Fallback if all filtered
 
     @staticmethod
     async def _load_adaptive_weights(
