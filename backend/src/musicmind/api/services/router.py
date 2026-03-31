@@ -7,7 +7,7 @@ import secrets
 from datetime import UTC, datetime
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
 from musicmind.api.services.schemas import (
     AppleMusicConnectRequest,
@@ -131,7 +131,10 @@ async def spotify_connect(
 
 
 @router.get("/spotify/callback")
-async def spotify_callback(request: Request, code: str, state: str):
+async def spotify_callback(
+    request: Request, code: str, state: str,
+    background_tasks: BackgroundTasks,
+):
     """Handle Spotify OAuth callback after user authorization.
 
     This endpoint does NOT use get_current_user. The browser is redirected here
@@ -200,6 +203,15 @@ async def spotify_callback(request: Request, code: str, state: str):
 
     logger.info("Spotify connected for user: %s", user_id)
 
+    # Trigger full library fetch + enrichment in background
+    background_tasks.add_task(
+        _background_initial_sync,
+        engine=engine,
+        encryption=encryption,
+        settings=settings,
+        user_id=user_id,
+    )
+
     # Redirect back to the frontend settings page using configured frontend URL
     from starlette.responses import RedirectResponse
 
@@ -241,15 +253,16 @@ async def apple_music_developer_token(
 async def apple_music_connect(
     request: Request,
     body: AppleMusicConnectRequest,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """Store an Apple Music User Token obtained via MusicKit JS.
 
-    Apple Music has no user ID or token expiry metadata, so service_user_id
-    and expires_in are both None.
+    Triggers background library fetch + audio enrichment after connection.
     """
     engine = request.app.state.engine
     encryption = request.app.state.encryption
+    settings = request.app.state.settings
 
     await upsert_service_connection(
         engine,
@@ -263,6 +276,16 @@ async def apple_music_connect(
     )
 
     logger.info("Apple Music connected for user: %s", current_user["user_id"])
+
+    # Trigger full library fetch + enrichment in background
+    background_tasks.add_task(
+        _background_initial_sync,
+        engine=engine,
+        encryption=encryption,
+        settings=settings,
+        user_id=current_user["user_id"],
+    )
+
     return {"message": "Apple Music connected"}
 
 
@@ -295,3 +318,32 @@ async def disconnect_service(
 
     logger.info("Service %s disconnected for user: %s", service, current_user["user_id"])
     return DisconnectResponse(message=f"{service} disconnected")
+
+
+# ── Background Sync ──────────────────────────────────────────────────────────
+
+
+async def _background_initial_sync(
+    *,
+    engine,
+    encryption,
+    settings,
+    user_id: str,
+) -> None:
+    """Full library fetch + audio enrichment after service connection.
+
+    Runs in the background after Spotify OAuth callback or Apple Music connect.
+    Fetches the user's library, builds taste profile, and enriches all tracks
+    with audio features via Deezer + ReccoBeats.
+    """
+    try:
+        from musicmind.api.taste.service import TasteService
+
+        taste_svc = TasteService()
+        await taste_svc.get_profile(
+            engine, encryption, settings,
+            user_id=user_id, force_refresh=True,
+        )
+        logger.info("Background initial sync complete for user %s", user_id)
+    except Exception:
+        logger.warning("Background initial sync failed for user %s", user_id)

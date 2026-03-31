@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 
 from musicmind.auth.dependencies import get_current_user
 from musicmind.auth.schemas import LoginRequest, SignupRequest
@@ -250,9 +250,15 @@ async def refresh(request: Request, response: Response) -> dict:
 
 @router.get("/me")
 async def me(
-    request: Request, current_user: dict = Depends(get_current_user)
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """Return the authenticated user's profile."""
+    """Return the authenticated user's profile.
+
+    Also triggers background library sync: checks for un-enriched songs
+    and queues audio feature extraction if needed.
+    """
     engine = request.app.state.engine
 
     async with engine.begin() as conn:
@@ -269,8 +275,130 @@ async def me(
             detail="User not found",
         )
 
+    # Queue background library sync + enrichment (non-blocking)
+    settings = getattr(request.app.state, "settings", None)
+    encryption = getattr(request.app.state, "encryption", None)
+    if settings and encryption:
+        background_tasks.add_task(
+            _background_sync_library,
+            engine=engine,
+            settings=settings,
+            encryption=encryption,
+            user_id=user.id,
+        )
+
     return {
         "user_id": user.id,
         "email": user.email,
         "display_name": user.display_name,
     }
+
+
+async def _background_sync_library(
+    *,
+    engine,
+    settings,
+    encryption,
+    user_id: str,
+) -> None:
+    """Check for un-enriched songs and run enrichment if needed.
+
+    Called as a background task on every /me request.
+    Lightweight: checks DB first, only hits external APIs if gaps exist.
+    """
+    try:
+        from musicmind.api.services.service import get_user_connections
+        from musicmind.db.schema import audio_features_cache, song_metadata_cache
+
+        # Check if user has connected services
+        connections = await get_user_connections(engine, user_id=user_id)
+        if not connections:
+            return
+
+        # Count songs vs enriched songs
+        async with engine.begin() as conn:
+            song_count_result = await conn.execute(
+                sa.select(sa.func.count()).select_from(song_metadata_cache).where(
+                    song_metadata_cache.c.user_id == user_id
+                )
+            )
+            total_songs = song_count_result.scalar() or 0
+
+            enriched_count_result = await conn.execute(
+                sa.select(sa.func.count()).select_from(audio_features_cache).where(
+                    audio_features_cache.c.user_id == user_id
+                )
+            )
+            enriched_songs = enriched_count_result.scalar() or 0
+
+        if total_songs == 0:
+            # No songs cached yet — trigger a profile build which fetches + enriches
+            from musicmind.api.taste.service import TasteService
+
+            taste_svc = TasteService()
+            try:
+                await taste_svc.get_profile(
+                    engine, encryption, settings,
+                    user_id=user_id, force_refresh=True,
+                )
+            except Exception:
+                logger.debug("Background profile build failed for %s", user_id)
+            return
+
+        # If >10% of songs lack enrichment, run enrichment on un-enriched ones
+        gap = total_songs - enriched_songs
+        if gap <= 0:
+            return
+
+        logger.info(
+            "Background sync: %d/%d songs need enrichment for user %s",
+            gap, total_songs, user_id,
+        )
+
+        # Fetch un-enriched songs from cache
+        async with engine.begin() as conn:
+            # Get songs that don't have audio features yet
+            enriched_ids_q = sa.select(audio_features_cache.c.catalog_id).where(
+                audio_features_cache.c.user_id == user_id
+            )
+            result = await conn.execute(
+                sa.select(song_metadata_cache).where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == user_id,
+                        song_metadata_cache.c.catalog_id.notin_(enriched_ids_q),
+                    )
+                ).limit(50)  # Process in batches of 50
+            )
+            rows = result.fetchall()
+
+        if not rows:
+            return
+
+        import json as _json
+
+        tracks = []
+        for row in rows:
+            genres = row.genre_names
+            if isinstance(genres, str):
+                try:
+                    genres = _json.loads(genres)
+                except (ValueError, TypeError):
+                    genres = []
+            tracks.append({
+                "catalog_id": row.catalog_id,
+                "name": row.name or "",
+                "artist_name": row.artist_name or "",
+                "isrc": row.isrc or "",
+                "service_source": getattr(row, "service_source", ""),
+                "genre_names": genres,
+            })
+
+        from musicmind.engine.enrichment.orchestrator import enrich_tracks
+
+        await enrich_tracks(
+            engine, tracks, user_id=user_id,
+            soundstat_api_key=settings.soundstat_api_key,
+        )
+
+    except Exception:
+        logger.debug("Background library sync failed for user %s", user_id)
