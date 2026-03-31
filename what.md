@@ -1,12 +1,12 @@
 # SmarTaste — Complete Project Documentation
 
-> Last updated: 2026-03-30 | Version: 0.1.0 | Status: Production (alpha)
+> Last updated: 2026-03-31 | Version: 0.1.0 | Status: Production (alpha)
 
 ## What Is SmarTaste?
 
 SmarTaste is a hybrid dashboard + AI chat webapp for music discovery. Users connect their Spotify and/or Apple Music accounts, bring their own Claude or OpenAI API key, and get a unified taste profile with personalized recommendations — plus a conversational AI interface for deeper musical exploration.
 
-Built for a small group of friends, not a public product. The core value: genuinely good music recommendations powered by real listening data and a 7-dimension adaptive scoring engine — not just "people who liked X also liked Y."
+Built for a small group of friends, not a public product. The core value: genuinely good music recommendations powered by language-aware scoring, real audio analysis (via Deezer + ReccoBeats), and actual listening data across services — not just "people who liked X also liked Y."
 
 **Live at:** https://music.menghi.dev
 **Repository:** https://github.com/Cyberfilo/SmarTaste
@@ -16,18 +16,45 @@ Built for a small group of friends, not a public product. The core value: genuin
 
 ## Features
 
+### Dashboard
+- Genre donut chart, top artists with affinity bars, audio traits radar, release year bar chart
+- Summary cards: songs analyzed, listening hours, familiarity score, connected service
+- All data from the taste profile API — zero extra API calls
+
 ### Taste Profile
-- Visualizes your musical DNA: top genres (with regional specificity — "Italian Hip-Hop/Rap" stays distinct from generic "Hip-Hop/Rap"), favorite artists, audio trait preferences
+- Visualizes your musical DNA: top genres (with regional specificity — "Italian Hip-Hop/Rap" stays distinct from generic "Hip-Hop/Rap"), favorite artists with featuring detection, audio trait preferences
+- Featuring artist parsing: "Artist A feat. Artist B" → primary (1.0 weight) + featuring (0.3 weight)
 - Familiarity score (Shannon entropy) measuring how diverse vs. focused your taste is
-- Release year distribution showing when your favorite music was released
+- Audio centroid computed from enriched features for audio similarity scoring
 - Profiles cached for 24 hours, refreshable on demand
 
-### Smart Recommendations
+### Smart Recommendations (Suggested tab)
 - 4 discovery strategies: similar artist crawl, genre adjacent exploration, editorial mining, chart filtering
-- Each candidate scored across 7 weighted dimensions (genre, audio, novelty, freshness, diversity, artist, staleness)
-- Weights adapt via coordinate descent optimization after 10+ thumbs up/down feedback records
+- Language-first scoring: language/region 45%, audio similarity 32%, genre 13%, artist 10%
+- Regional genre detection: "Italian Hip-Hop/Rap" → Italian tracks score 1.0, generic 0.2, wrong-region 0.0
+- Audio weight redistributed proportionally when features unavailable (no neutral 0.5 drag)
 - Mood filtering (workout, chill, focus, party, sad, driving)
-- Cross-strategy convergence bonuses (songs found by multiple strategies score higher)
+- Auto-detects Apple Music storefront (US/IT/GB/etc.) for regional discovery
+
+### Audio Enrichment Pipeline
+- Runs automatically when a user connects a service or visits the app
+- Stage 1: Deezer — search by title+artist → 30s preview MP3 + BPM (free, no auth)
+- Stage 2: ReccoBeats — upload preview → 9 audio features: acousticness, danceability, energy, instrumentalness, liveness, loudness, speechiness, tempo, valence (free, no auth)
+- Stage 3: SoundStat — Spotify ID → complete features + key/scale (paid, 0.01 EUR/track, optional)
+- ISRC → Spotify ID resolution via MusicBrainz (permanently cached)
+- Batch processing: 5 tracks/batch, 1s delay, gc.collect() between batches (memory-safe)
+- Per-field provenance tracking (feature_source JSON: {"tempo": "deezer", "energy": "reccobeats"})
+
+### Playlists
+- Browse real playlists from connected Apple Music and Spotify
+- Click-through to track list with artwork, artist, album, genre badges
+- Per-playlist recommendations: builds mini taste profile from playlist songs only, re-scores candidates
+- Scrollable track list (no truncation)
+
+### Listening Timeline
+- Chronological view of songs with month grouping and artwork
+- Date type labels: "added" (dateAdded), "release" (releaseDate fallback), "unknown"
+- Critical for Apple Music given the 50-song recently-played API limit
 
 ### Claude/OpenAI Chat (BYOK)
 - Conversational recommendations via Claude or OpenAI — users bring their own API keys
@@ -40,16 +67,19 @@ Built for a small group of friends, not a public product. The core value: genuin
 - Connect Spotify and/or Apple Music independently — app works with just one
 - When both connected: unified taste profile with ISRC-based deduplication and cross-service genre normalization
 - Each service's strengths leveraged (Spotify's top tracks API, Apple Music's library metadata)
+- Library sync runs on every page load (background, non-blocking, 10 tracks per visit)
 
-### Listening Stats
-- Top tracks, artists, and genres by time period (month, 6 months, all time)
-- Spotify: uses native top tracks/artists API (short/medium/long term)
-- Apple Music: aggregates from library data filtered by date
+### Admin Panel
+- Dev/User toggle in header (admin users only, `is_admin` on users table)
+- Live Logs tab: SSE stream of all backend log output in real-time, color-coded by level
+- Enrichment tab: per-user progress bars (enriched/total songs), live counter in tab bar
+- System tab: version, user count, total songs/enriched, SoundStat API key status
 
 ### Settings
 - Service connection/disconnection (Spotify OAuth PKCE, Apple Music MusicKit JS)
 - BYOK API key management for Claude and OpenAI (encrypted at rest with Fernet)
 - Model selection (Claude or OpenAI)
+- Spotify users need to reconnect after upgrade (new playlist-read-private scope)
 
 ---
 
@@ -371,25 +401,29 @@ backend/src/musicmind/
 
 ## Recommendation Engine — How It Works
 
-### Scoring (7 Dimensions)
+### Scoring (4 Dimensions, Language-First)
 
 | Dimension | Weight | How It Works |
 |-----------|--------|-------------|
-| **Genre match** | 0.35 | Cosine similarity between song genre vector and user genre vector. Regional genres (e.g., "Italian Hip-Hop/Rap") get full weight (1.0), expanded parent genres ("Hip-Hop/Rap") get 0.3. |
-| **Audio similarity** | 0.20 | ⚠️ Currently always 0.5 (neutral) — audio extraction pipeline exists but isn't wired into the scoring path. |
-| **Novelty** | 0.12 | Gaussian bell curve rewarding new artists in familiar genres. Peak at distance 0.3-0.5 from profile. |
-| **Freshness** | 0.10 | How well the song's release year matches user's release year distribution. |
-| **Diversity (MMR)** | 0.08 | Maximal Marginal Relevance penalty — reduces similarity to already-selected songs to avoid echo chambers. |
-| **Artist affinity** | 0.08 | Deliberately low. Known artist score based on library presence + play count. Penalized if artist appears in wrong genre (cosine < 0.2 → score capped at 30%). |
-| **Anti-staleness** | 0.07 | Exponential cooldown: 0.8 if recommended <7 days ago, 0.4 if <30 days. |
+| **Language/Region** | 0.45 | Detects regional prefixes from genre names ("Italian" from "Italian Hip-Hop/Rap"). Italian tracks score 1.0, generic tracks 0.2, wrong-region 0.0. Most important signal for regional listeners. |
+| **Audio similarity** | 0.32 | Energy, tempo, danceability, valence proximity from enriched features (Deezer + ReccoBeats). When features unavailable, weight redistributed to other dimensions (no neutral drag). |
+| **Genre match** | 0.13 | Cosine similarity between song genre vector and user genre vector. Regional genres get full weight (1.0), parent genres get 0.3. |
+| **Artist affinity** | 0.10 | Known artist score from library + play count. Featuring artists detected at 0.3 weight. Penalized if artist in wrong genre. |
+
+Diversity penalty and staleness cooldown applied as minor subtractive penalties on top.
 
 ### Discovery Strategies
 
-1. **similar_artist** — Crawl similar artists from a user's top artists, fetch their top songs (depth=1)
-2. **genre_adjacent** — Search Apple Music/Spotify using user's top genre names, filter by genre overlap
-3. **editorial** — Mine Apple Music editorial playlists + Spotify featured playlists for candidates
-4. **chart** — Filter Apple Music/Spotify charts by user's top genre overlap
-5. **all** — Run all 4 strategies, merge and deduplicate candidates
+1. **similar_artist** — Crawl similar artists, fetch top songs, filter by regional genre overlap
+2. **genre_adjacent** — Search using user's top genre names on user's storefront, filter by regional match
+3. **editorial** — Mine editorial/best-of playlists, filter by regional genre overlap
+4. **chart** — Filter charts by genre overlap with user profile
+5. **all** — Run all 4 in parallel, merge and deduplicate candidates
+
+All strategies use auto-detected storefront (e.g., "it" for Italian Apple Music users) and prefer exact regional genre matches over parent-only matches.
+
+### Per-Playlist Recommendations
+Builds a mini taste profile from the playlist's songs only (not the overall user profile), then re-scores candidates against that local profile. A "chill Italian" playlist generates chill Italian recommendations.
 
 ### Adaptive Weights
 After 10+ feedback records (thumbs up/down), coordinate descent optimizer adjusts dimension weights to minimize prediction error. Weights bounded to prevent any dimension from dominating.
@@ -402,10 +436,21 @@ After 10+ feedback records (thumbs up/down), coordinate descent optimizer adjust
 
 | Bug | Location | Impact | Status |
 |-----|----------|--------|--------|
-| **Strategy name mismatch** | Frontend sends `auto`/`similar_artists`/`charts`, backend expects `all`/`similar_artist`/`chart` | 3 of 5 recommendation strategies fail with 400 error | Not fixed |
-| **Apple Music stats always empty** | `stats/fetch.py` — `dateAdded` field not in Apple Music API response, `_filter_songs_by_period()` skips all songs with `None` date | Listening Stats page completely empty for Apple Music users | Not fixed |
-| **Recommendations irrelevant** | Genre adjacent + editorial return non-Italian results (Kanye West) to Italian-only listener | Recommendations feel random, not personalized | Not fixed |
-| **Audio scoring always neutral** | `scorer.py` — `audio_features_map` never populated, defaults to 0.5 | 20% of scoring weight wasted on neutral value | By design (audio pipeline not wired) |
+| **Pre-existing CSRF test failures** | `test_auth.py` — 3 tests fail due to cookie handling in test client | Tests only, no production impact | Known |
+
+### Recently Fixed (March 2026)
+
+| Bug | Fix |
+|-----|-----|
+| Strategy name mismatch (3/5 strategies failed) | Frontend values aligned with backend: auto→all, similar_artists→similar_artist, charts→chart |
+| Apple Music stats always empty | Added releaseDate fallback when dateAdded is null |
+| Recommendations irrelevant (Kanye for Italian users) | Auto-detect storefront, regional genre filtering, language-first scoring |
+| Audio scoring always neutral (0.5) | Enrichment pipeline (Deezer→ReccoBeats) now populates features; weight redistributed when unavailable |
+| Low confidence scores | Audio weight redistributed proportionally instead of dragging score with 0.5 |
+| Docker build crash (VERSION file) | Reverted pyproject.toml to static version |
+| OOM on enrichment | Batch processing (5/batch) + decoupled from profile build |
+| Deezer ISRC lookup broken | Switched to search-by-name approach |
+| Playlist scroll truncation | Added max-h-[60vh] overflow-y-auto |
 
 ### Tackled Issues (Fixed)
 
@@ -421,17 +466,11 @@ After 10+ feedback records (thumbs up/down), coordinate descent optimizer adjust
 | Dockerfile Python version | Upgraded to Python 3.14 for uuid7 support | a937615 |
 | Auto-secret generation | Dockerfile generates Fernet + JWT keys on first deploy if not set | Earlier commit |
 
-### Dead Code
+### Dead Code (Removed)
 
-| Module | Lines | Why Dead |
-|--------|-------|----------|
-| `engine/audio/extractor.py` | ~268 | Essentia not installed, `analyze_track()` never called |
-| `engine/bandit.py` | ~253 | Thompson Sampling never wired into scorer |
-| `engine/clap_mood.py` | ~241 | CLAP mood embeddings, msclap not in deps |
-| `engine/lastfm.py` | ~248 | Last.fm tags, never integrated |
-| `engine/knowledge_graph/` | ~300 | MusicBrainz graph, tables empty |
-| `frontend/src/proxy.ts` | ~43 | Replaced by next.config.ts rewrites |
-| **Total** | **~1,350** | |
+All ~1,350 lines of dead code were removed in the March 2026 cleanup:
+bandit.py, clap_mood.py, lastfm.py, knowledge_graph/, audio/extractor.py, proxy.ts.
+Database tables for these features still exist (already migrated) but are unused.
 
 ---
 
