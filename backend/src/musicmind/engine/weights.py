@@ -14,13 +14,10 @@ from typing import Any
 import numpy as np
 
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "audio": 0.75,
-    "genre": 0.10,
-    "novelty": 0.04,
-    "freshness": 0.03,
-    "diversity": 0.03,
-    "artist": 0.03,
-    "staleness": 0.02,
+    "language": 0.45,
+    "audio": 0.32,
+    "genre": 0.13,
+    "artist": 0.10,
 }
 
 MIN_FEEDBACK_FOR_OPTIMIZATION = 10

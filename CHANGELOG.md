@@ -32,7 +32,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Chart colors indistinguishable** — replaced all-green palette with 8 distinct colors (emerald, blue, amber, red, violet, pink, cyan, orange).
 
 ### Changed
-- **Audio features now 75% of recommendation score** — `DEFAULT_WEIGHTS.audio` increased from 0.20 to 0.75. Genre reduced to 0.10, other dimensions proportionally reduced. This makes musical similarity (BPM, energy, danceability, etc.) the dominant scoring signal.
+- **Scorer rebalanced: language 45%, audio 32%, genre 13%, artist 10%** — new `_language_match` dimension detects regional genre prefixes ("Italian Hip-Hop/Rap" → "Italian"). Italian tracks score 1.0, generic tracks 0.2, wrong-region 0.0. This makes language/region the dominant signal, with audio similarity second.
+- **Enrichment pipeline fixed: SoundStat-only** — Deezer ISRC lookup broken (returns "no data"), ReccoBeats returns 404. Removed both dead sources. SoundStat is now the sole enrichment API.
+- Removed novelty/freshness/staleness from weighted sum (kept as minor penalties)
 
 ### Fixed
 - **Recommendation strategies fail with 400 error** — frontend sent `auto`/`similar_artists`/`charts` but backend expects `all`/`similar_artist`/`chart`. Fixed strategy-selector.tsx values and default state.

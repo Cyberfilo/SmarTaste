@@ -16,6 +16,66 @@ from musicmind.engine.profile import expand_genres
 from musicmind.engine.weights import DEFAULT_WEIGHTS
 
 
+def _language_match(
+    song_genres: list[str],
+    genre_vector: dict[str, float],
+) -> float:
+    """Score how well a song matches the user's regional/language preferences.
+
+    Detects regional prefixes in genre names (e.g. "Italian", "French", "Korean")
+    and checks if the candidate's regional tags match the user's dominant regions.
+    Returns 1.0 for perfect match, 0.0 for no regional overlap.
+    """
+    if not song_genres or not genre_vector:
+        return 0.0
+
+    # Extract regional prefixes from genre names
+    # E.g. "Italian Hip-Hop/Rap" → "Italian", "K-Pop" → "K"
+    def _extract_region(genre: str) -> str | None:
+        parts = genre.split()
+        if len(parts) >= 2:
+            # "Italian Hip-Hop/Rap" → "Italian"
+            candidate = parts[0]
+            # Filter out non-regional prefixes
+            if candidate[0].isupper() and len(candidate) > 1:
+                return candidate.lower()
+        # Handle "K-Pop", "J-Rock" style
+        if "-" in genre and len(genre.split("-")[0]) <= 2:
+            return genre.split("-")[0].lower()
+        return None
+
+    # Build user's regional profile from genre_vector
+    user_regions: dict[str, float] = {}
+    for genre, weight in genre_vector.items():
+        region = _extract_region(genre)
+        if region:
+            user_regions[region] = user_regions.get(region, 0.0) + weight
+
+    if not user_regions:
+        return 0.5  # No regional signal — neutral
+
+    # Check candidate's regional tags
+    candidate_regions: set[str] = set()
+    for genre in song_genres:
+        region = _extract_region(genre)
+        if region:
+            candidate_regions.add(region)
+
+    if not candidate_regions:
+        # Candidate has no regional tag — penalize slightly
+        return 0.2
+
+    # Score: weighted overlap
+    total_user_weight = sum(user_regions.values())
+    if total_user_weight == 0:
+        return 0.5
+
+    overlap_weight = sum(
+        user_regions.get(r, 0.0) for r in candidate_regions
+    )
+    return min(1.0, overlap_weight / total_user_weight)
+
+
 def _genre_cosine(
     song_genres: list[str],
     genre_vector: dict[str, float],
@@ -125,48 +185,30 @@ def score_candidate(
     release_dist = profile.get("release_year_distribution", {})
     familiarity = profile.get("familiarity_score", 0.5)
 
-    # 1. Genre match (cosine similarity)
+    # 1. Language/region match (most important for regional listeners)
+    language_score = _language_match(
+        candidate.get("genre_names", []), genre_vector
+    )
+
+    # 2. Genre match (cosine similarity)
     genre_score = _genre_cosine(
         candidate.get("genre_names", []), genre_vector
     )
 
-    # 2. Artist match — penalized if known artist but wrong genre
-    artist_name = candidate.get("artist_name", "").lower()
-    artist_scores = {a["name"].lower(): a["score"] for a in top_artists}
-    artist_match = artist_scores.get(artist_name, 0.0)
-    if artist_match > 0 and genre_score < 0.2:
-        # Known artist in the wrong genre should NOT get a boost
-        artist_match *= 0.3
-
-    # 3. Audio similarity (Tier 2)
-    audio_sim = 0.5  # neutral default
+    # 3. Audio similarity
+    audio_sim = 0.5  # neutral default when no features available
     if audio_features and user_audio_centroid:
         from musicmind.engine.similarity import audio_feature_similarity
         audio_sim = audio_feature_similarity(audio_features, user_audio_centroid)
 
-    # 4. Novelty: graduated via cosine distance from profile
-    known_artists = {a["name"].lower() for a in top_artists}
-    novelty = 0.0
-    if artist_name not in known_artists and genre_score > 0.1:
-        # Gaussian bell curve peaking at distance 0.3-0.5
-        distance = 1.0 - genre_score
-        peak = 0.4
-        width = 0.2 + familiarity * 0.2  # adventurous = wider peak
-        novelty = float(np.exp(-((distance - peak) ** 2) / (2 * width ** 2)))
+    # 4. Artist match — penalized if known artist but wrong genre
+    artist_name = candidate.get("artist_name", "").lower()
+    artist_scores = {a["name"].lower(): a["score"] for a in top_artists}
+    artist_match = artist_scores.get(artist_name, 0.0)
+    if artist_match > 0 and genre_score < 0.2:
+        artist_match *= 0.3
 
-    # 5. Freshness: match release year to user's distribution
-    freshness = 0.5
-    release_date = candidate.get("release_date", "")
-    if release_date and len(release_date) >= 4:
-        year = release_date[:4]
-        freshness = release_dist.get(year, 0.0)
-        try:
-            if int(year) >= 2024:
-                freshness = max(freshness, 0.3)
-        except ValueError:
-            pass
-
-    # 6. Diversity penalty (MMR-style)
+    # 5. Diversity penalty (MMR-style)
     diversity_penalty = 0.0
     if already_selected:
         from musicmind.engine.similarity import song_similarity
@@ -175,33 +217,31 @@ def score_candidate(
         )
         diversity_penalty = max_sim * 0.3
 
-    # 7. Staleness penalty
+    # 6. Staleness penalty
     if staleness_index is not None:
         staleness = _compute_staleness(
             candidate.get("catalog_id", ""), staleness_index
         )
     else:
-        # Fallback: build index on the fly (backward compat)
         recs = recent_recommendations or []
         idx = _build_staleness_index(recs) if recs else {}
         staleness = _compute_staleness(candidate.get("catalog_id", ""), idx)
 
-    # 8. Cross-strategy bonus
+    # 7. Cross-strategy bonus
     strategy_count = candidate.get("_strategy_count", 1)
-    cross_bonus = min(0.15, max(0, (strategy_count - 1)) * 0.05)
+    cross_bonus = min(0.10, max(0, (strategy_count - 1)) * 0.05)
 
-    # 9. Mood boost (set by filter_candidates_by_mood)
+    # 8. Mood boost (set by filter_candidates_by_mood)
     mood_boost = candidate.get("_mood_boost", 0.0)
 
-    # Weighted combination — fallbacks match DEFAULT_WEIGHTS
+    # Weighted combination: language 45%, audio 32%, genre 13%, artist 10%
     overall = (
-        w.get("genre", 0.10) * genre_score
-        + w.get("artist", 0.03) * artist_match
-        + w.get("audio", 0.75) * audio_sim
-        + w.get("novelty", 0.04) * novelty
-        + w.get("freshness", 0.03) * freshness
-        + w.get("diversity", 0.03) * (1.0 - diversity_penalty)
-        + w.get("staleness", 0.02) * (1.0 - staleness)
+        w.get("language", 0.45) * language_score
+        + w.get("audio", 0.32) * audio_sim
+        + w.get("genre", 0.13) * genre_score
+        + w.get("artist", 0.10) * artist_match
+        - 0.05 * diversity_penalty
+        - 0.03 * staleness
         + cross_bonus
         + mood_boost * 0.1
     )
@@ -212,18 +252,17 @@ def score_candidate(
     if genre_score > 0.5:
         top_genres = ", ".join(candidate.get("genre_names", [])[:3])
         parts.append(f"strong genre match ({top_genres})")
+    if language_score > 0.7:
+        parts.append("matches your language/region")
+    if genre_score > 0.5:
+        top_genres = ", ".join(candidate.get("genre_names", [])[:2])
+        parts.append(f"genre match ({top_genres})")
+    if audio_sim > 0.6 and audio_features:
+        parts.append("sounds like your taste")
     if artist_match > 0.5:
         parts.append(f"you like {candidate.get('artist_name', 'this artist')}")
-    if novelty > 0.3:
-        parts.append("new artist in a genre you enjoy")
-    if audio_sim > 0.7 and audio_features:
-        parts.append("sounds like your audio preferences")
     if cross_bonus > 0:
         parts.append(f"found by {strategy_count} strategies")
-    if staleness > 0:
-        parts.append("recently recommended")
-    if diversity_penalty > 0.2:
-        parts.append("slight diversity penalty")
     if mood_boost > 0.2:
         parts.append("strong mood match")
 
@@ -231,11 +270,10 @@ def score_candidate(
         **candidate,
         "_score": round(overall, 3),
         "_breakdown": {
+            "language_match": round(language_score, 3),
+            "audio_similarity": round(audio_sim, 3),
             "genre_match": round(genre_score, 3),
             "artist_match": round(artist_match, 3),
-            "audio_similarity": round(audio_sim, 3),
-            "novelty": round(novelty, 3),
-            "freshness": round(freshness, 3),
             "diversity_penalty": round(diversity_penalty, 3),
             "staleness": round(staleness, 3),
             "cross_strategy_bonus": round(cross_bonus, 3),

@@ -68,11 +68,10 @@ VALID_STRATEGIES = {"all", "similar_artist", "genre_adjacent", "editorial", "cha
 # ── Explanation labels ────────────────────────────────────────────────────────
 
 DIMENSION_LABELS: dict[str, str] = {
+    "language_match": "language/region match",
+    "audio_similarity": "audio similarity",
     "genre_match": "genre match",
     "artist_match": "artist affinity",
-    "audio_similarity": "audio similarity",
-    "novelty": "novelty",
-    "freshness": "freshness",
 }
 
 _taste_service = TasteService()
@@ -354,13 +353,10 @@ class RecommendationService:
         # Map breakdown keys to the 7 reportable dimensions
         breakdown = result.get("_breakdown", {})
         dimension_map: list[tuple[str, str, str]] = [
-            ("genre_match", "Genre Match", "genre"),
+            ("language_match", "Language/Region", "language"),
             ("audio_similarity", "Audio Similarity", "audio"),
-            ("novelty", "Novelty", "novelty"),
-            ("freshness", "Freshness", "freshness"),
-            ("diversity", "Diversity", "diversity"),
-            ("artist_affinity", "Artist Affinity", "artist"),
-            ("anti_staleness", "Anti-Staleness", "staleness"),
+            ("genre_match", "Genre Match", "genre"),
+            ("artist_match", "Artist Affinity", "artist"),
         ]
 
         dimensions: list[dict[str, Any]] = []
