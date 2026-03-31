@@ -2,8 +2,8 @@
 
 /**
  * Admin dev panel — live logs + enrichment progress.
+ * Uses polling for logs (SSE through Next.js proxy is unreliable).
  * Slides in from the bottom when dev view is active.
- * Only renders for users with is_admin=true.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -36,71 +36,25 @@ interface SystemStatus {
 }
 
 export function DevPanel({ isOpen }: { isOpen: boolean }) {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [tab, setTab] = useState<"logs" | "progress" | "status">("logs");
   const logEndRef = useRef<HTMLDivElement>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Connect to SSE log stream
-  useEffect(() => {
-    if (!isOpen) {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-      return;
-    }
+  // Poll logs every 2s (reliable through Next.js proxy, unlike SSE)
+  const { data: logsData } = useQuery<LogEntry[]>({
+    queryKey: ["admin", "logs"],
+    queryFn: () => apiFetch<LogEntry[]>("/api/admin/logs?limit=200"),
+    enabled: isOpen && tab === "logs",
+    refetchInterval: 2000,
+  });
 
-    // Use fetch-based SSE (same pattern as chat)
-    const controller = new AbortController();
-    let buffer = "";
-
-    fetch("/api/admin/logs/stream", {
-      signal: controller.signal,
-      credentials: "include",
-    })
-      .then((resp) => {
-        if (!resp.ok || !resp.body) return;
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-
-        function read() {
-          reader.read().then(({ done, value }) => {
-            if (done) return;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                try {
-                  const entry = JSON.parse(line.slice(6));
-                  setLogs((prev) => [...prev.slice(-300), entry]);
-                } catch {
-                  // ignore
-                }
-              }
-            }
-            read();
-          });
-        }
-        read();
-      })
-      .catch(() => {
-        // Connection lost — silent
-      });
-
-    return () => {
-      controller.abort();
-    };
-  }, [isOpen]);
+  const logs = logsData || [];
 
   // Auto-scroll logs
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
+  }, [logs.length]);
 
-  // Enrichment progress query — always runs when panel is open (for counter)
+  // Enrichment progress (always runs when panel open for counter)
   const { data: progressData } = useQuery<{ users: UserProgress[] }>({
     queryKey: ["admin", "progress"],
     queryFn: () => apiFetch("/api/admin/progress"),
@@ -108,7 +62,7 @@ export function DevPanel({ isOpen }: { isOpen: boolean }) {
     refetchInterval: 3000,
   });
 
-  // System status query
+  // System status
   const { data: statusData } = useQuery<SystemStatus>({
     queryKey: ["admin", "status"],
     queryFn: () => apiFetch("/api/admin/status"),
@@ -124,6 +78,9 @@ export function DevPanel({ isOpen }: { isOpen: boolean }) {
     INFO: "text-blue-400",
     DEBUG: "text-gray-500",
   };
+
+  const totalEnriched = progressData?.users.reduce((a, u) => a + u.enriched_songs, 0) ?? 0;
+  const totalSongs = progressData?.users.reduce((a, u) => a + u.total_songs, 0) ?? 0;
 
   return (
     <div className="fixed inset-x-0 bottom-0 z-50 flex max-h-[40vh] flex-col border-t border-purple-500/30 bg-[#0D0B1A]/95 backdrop-blur">
@@ -143,12 +100,14 @@ export function DevPanel({ isOpen }: { isOpen: boolean }) {
           </button>
         ))}
         {/* Live enrichment counter */}
-        {progressData && progressData.users.length > 0 && (
+        {totalSongs > 0 && (
           <span className="ml-2 rounded bg-purple-500/15 px-2 py-0.5 text-[10px] font-mono font-medium text-purple-300">
-            {progressData.users.reduce((a, u) => a + u.enriched_songs, 0)}
-            /
-            {progressData.users.reduce((a, u) => a + u.total_songs, 0)}
-            {" features"}
+            {totalEnriched}/{totalSongs} features
+            {totalEnriched < totalSongs && (
+              <span className="ml-1 text-amber-400">
+                ({Math.round(totalEnriched / totalSongs * 100)}%)
+              </span>
+            )}
           </span>
         )}
         <span className="ml-auto text-[10px] text-muted-foreground">
@@ -174,7 +133,7 @@ export function DevPanel({ isOpen }: { isOpen: boolean }) {
                   {entry.level}
                 </span>
                 <span className="shrink-0 text-purple-400/60">
-                  {entry.logger.replace("musicmind.", "")}
+                  {entry.logger.replace("musicmind.", "").split(".").slice(-1)[0]}
                 </span>
                 <span className="text-foreground/80">{entry.message}</span>
               </div>

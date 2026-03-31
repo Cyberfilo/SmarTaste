@@ -343,7 +343,7 @@ async def _background_sync_library(
                     user_id=user_id, force_refresh=True,
                 )
             except Exception:
-                logger.debug("Background profile build failed for %s", user_id)
+                logger.warning("Background profile build failed for %s", user_id, exc_info=True)
             return
 
         # If >10% of songs lack enrichment, run enrichment on un-enriched ones
@@ -368,7 +368,7 @@ async def _background_sync_library(
                         song_metadata_cache.c.user_id == user_id,
                         song_metadata_cache.c.catalog_id.notin_(enriched_ids_q),
                     )
-                ).limit(10)  # Small batch per /me call (runs every page load)
+                ).limit(50)  # Process up to 50 un-enriched songs per page load
             )
             rows = result.fetchall()
 
@@ -402,4 +402,4 @@ async def _background_sync_library(
         )
 
     except Exception:
-        logger.debug("Background library sync failed for user %s", user_id)
+        logger.warning("Background library sync failed for user %s", user_id, exc_info=True)
