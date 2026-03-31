@@ -246,34 +246,35 @@ export interface AudioFeaturesResponse {
 
 // ── Playlists ───────────────────────────────────────────
 
-export interface PlaylistItem {
-  id: number;
+export interface ServicePlaylist {
+  service_playlist_id: string;
+  name: string;
+  description: string;
+  track_count: number;
+  artwork_url: string;
+  owner: string;
+  service: string;
+}
+
+export interface PlaylistTrack {
   catalog_id: string;
-  position: number;
   name: string;
   artist_name: string;
   album_name: string;
   artwork_url: string;
   genre_names: string[];
-  added_by: string;
-}
-
-export interface Playlist {
-  id: number;
-  name: string;
-  description: string;
-  ai_context: string;
-  track_count: number;
-  created_at: string;
-  updated_at: string | null;
-}
-
-export interface PlaylistDetail extends Playlist {
-  items: PlaylistItem[];
+  service: string;
 }
 
 export interface PlaylistListResponse {
-  playlists: Playlist[];
+  playlists: ServicePlaylist[];
+  total: number;
+}
+
+export interface PlaylistTracksResponse {
+  playlist_id: string;
+  service: string;
+  items: PlaylistTrack[];
   total: number;
 }
 

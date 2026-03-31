@@ -24,7 +24,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Dashboard filled with visualizations** — genre donut chart, top 8 artists with affinity bars, audio traits radar, release year bar chart. All from existing taste profile API data.
 - **Listening timeline** — `GET /api/stats/timeline` endpoint returns songs in chronological order with date type labels (added/release). Frontend component groups by month with artwork, song details, and date badges.
 - **On-demand Essentia deep analysis** — `POST /api/tracks/analyze` accepts up to 10 seed track IDs, downloads 30s previews (Apple Music AAC / Deezer MP3 fallback), extracts 128-dim Discogs-EffNet embeddings + scalar features. Gracefully degrades when Essentia is not installed.
-- **Playlists page** — full CRUD for playlists with AI context field. Backend: `GET/POST /api/playlists`, `GET/PATCH/DELETE /api/playlists/{id}`, `POST/DELETE` tracks. Frontend: playlist grid, create form with AI context textarea, detail view with track list and remove. New sidebar nav item.
+- **Playlists page** — shows real playlists from connected Apple Music and Spotify. Grid view with artwork, click to see tracks. Backend fetches live from service APIs: `GET /api/playlists`, `GET /api/playlists/{id}/tracks?service=`. Added `playlist-read-private` scope for Spotify.
 
 ### Fixed
 - **Recommendations still showing non-Italian artists** — genre overlap filter now distinguishes regional genres ("Italian Hip-Hop/Rap") from parent genres ("Hip-Hop/Rap"). Prefers exact regional matches, limits parent-only fallback to 5. Applied to all 4 discovery strategies.

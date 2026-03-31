@@ -1,324 +1,187 @@
-"""Playlist service — CRUD operations + AI-powered expand/improve."""
+"""Playlist service — fetch real playlists from connected music services."""
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import sqlalchemy as sa
 
-from musicmind.db.schema import generated_playlists, playlist_items, song_metadata_cache
+from musicmind.api.playlists.fetch import (
+    fetch_apple_music_playlist_tracks,
+    fetch_apple_music_playlists,
+    fetch_spotify_playlist_tracks,
+    fetch_spotify_playlists,
+)
+from musicmind.api.services.service import (
+    generate_apple_developer_token,
+    get_user_connections,
+    refresh_spotify_token,
+    upsert_service_connection,
+)
+from musicmind.db.schema import service_connections
+from musicmind.security.encryption import EncryptionService
 
 logger = logging.getLogger(__name__)
 
 
 class PlaylistService:
-    """Stateless service for playlist management."""
+    """Fetches real playlists from Spotify and Apple Music."""
 
     async def list_playlists(
-        self, engine, *, user_id: str
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List all playlists for a user."""
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(generated_playlists)
-                .where(generated_playlists.c.user_id == user_id)
-                .order_by(generated_playlists.c.created_at.desc())
+        """List the user's playlists from connected services.
+
+        Fetches live from the service API (not cached).
+        """
+        connections = await get_user_connections(engine, user_id=user_id)
+        if not connections:
+            raise ValueError("No connected service found")
+
+        all_playlists: list[dict[str, Any]] = []
+
+        for conn_data in connections:
+            svc = conn_data["service"]
+            if service and svc != service:
+                continue
+
+            try:
+                playlists = await self._fetch_service_playlists(
+                    engine, encryption, settings,
+                    user_id=user_id, service=svc,
+                )
+                all_playlists.extend(playlists)
+            except Exception:
+                logger.warning("Failed to fetch playlists from %s", svc)
+
+        return all_playlists
+
+    async def get_playlist_tracks(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+        playlist_id: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Get tracks from a specific service playlist."""
+        access_token = await self._get_access_token(
+            engine, encryption, settings,
+            user_id=user_id, service=service,
+        )
+
+        if service == "spotify":
+            return await fetch_spotify_playlist_tracks(
+                access_token, playlist_id, limit=limit,
             )
-            rows = result.fetchall()
+        elif service == "apple_music":
+            developer_token = generate_apple_developer_token(
+                settings.apple_team_id,
+                settings.apple_key_id,
+                settings.apple_private_key_path,
+                private_key_b64=settings.apple_private_key_b64,
+            )
+            return await fetch_apple_music_playlist_tracks(
+                developer_token, access_token, playlist_id, limit=limit,
+            )
+        else:
+            raise ValueError(f"Unsupported service: {service}")
 
-        playlists = []
-        for row in rows:
-            playlists.append({
-                "id": row.id,
-                "name": row.name,
-                "description": row.description or "",
-                "ai_context": row.ai_context or "",
-                "track_count": row.track_count or 0,
-                "created_at": row.created_at.isoformat() if row.created_at else "",
-                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-            })
-        return playlists
+    async def _fetch_service_playlists(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+    ) -> list[dict[str, Any]]:
+        """Fetch playlists from a specific service."""
+        access_token = await self._get_access_token(
+            engine, encryption, settings,
+            user_id=user_id, service=service,
+        )
 
-    async def get_playlist(
-        self, engine, *, user_id: str, playlist_id: int
-    ) -> dict[str, Any] | None:
-        """Get a playlist with all its tracks."""
+        if service == "spotify":
+            return await fetch_spotify_playlists(access_token)
+        elif service == "apple_music":
+            developer_token = generate_apple_developer_token(
+                settings.apple_team_id,
+                settings.apple_key_id,
+                settings.apple_private_key_path,
+                private_key_b64=settings.apple_private_key_b64,
+            )
+            return await fetch_apple_music_playlists(
+                developer_token, access_token,
+            )
+        else:
+            raise ValueError(f"Unsupported service: {service}")
+
+    async def _get_access_token(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+    ) -> str:
+        """Get valid access token, refreshing Spotify if needed."""
         async with engine.begin() as conn:
-            # Get playlist
             result = await conn.execute(
-                sa.select(generated_playlists).where(
+                sa.select(service_connections).where(
                     sa.and_(
-                        generated_playlists.c.id == playlist_id,
-                        generated_playlists.c.user_id == user_id,
+                        service_connections.c.user_id == user_id,
+                        service_connections.c.service == service,
                     )
                 )
             )
             row = result.first()
-            if row is None:
-                return None
 
-            # Get items ordered by position
-            items_result = await conn.execute(
-                sa.select(playlist_items)
-                .where(playlist_items.c.playlist_id == playlist_id)
-                .order_by(playlist_items.c.position)
-            )
-            items = items_result.fetchall()
+        if row is None:
+            raise ValueError(f"No {service} connection found")
 
-        playlist = {
-            "id": row.id,
-            "name": row.name,
-            "description": row.description or "",
-            "ai_context": row.ai_context or "",
-            "track_count": row.track_count or 0,
-            "created_at": row.created_at.isoformat() if row.created_at else "",
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-            "items": [],
-        }
+        access_token = encryption.decrypt(row.access_token_encrypted)
 
-        for item in items:
-            genres = item.genre_names
-            if isinstance(genres, str):
-                try:
-                    genres = json.loads(genres)
-                except (json.JSONDecodeError, TypeError):
-                    genres = []
-            playlist["items"].append({
-                "id": item.id,
-                "catalog_id": item.catalog_id,
-                "position": item.position,
-                "name": item.name or "",
-                "artist_name": item.artist_name or "",
-                "album_name": item.album_name or "",
-                "artwork_url": item.artwork_url or "",
-                "genre_names": genres or [],
-                "added_by": item.added_by or "user",
-            })
+        if service == "spotify":
+            token_expires_at = row.token_expires_at
+            now = datetime.now(UTC)
+            if token_expires_at is not None:
+                if token_expires_at.tzinfo is None:
+                    token_expires_at = token_expires_at.replace(tzinfo=UTC)
+                if token_expires_at < now + timedelta(seconds=60):
+                    refresh_token_encrypted = row.refresh_token_encrypted
+                    if refresh_token_encrypted:
+                        refresh_token_value = encryption.decrypt(
+                            refresh_token_encrypted
+                        )
+                        token_data = await refresh_spotify_token(
+                            refresh_token_value,
+                            settings.spotify_client_id,
+                        )
+                        if token_data:
+                            access_token = token_data["access_token"]
+                            await upsert_service_connection(
+                                engine, encryption,
+                                user_id=user_id,
+                                service="spotify",
+                                access_token=access_token,
+                                refresh_token=token_data.get(
+                                    "refresh_token", refresh_token_value
+                                ),
+                                expires_in=token_data.get("expires_in"),
+                                service_user_id=row.service_user_id,
+                            )
 
-        return playlist
-
-    async def create_playlist(
-        self,
-        engine,
-        *,
-        user_id: str,
-        name: str,
-        description: str = "",
-        ai_context: str = "",
-    ) -> dict[str, Any]:
-        """Create a new empty playlist."""
-        now = datetime.now(UTC)
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                generated_playlists.insert()
-                .values(
-                    user_id=user_id,
-                    name=name,
-                    description=description,
-                    ai_context=ai_context,
-                    vibe_prompt=ai_context,
-                    track_count=0,
-                    created_at=now,
-                    updated_at=now,
-                )
-                .returning(generated_playlists.c.id)
-            )
-            row = result.first()
-            playlist_id = row[0]
-
-        logger.info("Created playlist %d for user %s", playlist_id, user_id)
-        return {
-            "id": playlist_id,
-            "name": name,
-            "description": description,
-            "ai_context": ai_context,
-            "track_count": 0,
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-        }
-
-    async def update_playlist(
-        self,
-        engine,
-        *,
-        user_id: str,
-        playlist_id: int,
-        name: str | None = None,
-        description: str | None = None,
-        ai_context: str | None = None,
-    ) -> bool:
-        """Update playlist metadata. Returns True if found and updated."""
-        values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
-        if name is not None:
-            values["name"] = name
-        if description is not None:
-            values["description"] = description
-        if ai_context is not None:
-            values["ai_context"] = ai_context
-            values["vibe_prompt"] = ai_context
-
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                generated_playlists.update()
-                .where(
-                    sa.and_(
-                        generated_playlists.c.id == playlist_id,
-                        generated_playlists.c.user_id == user_id,
-                    )
-                )
-                .values(**values)
-            )
-        return result.rowcount > 0
-
-    async def delete_playlist(
-        self, engine, *, user_id: str, playlist_id: int
-    ) -> bool:
-        """Delete a playlist and all its items. Returns True if found."""
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                generated_playlists.delete().where(
-                    sa.and_(
-                        generated_playlists.c.id == playlist_id,
-                        generated_playlists.c.user_id == user_id,
-                    )
-                )
-            )
-        return result.rowcount > 0
-
-    async def add_tracks(
-        self,
-        engine,
-        *,
-        user_id: str,
-        playlist_id: int,
-        catalog_ids: list[str],
-        added_by: str = "user",
-    ) -> int:
-        """Add tracks to a playlist. Returns count of tracks added."""
-        # Verify playlist belongs to user
-        async with engine.begin() as conn:
-            pl_result = await conn.execute(
-                sa.select(generated_playlists.c.id).where(
-                    sa.and_(
-                        generated_playlists.c.id == playlist_id,
-                        generated_playlists.c.user_id == user_id,
-                    )
-                )
-            )
-            if pl_result.first() is None:
-                raise ValueError("Playlist not found")
-
-            # Get current max position
-            pos_result = await conn.execute(
-                sa.select(sa.func.max(playlist_items.c.position)).where(
-                    playlist_items.c.playlist_id == playlist_id
-                )
-            )
-            max_pos = pos_result.scalar() or -1
-
-            # Look up track metadata
-            tracks_result = await conn.execute(
-                sa.select(song_metadata_cache).where(
-                    sa.and_(
-                        song_metadata_cache.c.catalog_id.in_(catalog_ids),
-                        song_metadata_cache.c.user_id == user_id,
-                    )
-                )
-            )
-            track_map = {}
-            for row in tracks_result:
-                genres = row.genre_names
-                if isinstance(genres, str):
-                    try:
-                        genres = json.loads(genres)
-                    except (json.JSONDecodeError, TypeError):
-                        genres = []
-                track_map[row.catalog_id] = {
-                    "name": row.name or "",
-                    "artist_name": row.artist_name or "",
-                    "album_name": row.album_name or "",
-                    "artwork_url": getattr(row, "artwork_url_template", "") or "",
-                    "genre_names": genres,
-                }
-
-            # Insert items
-            added = 0
-            for cid in catalog_ids:
-                max_pos += 1
-                meta = track_map.get(cid, {})
-                await conn.execute(
-                    playlist_items.insert().values(
-                        playlist_id=playlist_id,
-                        catalog_id=cid,
-                        position=max_pos,
-                        name=meta.get("name", ""),
-                        artist_name=meta.get("artist_name", ""),
-                        album_name=meta.get("album_name", ""),
-                        artwork_url=meta.get("artwork_url", ""),
-                        genre_names=json.dumps(meta.get("genre_names", [])),
-                        added_by=added_by,
-                    )
-                )
-                added += 1
-
-            # Update track count
-            await conn.execute(
-                generated_playlists.update()
-                .where(generated_playlists.c.id == playlist_id)
-                .values(
-                    track_count=max_pos + 1,
-                    updated_at=datetime.now(UTC),
-                )
-            )
-
-        return added
-
-    async def remove_track(
-        self,
-        engine,
-        *,
-        user_id: str,
-        playlist_id: int,
-        item_id: int,
-    ) -> bool:
-        """Remove a track from a playlist by item ID."""
-        async with engine.begin() as conn:
-            # Verify ownership
-            pl_result = await conn.execute(
-                sa.select(generated_playlists.c.id).where(
-                    sa.and_(
-                        generated_playlists.c.id == playlist_id,
-                        generated_playlists.c.user_id == user_id,
-                    )
-                )
-            )
-            if pl_result.first() is None:
-                return False
-
-            result = await conn.execute(
-                playlist_items.delete().where(
-                    sa.and_(
-                        playlist_items.c.id == item_id,
-                        playlist_items.c.playlist_id == playlist_id,
-                    )
-                )
-            )
-
-            if result.rowcount > 0:
-                # Update count
-                count_result = await conn.execute(
-                    sa.select(sa.func.count()).where(
-                        playlist_items.c.playlist_id == playlist_id
-                    )
-                )
-                new_count = count_result.scalar() or 0
-                await conn.execute(
-                    generated_playlists.update()
-                    .where(generated_playlists.c.id == playlist_id)
-                    .values(track_count=new_count, updated_at=datetime.now(UTC))
-                )
-
-        return result.rowcount > 0
+        return access_token
