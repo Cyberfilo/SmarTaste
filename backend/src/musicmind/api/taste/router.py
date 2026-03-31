@@ -262,3 +262,39 @@ async def get_audio_traits(
         traits=traits,
         note=note,
     )
+
+
+@router.get("/enrichment-status")
+async def enrichment_status(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Get the current user's audio enrichment progress."""
+    import sqlalchemy as sa
+
+    from musicmind.db.schema import audio_features_cache, song_metadata_cache
+
+    engine = request.app.state.engine
+    user_id = current_user["user_id"]
+
+    async with engine.begin() as conn:
+        total_q = await conn.execute(
+            sa.select(sa.func.count()).select_from(song_metadata_cache).where(
+                song_metadata_cache.c.user_id == user_id
+            )
+        )
+        total = total_q.scalar() or 0
+
+        enriched_q = await conn.execute(
+            sa.select(sa.func.count()).select_from(audio_features_cache).where(
+                audio_features_cache.c.user_id == user_id
+            )
+        )
+        enriched = enriched_q.scalar() or 0
+
+    return {
+        "total_songs": total,
+        "enriched_songs": enriched,
+        "percentage": round(enriched / total * 100, 1) if total > 0 else 0,
+        "complete": enriched >= total and total > 0,
+    }

@@ -3,8 +3,9 @@
 import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
-import { authApi } from "@/lib/api";
+import { authApi, apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { DevPanel } from "@/components/admin/dev-panel";
 import {
@@ -16,6 +17,7 @@ import {
   Code,
   User,
   Sparkles,
+  Loader2,
 } from "lucide-react";
 
 /**
@@ -31,6 +33,33 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const isChat = pathname === "/chat";
   const [devView, setDevView] = useState(false);
   const isAdmin = user?.is_admin ?? false;
+
+  // Poll user's own enrichment progress (no admin required)
+  const { data: enrichmentData } = useQuery<{
+    total_songs: number;
+    enriched_songs: number;
+    percentage: number;
+    complete: boolean;
+  }>({
+    queryKey: ["enrichment-status"],
+    queryFn: () => apiFetch("/api/taste/enrichment-status"),
+    enabled: isAuthenticated,
+    refetchInterval: 5000,
+  });
+
+  const enrichmentActive = enrichmentData
+    ? !enrichmentData.complete && enrichmentData.total_songs > 0
+    : false;
+
+  // Keep triggering /me periodically while enrichment is incomplete
+  // Each /me call processes up to 50 un-enriched songs in background
+  useEffect(() => {
+    if (!enrichmentActive) return;
+    const interval = setInterval(() => {
+      authApi.me().catch(() => {});
+    }, 15000); // Every 15s while enrichment is active
+    return () => clearInterval(interval);
+  }, [enrichmentActive]);
 
   useEffect(() => {
     checkAuth();
@@ -140,6 +169,33 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             </Button>
           </div>
         </header>
+
+        {/* Enrichment progress bar (visible to all users when active) */}
+        {enrichmentActive && enrichmentData && (
+          <div className="flex items-center gap-3 border-b border-border bg-card/80 px-4 py-2">
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-purple-400" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-muted-foreground">
+                  Analyzing your library
+                </span>
+                <span className="text-xs font-mono font-medium text-purple-300">
+                  {enrichmentData.enriched_songs}/{enrichmentData.total_songs}
+                </span>
+              </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-purple-500 transition-all duration-1000"
+                  style={{
+                    width: `${Math.round(
+                      (enrichmentData.enriched_songs / enrichmentData.total_songs) * 100
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Admin dev/user toggle bar */}
         {isAdmin && (
