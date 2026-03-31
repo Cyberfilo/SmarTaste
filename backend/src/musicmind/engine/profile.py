@@ -186,15 +186,22 @@ def build_artist_affinity(
     use_temporal_decay: bool = False,
     half_life_days: float = 90.0,
 ) -> list[dict[str, Any]]:
-    """Build artist affinity scores.
+    """Build artist affinity scores based on LISTENING frequency.
 
-    Score = (library_song_count * 1) + (recent_play_appearances * 2) + (love_rating * 3)
+    Weights prioritize actual plays over library presence:
+    - Library presence: 0.3 per song (baseline — having songs != listening)
+    - Recent play: 3.0 per appearance (dominant signal)
+    - Repeated play: 5.0 for songs played multiple times
+    - Love rating: +4.0 (strong explicit signal)
+    - Dislike rating: -3.0
+
     Returns sorted list of {name, score, song_count}.
     """
     artist_scores: dict[str, float] = Counter()
     artist_song_counts: dict[str, int] = Counter()
     now = datetime.now(tz=UTC)
 
+    # Library songs: low weight (just having a song doesn't mean you listen)
     for song in songs:
         raw_artist = song.get("artist_name", "")
         if not raw_artist:
@@ -204,20 +211,21 @@ def build_artist_affinity(
             ts = song.get("date_added_to_library") or song.get("fetched_at")
             decay = temporal_decay_weight(ts, now, half_life_days)
 
-        # Parse primary + featuring artists with weighted contribution
         parsed = parse_artists(raw_artist)
         for name, weight in parsed:
-            artist_scores[name] += 1.0 * decay * weight
+            artist_scores[name] += 0.3 * decay * weight
             artist_song_counts[name] += 1
 
-        # Love/dislike ratings apply to primary artist only
+        # Love/dislike ratings are strong explicit signals
         rating = song.get("user_rating")
         primary_name = parsed[0][0] if parsed else raw_artist
         if rating == 1:
-            artist_scores[primary_name] += 3.0 * decay
+            artist_scores[primary_name] += 4.0 * decay
         elif rating == -1:
-            artist_scores[primary_name] -= 2.0 * decay
+            artist_scores[primary_name] -= 3.0 * decay
 
+    # Recent plays: the DOMINANT signal for artist affinity
+    seen_song_ids: set[str] = set()
     for entry in history:
         raw_artist = entry.get("artist_name", "")
         if not raw_artist:
@@ -226,9 +234,15 @@ def build_artist_affinity(
         if use_temporal_decay:
             ts = entry.get("observed_at")
             decay = temporal_decay_weight(ts, now, half_life_days)
-        # Recent plays also credit featuring artists
+
+        song_id = entry.get("song_id", "")
+        is_repeat = song_id in seen_song_ids
+        seen_song_ids.add(song_id)
+
+        # Repeated plays get higher weight than first plays
+        play_weight = 5.0 if is_repeat else 3.0
         for name, weight in parse_artists(raw_artist):
-            artist_scores[name] += 2.0 * decay * weight
+            artist_scores[name] += play_weight * decay * weight
 
     # Normalize by max score
     if not artist_scores:
