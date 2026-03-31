@@ -1,9 +1,10 @@
-"""Audio feature enrichment pipeline — progressive fill from free external APIs.
+"""Audio feature enrichment pipeline — Deezer preview → ReccoBeats analysis.
 
-Enrichment order:
-1. Deezer (ISRC-native, free, BPM)
-2. ReccoBeats (Spotify ID, free, energy/danceability/valence/acousticness)
-3. SoundStat (Spotify ID, paid, complete features — budget-gated)
+Pipeline per track:
+1. Deezer: search by name → 30s preview MP3 + BPM (free, no auth)
+2. ReccoBeats: upload preview → 9 audio features (free, no auth)
+3. SoundStat: Spotify ID lookup for gaps (paid, optional)
 
-ISRC → Spotify ID resolution via MusicBrainz when needed.
+Runs automatically when user connects a music service.
+All features stored per-user in audio_features_cache with provenance.
 """
