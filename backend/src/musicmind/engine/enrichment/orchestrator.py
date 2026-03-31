@@ -1,22 +1,23 @@
-"""Audio enrichment orchestrator — Deezer preview → ReccoBeats analysis.
+"""Audio enrichment orchestrator — batch processing with rate limit handling.
 
-Pipeline:
-1. Deezer: search by name → get 30s preview MP3 URL + BPM (free)
-2. ReccoBeats: upload preview → get all 9 audio features (free, no auth)
-3. SoundStat: Spotify ID lookup for remaining gaps (paid, optional)
+Pipeline per track:
+1. Deezer: search by name → 30s preview MP3 + BPM (free)
+2. ReccoBeats: upload preview → 9 audio features (free, rate limited)
+3. SoundStat: Spotify ID lookup for gaps (paid, optional)
 
-Runs automatically when a user connects a music service.
-Per-field provenance tracked in feature_source dict.
+Memory-safe: processes in small batches with GC between batches.
+Rate-limit-safe: exponential backoff on 429/timeout from ReccoBeats.
 """
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
 import sqlalchemy as sa
 
 from musicmind.db.schema import audio_features_cache
@@ -32,6 +33,12 @@ ENRICHABLE_FIELDS = {
     "beat_strength", "brightness", "key", "scale", "instrumentalness", "loudness",
 }
 
+# Batch size: process N tracks then pause for GC + rate limit cooldown
+BATCH_SIZE = 5
+BATCH_DELAY_SECONDS = 2.0
+# Delay between individual tracks (respect ReccoBeats rate limits)
+TRACK_DELAY_SECONDS = 1.0
+
 
 async def enrich_tracks(
     engine: Any,
@@ -41,12 +48,10 @@ async def enrich_tracks(
     soundstat_api_key: str | None = None,
     budget_mode: bool = False,
 ) -> dict[str, int]:
-    """Enrich all tracks with audio features.
+    """Enrich tracks in small batches to avoid OOM and rate limits.
 
-    Pipeline per track:
-    1. Deezer search → BPM + 30s preview URL (free)
-    2. Download preview → ReccoBeats upload → 9 audio features (free)
-    3. SoundStat for remaining gaps (paid, only if API key set)
+    Processes BATCH_SIZE tracks at a time with delays between batches.
+    Each track: Deezer search → download preview → ReccoBeats upload.
 
     Args:
         engine: SQLAlchemy async engine.
@@ -63,31 +68,68 @@ async def enrich_tracks(
         "skipped": 0, "failed": 0, "total": len(tracks),
     }
 
-    for track in tracks:
-        catalog_id = track.get("catalog_id", "")
-        name = track.get("name", "")
-        artist_name = track.get("artist_name", "")
-        isrc = track.get("isrc") or ""
-        service_source = track.get("service_source", "")
+    # Process in batches
+    for batch_start in range(0, len(tracks), BATCH_SIZE):
+        batch = tracks[batch_start:batch_start + BATCH_SIZE]
 
-        if not catalog_id:
-            stats["skipped"] += 1
-            continue
+        for track in batch:
+            result = await _enrich_single_track(
+                engine, track, user_id=user_id,
+                soundstat_api_key=soundstat_api_key,
+            )
+            stats[result] += 1
 
-        # Skip fully enriched tracks
-        existing = await _get_existing_features(engine, catalog_id, user_id)
-        if existing:
-            missing = _missing_fields(existing)
-            if not missing:
-                stats["skipped"] += 1
-                continue
+            # Delay between tracks to respect rate limits
+            await asyncio.sleep(TRACK_DELAY_SECONDS)
 
-        features = dict(existing) if existing else {}
-        feature_source = _get_source_dict(existing)
+        # Between batches: force GC + longer delay
+        gc.collect()
+        if batch_start + BATCH_SIZE < len(tracks):
+            await asyncio.sleep(BATCH_DELAY_SECONDS)
 
-        # ── Stage 1: Deezer (BPM + preview URL) ──────────────
-        preview_url = None
-        if name and artist_name:
+    logger.info(
+        "Enriched %d/%d: %d Deezer, %d ReccoBeats, %d SoundStat, "
+        "%d skipped, %d failed",
+        stats["deezer"] + stats["reccobeats"] + stats["soundstat"],
+        stats["total"], stats["deezer"], stats["reccobeats"],
+        stats["soundstat"], stats["skipped"], stats["failed"],
+    )
+    return stats
+
+
+async def _enrich_single_track(
+    engine: Any,
+    track: dict[str, Any],
+    *,
+    user_id: str,
+    soundstat_api_key: str | None = None,
+) -> str:
+    """Enrich a single track. Returns the result category string.
+
+    Returns one of: "deezer", "reccobeats", "soundstat", "skipped", "failed"
+    """
+    catalog_id = track.get("catalog_id", "")
+    name = track.get("name", "")
+    artist_name = track.get("artist_name", "")
+    isrc = track.get("isrc") or ""
+    service_source = track.get("service_source", "")
+
+    if not catalog_id:
+        return "skipped"
+
+    # Skip fully enriched tracks
+    existing = await _get_existing_features(engine, catalog_id, user_id)
+    if existing and not _missing_fields(existing):
+        return "skipped"
+
+    features = dict(existing) if existing else {}
+    feature_source = _get_source_dict(existing)
+    enriched_by = "failed"
+
+    # ── Stage 1: Deezer (BPM + preview URL) ──────────────────
+    preview_url = None
+    if name and artist_name:
+        try:
             deezer_result = await fetch_deezer_features(
                 name=name, artist_name=artist_name,
             )
@@ -98,23 +140,31 @@ async def enrich_tracks(
                     features, feature_source, deezer_result, "deezer"
                 )
                 if filled:
-                    stats["deezer"] += 1
+                    enriched_by = "deezer"
+        except Exception:
+            logger.debug("Deezer failed for %s", catalog_id)
 
-        # ── Stage 2: ReccoBeats (upload preview → 9 features) ─
-        if preview_url:
+    # ── Stage 2: ReccoBeats (upload preview → features) ──────
+    if preview_url:
+        try:
             audio_bytes = await _download_preview(preview_url)
             if audio_bytes:
-                recco_result = await analyze_audio_features(audio_bytes)
+                recco_result = await _reccobeats_with_retry(audio_bytes)
+                # Release preview bytes immediately
+                del audio_bytes
                 if recco_result:
                     filled = _merge_features(
                         features, feature_source, recco_result, "reccobeats"
                     )
                     if filled:
-                        stats["reccobeats"] += 1
+                        enriched_by = "reccobeats"
+        except Exception:
+            logger.debug("ReccoBeats failed for %s", catalog_id)
 
-        # ── Stage 3: SoundStat (paid, Spotify ID, gap-fill) ──
-        missing = _missing_fields(features)
-        if missing and soundstat_api_key:
+    # ── Stage 3: SoundStat (paid, gap-fill) ──────────────────
+    missing = _missing_fields(features)
+    if missing and soundstat_api_key:
+        try:
             spotify_id = await _get_spotify_id(
                 engine, track, isrc, service_source
             )
@@ -127,24 +177,33 @@ async def enrich_tracks(
                         features, feature_source, ss_result, "soundstat"
                     )
                     if filled:
-                        stats["soundstat"] += 1
+                        enriched_by = "soundstat"
+        except Exception:
+            logger.debug("SoundStat failed for %s", catalog_id)
 
-        # Store if anything was enriched
-        if feature_source:
-            await _store_features(
-                engine, catalog_id, user_id, features, feature_source
-            )
-        elif not existing:
-            stats["failed"] += 1
+    # Store if anything was enriched
+    if feature_source:
+        await _store_features(engine, catalog_id, user_id, features, feature_source)
 
-    logger.info(
-        "Enriched %d/%d: %d Deezer, %d ReccoBeats, %d SoundStat, "
-        "%d skipped, %d failed",
-        stats["deezer"] + stats["reccobeats"] + stats["soundstat"],
-        stats["total"], stats["deezer"], stats["reccobeats"],
-        stats["soundstat"], stats["skipped"], stats["failed"],
-    )
-    return stats
+    return enriched_by
+
+
+async def _reccobeats_with_retry(
+    audio_bytes: bytes,
+    max_retries: int = 3,
+) -> dict[str, Any] | None:
+    """Upload to ReccoBeats with exponential backoff on rate limit/timeout."""
+    for attempt in range(max_retries):
+        result = await analyze_audio_features(audio_bytes)
+        if result is not None:
+            return result
+
+        # ReccoBeats returned None — could be rate limit or server error
+        wait = 2.0 * (2 ** attempt)  # 2s, 4s, 8s
+        logger.info("ReccoBeats retry %d/%d, waiting %.0fs", attempt + 1, max_retries, wait)
+        await asyncio.sleep(wait)
+
+    return None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -185,14 +244,20 @@ def _merge_features(
 
 
 async def _download_preview(url: str) -> bytes | None:
-    """Download a 30s audio preview (sequential, polite)."""
+    """Download a 30s audio preview. Returns None on error."""
+    import httpx
+
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             resp = await client.get(url)
             resp.raise_for_status()
-            return resp.content
-    except (httpx.HTTPStatusError, httpx.HTTPError):
-        logger.debug("Failed to download preview from %s", url[:60])
+            content = resp.content
+            # Sanity check: previews are typically 200KB-600KB
+            if len(content) < 1000:
+                return None
+            return content
+    except Exception:
+        logger.debug("Preview download failed: %s", url[:60])
         return None
 
 
