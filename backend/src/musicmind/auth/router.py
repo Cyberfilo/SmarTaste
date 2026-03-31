@@ -295,6 +295,10 @@ async def me(
     }
 
 
+# In-memory lock: prevent concurrent enrichment runs per user
+_enrichment_locks: dict[str, bool] = {}
+
+
 async def _background_sync_library(
     *,
     engine,
@@ -304,9 +308,14 @@ async def _background_sync_library(
 ) -> None:
     """Check for un-enriched songs and run enrichment if needed.
 
-    Called as a background task on every /me request.
-    Lightweight: checks DB first, only hits external APIs if gaps exist.
+    Uses an in-memory lock to prevent concurrent runs for the same user.
+    Skips tracks that have already been attempted (stored with empty features).
     """
+    # Prevent concurrent enrichment for the same user
+    if _enrichment_locks.get(user_id):
+        return
+    _enrichment_locks[user_id] = True
+
     try:
         from musicmind.api.services.service import get_user_connections
         from musicmind.db.schema import audio_features_cache, song_metadata_cache
@@ -403,3 +412,5 @@ async def _background_sync_library(
 
     except Exception:
         logger.warning("Background library sync failed for user %s", user_id, exc_info=True)
+    finally:
+        _enrichment_locks.pop(user_id, None)
