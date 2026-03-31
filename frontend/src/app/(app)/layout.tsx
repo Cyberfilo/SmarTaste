@@ -40,15 +40,16 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     enriched_songs: number;
     percentage: number;
     complete: boolean;
+    indexing: boolean;
   }>({
     queryKey: ["enrichment-status"],
     queryFn: () => apiFetch("/api/taste/enrichment-status"),
     enabled: isAuthenticated,
-    refetchInterval: 5000,
+    refetchInterval: 3000,
   });
 
   const enrichmentActive = enrichmentData
-    ? !enrichmentData.complete && enrichmentData.total_songs > 0
+    ? (!enrichmentData.complete || enrichmentData.indexing) && enrichmentData.total_songs > 0
     : false;
 
   // Keep triggering /me periodically while enrichment is incomplete
@@ -177,7 +178,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs text-muted-foreground">
-                  Analyzing your library
+                  {enrichmentData.indexing ? "Indexing" : "Analyzing your library"}
+                  {enrichmentData.indexing && (
+                    <span className="ml-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-purple-400" />
+                  )}
                 </span>
                 <span className="text-xs font-mono font-medium text-purple-300">
                   {enrichmentData.enriched_songs}/{enrichmentData.total_songs}
