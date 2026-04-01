@@ -1,10 +1,13 @@
-"""Standalone enrichment worker with full artist discography support.
+"""Standalone enrichment worker with discography support + proxy rotation.
 
 Connects to Railway PostgreSQL. Two phases:
   1. Enrich un-enriched library tracks (Deezer → ReccoBeats)
-  2. Discover + enrich full discographies of relevant artists
+  2. Discover + enrich full discographies of top 80% artists
 
-Run on Mac: DATABASE_URL="postgresql://..." python3 enrichment_worker.py
+Handles ReccoBeats 429 with Retry-After header.
+Rotates through proxies from proxy.txt on rate limits.
+
+Run: DATABASE_URL="postgresql://..." python3 enrichment_worker.py
 """
 
 from __future__ import annotations
@@ -13,9 +16,10 @@ import asyncio
 import json
 import logging
 import os
+import random
 import sys
-from collections import Counter
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import sqlalchemy as sa
@@ -33,10 +37,67 @@ SOUNDSTAT_API_KEY = os.environ.get("SOUNDSTAT_API_KEY", "")
 CONCURRENCY = int(os.environ.get("CONCURRENCY", "30"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "500"))
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "5"))
-GENRE_OVERLAP_THRESHOLD = 0.2
 
 DEEZER_API = "https://api.deezer.com"
 RECCOBEATS_API = "https://api.reccobeats.com/v1/analysis/audio-features"
+
+
+# ── Proxy Manager ────────────────────────────────────────────────────────────
+
+
+class ProxyManager:
+    """Load proxies from proxy.txt, rotate on failure/rate-limit."""
+
+    def __init__(self) -> None:
+        self.proxies: list[str] = []
+        self.failed: set[str] = set()
+        self._load()
+
+    def _load(self) -> None:
+        path = Path(__file__).parent / "proxy.txt"
+        if not path.exists():
+            return
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                self.proxies.append(line)
+        if self.proxies:
+            logger.info("Loaded %d proxies from proxy.txt", len(self.proxies))
+
+    def get(self) -> str | None:
+        """Get a random working proxy, or None for direct connection."""
+        available = [p for p in self.proxies if p not in self.failed]
+        if not available:
+            return None
+        return random.choice(available)
+
+    def mark_failed(self, proxy: str) -> None:
+        self.failed.add(proxy)
+        remaining = len(self.proxies) - len(self.failed)
+        logger.info("Proxy failed: %s (%d remaining)", proxy[:30], remaining)
+
+    def mark_rate_limited(self, proxy: str | None) -> None:
+        """On 429, mark proxy as temporarily bad so we rotate to another."""
+        if proxy:
+            self.failed.add(proxy)
+
+    def reset(self) -> None:
+        """Reset failed proxies (call periodically to retry them)."""
+        self.failed.clear()
+
+
+proxy_mgr = ProxyManager()
+
+
+def _get_client(timeout: float = 15.0) -> httpx.AsyncClient:
+    """Get an httpx client, optionally through a proxy."""
+    proxy = proxy_mgr.get()
+    if proxy:
+        return httpx.AsyncClient(timeout=timeout, proxy=proxy, follow_redirects=True)
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+
+
+# ── Main Loop ────────────────────────────────────────────────────────────────
 
 
 async def main() -> None:
@@ -49,21 +110,27 @@ async def main() -> None:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     engine = create_async_engine(url, pool_size=20, max_overflow=20)
-    logger.info("Worker started — concurrency=%d, batch=%d", CONCURRENCY, BATCH_SIZE)
+    logger.info("Worker started — concurrency=%d, batch=%d, proxies=%d",
+                CONCURRENCY, BATCH_SIZE, len(proxy_mgr.proxies))
 
     try:
         # Phase 1: Library tracks
         lib_count = await enrich_library_tracks(engine)
         logger.info("Phase 1 complete: %d library tracks processed", lib_count)
 
-        # Phase 2: Artist discographies (main work)
+        # Phase 2: Artist discographies
         await enrich_artist_discographies(engine)
 
-        # Loop: keep checking for new tracks
+        # Loop: keep checking
+        cycle = 0
         while True:
             lib_count = await enrich_library_tracks(engine)
             if lib_count == 0:
-                logger.info("All done. Sleeping %ds before next check.", SLEEP_SECONDS)
+                logger.info("All done. Sleeping %ds.", SLEEP_SECONDS)
+            # Reset failed proxies every 10 cycles
+            cycle += 1
+            if cycle % 10 == 0:
+                proxy_mgr.reset()
             await asyncio.sleep(SLEEP_SECONDS)
     finally:
         await engine.dispose()
@@ -109,8 +176,7 @@ async def enrich_artist_discographies(engine) -> int:
         ))
         user_ids = [r[0] for r in users_result.fetchall()]
 
-    logger.info("Phase 2: Found %d users with connected services", len(user_ids))
-
+    logger.info("Phase 2: Found %d users", len(user_ids))
     total = 0
     for user_id in user_ids:
         count = await _discover_for_user(engine, user_id)
@@ -119,31 +185,7 @@ async def enrich_artist_discographies(engine) -> int:
 
 
 async def _discover_for_user(engine, user_id: str) -> int:
-    # Get genre profile
-    async with engine.begin() as conn:
-        result = await conn.execute(sa.text(
-            "SELECT genre_vector FROM taste_profile_snapshots "
-            "WHERE user_id = :uid ORDER BY computed_at DESC LIMIT 1"
-        ), {"uid": user_id})
-        row = result.first()
-
-    if not row:
-        logger.info("  User %s: no taste profile, skipping", user_id[:8])
-        return 0
-
-    genre_vector = row[0]
-    if isinstance(genre_vector, str):
-        try:
-            genre_vector = json.loads(genre_vector)
-        except (json.JSONDecodeError, TypeError):
-            genre_vector = {}
-    if not genre_vector:
-        logger.info("  User %s: empty genre vector, skipping", user_id[:8])
-        return 0
-
-    user_genres = set(g.lower() for g in genre_vector.keys())
-
-    # Get artists — simpler query that doesn't use json_array_elements
+    # Get artists from library
     async with engine.begin() as conn:
         artists_result = await conn.execute(sa.text(
             "SELECT artist_name, genre_names::text, COUNT(*) AS song_count "
@@ -154,41 +196,18 @@ async def _discover_for_user(engine, user_id: str) -> int:
         ), {"uid": user_id})
         raw_artists = artists_result.fetchall()
 
-    # Aggregate artists (same artist may appear with different genre_names rows)
-    artist_data: dict[str, dict] = {}
+    # Aggregate by artist name
+    artist_counts: dict[str, int] = {}
     for row in raw_artists:
         name = row[0]
-        raw_genres = row[1]
-        count = row[2]
+        artist_counts[name] = artist_counts.get(name, 0) + row[2]
 
-        if name not in artist_data:
-            artist_data[name] = {"genres": set(), "count": 0}
-        artist_data[name]["count"] += count
-
-        # Parse genres from various formats
-        if raw_genres:
-            genres_str = raw_genres if isinstance(raw_genres, str) else json.dumps(raw_genres)
-            try:
-                parsed = json.loads(genres_str)
-                if isinstance(parsed, list):
-                    artist_data[name]["genres"].update(g.lower() for g in parsed)
-                elif isinstance(parsed, str):
-                    artist_data[name]["genres"].add(parsed.lower())
-            except (json.JSONDecodeError, TypeError):
-                if isinstance(raw_genres, str) and raw_genres.strip():
-                    artist_data[name]["genres"].add(raw_genres.lower())
-
-    logger.info("  User %s: %d unique artists in library", user_id[:8], len(artist_data))
-
-    # Take top 80% of artists by song count (skip the long tail)
-    sorted_artists = sorted(artist_data.items(), key=lambda x: x[1]["count"], reverse=True)
+    sorted_artists = sorted(artist_counts.items(), key=lambda x: x[1], reverse=True)
     cutoff = max(1, int(len(sorted_artists) * 0.8))
     relevant = [name for name, _ in sorted_artists[:cutoff]]
-    skipped = [name for name, _ in sorted_artists[cutoff:]]
 
-    if skipped:
-        logger.info("  Skipped bottom %d artists (long tail)", len(skipped))
-    logger.info("  %d artists to fetch discographies for", len(relevant))
+    logger.info("  User %s: %d artists, fetching top %d discographies",
+                user_id[:8], len(sorted_artists), len(relevant))
 
     if not relevant:
         return 0
@@ -200,17 +219,22 @@ async def _discover_for_user(engine, user_id: str) -> int:
         async with semaphore:
             return await _deezer_artist_top(name)
 
-    all_tasks = [_fetch(name) for name in relevant[:100]]  # Cap at 100 artists
-    disco_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+    results = await asyncio.gather(
+        *[_fetch(n) for n in relevant[:100]],
+        return_exceptions=True,
+    )
 
     all_tracks: list[dict] = []
-    for i, result in enumerate(disco_results):
-        if isinstance(result, list):
+    artists_found = 0
+    for result in results:
+        if isinstance(result, list) and result:
+            artists_found += 1
             for t in result:
                 t["user_id"] = user_id
             all_tracks.extend(result)
 
-    logger.info("  Fetched %d discography tracks from %d artists", len(all_tracks), len(relevant))
+    logger.info("  Fetched %d tracks from %d/%d artists on Deezer",
+                len(all_tracks), artists_found, len(relevant))
 
     # Deduplicate
     seen: set[str] = set()
@@ -234,28 +258,26 @@ async def _discover_for_user(engine, user_id: str) -> int:
         logger.info("  All discography tracks already enriched")
         return 0
 
-    logger.info("  Enriching %d new discography tracks (%d already cached)...",
+    logger.info("  Enriching %d new tracks (%d cached)...",
                 len(to_enrich), len(unique) - len(to_enrich))
 
-    # Enrich in batches with progress
     total_ok = 0
     for i in range(0, len(to_enrich), BATCH_SIZE):
         batch = to_enrich[i:i + BATCH_SIZE]
         stats = await _enrich_batch(engine, batch)
         total_ok += stats["ok"]
-        logger.info(
-            "  Progress: %d/%d enriched (batch: %d ok, %d fail)",
-            i + len(batch), len(to_enrich), stats["ok"], stats["fail"],
-        )
+        logger.info("  Progress: %d/%d done (batch: %d ok, %d fail)",
+                    min(i + len(batch), len(to_enrich)), len(to_enrich),
+                    stats["ok"], stats["fail"])
 
-    logger.info("  Done: %d discography tracks enriched for user %s", total_ok, user_id[:8])
+    logger.info("  Done: %d tracks enriched for user %s", total_ok, user_id[:8])
     return len(to_enrich)
 
 
 async def _deezer_artist_top(artist_name: str) -> list[dict]:
     """Fetch an artist's top 50 tracks from Deezer."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with _get_client(10.0) as client:
             resp = await client.get(
                 f"{DEEZER_API}/search/artist",
                 params={"q": artist_name, "limit": 1},
@@ -263,17 +285,13 @@ async def _deezer_artist_top(artist_name: str) -> list[dict]:
             artists = resp.json().get("data", [])
             if not artists:
                 return []
-
             artist_id = artists[0].get("id")
             if not artist_id:
                 return []
-
             resp2 = await client.get(
                 f"{DEEZER_API}/artist/{artist_id}/top",
                 params={"limit": 50},
             )
-            items = resp2.json().get("data", [])
-
             return [
                 {
                     "catalog_id": f"dz_{item['id']}",
@@ -283,13 +301,13 @@ async def _deezer_artist_top(artist_name: str) -> list[dict]:
                     "service_source": "deezer",
                     "preview_url": item.get("preview", ""),
                 }
-                for item in items if item.get("id")
+                for item in resp2.json().get("data", []) if item.get("id")
             ]
     except Exception:
         return []
 
 
-# ── Shared Enrichment ────────────────────────────────────────────────────────
+# ── Enrichment ───────────────────────────────────────────────────────────────
 
 
 async def _enrich_batch(engine, tracks: list[dict]) -> dict[str, int]:
@@ -330,10 +348,10 @@ async def _enrich_track(engine, track: dict) -> str:
     features: dict = {}
     feature_source: dict = {}
 
-    # Stage 1: Deezer (skip search if we already have preview_url from discography)
+    # Stage 1: Deezer (skip search if preview_url already known)
     if not preview_url:
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with _get_client(10.0) as client:
                 resp = await client.get(
                     f"{DEEZER_API}/search",
                     params={"q": f"{name} {artist_name}", "limit": 1},
@@ -351,50 +369,25 @@ async def _enrich_track(engine, track: dict) -> str:
         except Exception:
             pass
 
-    # Stage 2: ReccoBeats
+    # Stage 2: ReccoBeats with retry + proxy rotation on 429
     if preview_url:
-        try:
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-                audio_bytes = (await client.get(preview_url)).content
-
-            if len(audio_bytes) > 1000:
-                for attempt in range(3):
-                    try:
-                        async with httpx.AsyncClient(timeout=60.0) as rc:
-                            rr = await rc.post(
-                                RECCOBEATS_API,
-                                files={"audioFile": ("p.mp3", audio_bytes, "audio/mpeg")},
-                            )
-                            if rr.status_code == 200:
-                                data = rr.json()
-                                for field, key in [
-                                    ("energy", "energy"), ("danceability", "danceability"),
-                                    ("acousticness", "acousticness"), ("valence_proxy", "valence"),
-                                    ("instrumentalness", "instrumentalness"),
-                                ]:
-                                    if data.get(key) is not None:
-                                        features[field] = round(float(data[key]), 4)
-                                        feature_source[field] = "reccobeats"
-                                if data.get("tempo") and data["tempo"] > 0 and "tempo" not in features:
-                                    features["tempo"] = round(float(data["tempo"]), 2)
-                                    feature_source["tempo"] = "reccobeats"
-                                if data.get("loudness") is not None:
-                                    raw = float(data["loudness"])
-                                    features["loudness"] = round(max(0.0, min(1.0, (raw + 60) / 60)), 4)
-                                    feature_source["loudness"] = "reccobeats"
-                                break
-                            elif rr.status_code == 429:
-                                wait = float(rr.headers.get("Retry-After", "3"))
-                                await asyncio.sleep(wait)
-                            else:
-                                break
-                    except httpx.ReadTimeout:
-                        continue
-                    except Exception:
-                        break
-                del audio_bytes
-        except Exception:
-            pass
+        recco_features = await _reccobeats_with_retry(preview_url)
+        if recco_features:
+            for field, key in [
+                ("energy", "energy"), ("danceability", "danceability"),
+                ("acousticness", "acousticness"), ("valence_proxy", "valence"),
+                ("instrumentalness", "instrumentalness"),
+            ]:
+                if recco_features.get(key) is not None:
+                    features[field] = round(float(recco_features[key]), 4)
+                    feature_source[field] = "reccobeats"
+            if recco_features.get("tempo") and recco_features["tempo"] > 0 and "tempo" not in features:
+                features["tempo"] = round(float(recco_features["tempo"]), 2)
+                feature_source["tempo"] = "reccobeats"
+            if recco_features.get("loudness") is not None:
+                raw = float(recco_features["loudness"])
+                features["loudness"] = round(max(0.0, min(1.0, (raw + 60) / 60)), 4)
+                feature_source["loudness"] = "reccobeats"
 
     if features:
         await _store(engine, catalog_id, user_id, features, feature_source)
@@ -402,6 +395,78 @@ async def _enrich_track(engine, track: dict) -> str:
     else:
         await _store_empty(engine, catalog_id, user_id)
         return "failed"
+
+
+async def _reccobeats_with_retry(preview_url: str, max_retries: int = 4) -> dict | None:
+    """Download preview → upload to ReccoBeats. Retry on 429 with Retry-After.
+    Rotates proxy on rate limit."""
+
+    # Download preview once
+    audio_bytes: bytes | None = None
+    try:
+        async with _get_client(20.0) as client:
+            resp = await client.get(preview_url)
+            audio_bytes = resp.content
+    except Exception:
+        return None
+
+    if not audio_bytes or len(audio_bytes) < 1000:
+        return None
+
+    current_proxy = proxy_mgr.get()
+
+    for attempt in range(max_retries):
+        try:
+            transport = None
+            if current_proxy:
+                transport = httpx.AsyncHTTPTransport(proxy=current_proxy)
+
+            async with httpx.AsyncClient(timeout=60.0, transport=transport) as client:
+                files = {"audioFile": ("p.mp3", audio_bytes, "audio/mpeg")}
+                rr = await client.post(RECCOBEATS_API, files=files)
+
+                if rr.status_code == 200:
+                    return rr.json()
+
+                if rr.status_code == 429:
+                    retry_after = rr.headers.get("Retry-After", "")
+                    try:
+                        wait = float(retry_after)
+                    except (ValueError, TypeError):
+                        wait = 3.0 + attempt * 2
+
+                    logger.info(
+                        "ReccoBeats 429 (attempt %d/%d), Retry-After: %.0fs, rotating proxy",
+                        attempt + 1, max_retries, wait,
+                    )
+
+                    # Mark current proxy as rate-limited, try another
+                    proxy_mgr.mark_rate_limited(current_proxy)
+                    current_proxy = proxy_mgr.get()
+
+                    await asyncio.sleep(wait)
+                    continue
+
+                # Other error — don't retry
+                return None
+
+        except httpx.ReadTimeout:
+            logger.debug("ReccoBeats timeout attempt %d/%d", attempt + 1, max_retries)
+            # Try different proxy on timeout
+            if current_proxy:
+                proxy_mgr.mark_failed(current_proxy)
+                current_proxy = proxy_mgr.get()
+            continue
+        except httpx.ProxyError:
+            if current_proxy:
+                proxy_mgr.mark_failed(current_proxy)
+                current_proxy = proxy_mgr.get()
+            continue
+        except Exception:
+            return None
+
+    del audio_bytes
+    return None
 
 
 # ── DB ───────────────────────────────────────────────────────────────────────
