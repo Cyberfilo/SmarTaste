@@ -1,0 +1,5 @@
+# Free proxy list — one per line
+# Format: http://ip:port or socks5://ip:port
+# Add proxies from free-proxy-list.net, proxyscrape.com, etc.
+# Lines starting with # are ignored
+# Empty lines are ignored
