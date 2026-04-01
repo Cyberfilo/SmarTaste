@@ -17,11 +17,15 @@ import {
   Users,
   Mic2,
   Calendar,
+  Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useEffect } from "react";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { useTasteProfile } from "@/hooks/use-taste";
+import { useCalibrationStatus } from "@/hooks/use-calibration";
+import { useServices } from "@/hooks/use-services";
 import {
   PieChart,
   Pie,
@@ -86,6 +90,14 @@ function SkeletonChart() {
 export default function DashboardPage() {
   const pathname = usePathname();
   const { data: profile, isLoading, error } = useTasteProfile();
+  const { data: calibrationStatus } = useCalibrationStatus();
+  const { data: servicesData } = useServices();
+
+  const hasConnectedService = servicesData?.services.some(
+    (s) => s.status === "connected"
+  );
+  const showCalibrationBanner =
+    hasConnectedService && calibrationStatus && !calibrationStatus.completed;
 
   useEffect(() => {
     if (error) {
@@ -140,6 +152,26 @@ export default function DashboardPage() {
       <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
         Dashboard
       </h1>
+
+      {/* Calibration banner */}
+      {showCalibrationBanner && (
+        <Card className="border-purple-500/30 bg-purple-500/5">
+          <CardContent className="flex items-center gap-4 py-3">
+            <Sparkles className="h-5 w-5 shrink-0 text-purple-400" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium">Calibrate your taste</p>
+              <p className="text-xs text-muted-foreground">
+                Tell us which albums, artists, and songs matter most to you for better recommendations.
+              </p>
+            </div>
+            <Link href="/onboarding">
+              <Button size="sm" variant="outline" className="shrink-0 border-purple-500/30 text-purple-300 hover:bg-purple-500/10">
+                Start
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Overview cards */}
       {isLoading ? (

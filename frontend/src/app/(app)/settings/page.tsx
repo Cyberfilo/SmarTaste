@@ -1,15 +1,18 @@
 "use client";
 
 import { useEffect } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ServiceConnections } from "@/components/settings/service-connections";
 import { BYOKKeyManager } from "@/components/settings/byok-key-manager";
 import { ModelSelector } from "@/components/settings/model-selector";
 import { OpenAIKeyManager } from "@/components/settings/openai-key-manager";
+import { useCalibrationStatus } from "@/hooks/use-calibration";
 
 export default function SettingsPage() {
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const { data: calibrationStatus } = useCalibrationStatus();
 
   // Handle OAuth callbacks (Spotify redirects back here with query params)
   useEffect(() => {
@@ -17,7 +20,12 @@ export default function SettingsPage() {
     const connStatus = searchParams.get("status");
     const detail = searchParams.get("detail");
     if (service && connStatus === "connected") {
-      toast.success(`${service.charAt(0).toUpperCase() + service.slice(1)} connected!`);
+      toast.success(`${service.charAt(0).toUpperCase() + service.slice(1)} connected!`, {
+        description: "Calibrate your taste for better recommendations.",
+        action: calibrationStatus && !calibrationStatus.completed
+          ? { label: "Calibrate", onClick: () => router.push("/onboarding") }
+          : undefined,
+      });
     } else if (service && connStatus === "error") {
       toast.error(`Failed to connect ${service}`, {
         description: detail || "Please try again.",
@@ -27,7 +35,7 @@ export default function SettingsPage() {
       // Clean the URL without causing a navigation
       window.history.replaceState({}, "", "/settings");
     }
-  }, [searchParams]);
+  }, [searchParams, calibrationStatus, router]);
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">

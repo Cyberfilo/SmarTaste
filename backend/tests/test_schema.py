@@ -27,6 +27,7 @@ ALL_TABLE_NAMES = [
     "generated_playlists",
     "isrc_spotify_mapping",
     "playlist_items",
+    "user_calibration",
 ]
 
 DATA_TABLE_NAMES = [
@@ -44,15 +45,16 @@ DATA_TABLE_NAMES = [
     "audio_embeddings",
     "bandit_arms",
     "generated_playlists",
+    "user_calibration",
 ]
 
 
 def test_all_tables_present() -> None:
-    """All 22 tables are defined in the schema metadata."""
+    """All 23 tables are defined in the schema metadata."""
     table_names = set(metadata.tables.keys())
     for name in ALL_TABLE_NAMES:
         assert name in table_names, f"Table '{name}' missing from schema"
-    assert len(metadata.tables) == 22
+    assert len(metadata.tables) == 23
 
 
 def test_user_id_on_all_data_tables() -> None:
