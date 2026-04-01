@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: smartaste-enrichment-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python enrichment_worker.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false  # Set manually to Railway PostgreSQL URL
+      - key: SOUNDSTAT_API_KEY
+        sync: false  # Optional
+      - key: CONCURRENCY
+        value: 5
+      - key: BATCH_SIZE
+        value: 50
+      - key: SLEEP_SECONDS
+        value: 30
