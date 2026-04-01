@@ -223,6 +223,7 @@ async def enrich_library_tracks(engine) -> int:
             "FROM song_metadata_cache s "
             "LEFT JOIN audio_features_cache a "
             "  ON s.catalog_id = a.catalog_id AND s.user_id = a.user_id "
+            "  AND a.energy IS NOT NULL "
             "WHERE a.catalog_id IS NULL "
             "LIMIT :limit"
         ), {"limit": BATCH_SIZE})
@@ -342,10 +343,12 @@ async def _discover_for_user(engine, user_id: str) -> int:
             seen.add(cid)
             unique.append(t)
 
-    # Filter already-enriched
+    # Filter only tracks with REAL enrichment (energy != null)
+    # Empty markers from previous failures are NOT filtered — they get retried
     async with engine.begin() as conn:
         existing = await conn.execute(sa.text(
-            "SELECT catalog_id FROM audio_features_cache WHERE user_id = :uid"
+            "SELECT catalog_id FROM audio_features_cache "
+            "WHERE user_id = :uid AND energy IS NOT NULL"
         ), {"uid": user_id})
         existing_ids = {r[0] for r in existing.fetchall()}
 
@@ -495,7 +498,7 @@ async def _enrich_track(engine, track: dict) -> str:
         await _store(engine, catalog_id, user_id, features, feature_source)
         return "reccobeats" if "energy" in features else "deezer"
     else:
-        await _store_empty(engine, catalog_id, user_id)
+        # Don't store empty marker — leave for retry on next cycle
         return "failed"
 
 

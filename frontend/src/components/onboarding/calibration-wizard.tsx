@@ -19,7 +19,6 @@ import {
 import {
   useCalibrationArtists,
   useSaveCalibration,
-  type CalibrationArtist,
   type CalibrationItem,
 } from "@/hooks/use-calibration";
 import { usePlaylists } from "@/hooks/use-playlists";
@@ -43,8 +42,8 @@ export function CalibrationWizard() {
     new Map()
   );
 
-  // Step 2: Artists
-  const [rejectedArtists, setRejectedArtists] = useState<Set<string>>(new Set());
+  // Step 2: Artists — hierarchical ordered list (position = priority)
+  const [artistOrder, setArtistOrder] = useState<string[]>([]);
 
   // Step 3: Combined songs from selected playlists
   const [combinedTracks, setCombinedTracks] = useState<PlaylistTrack[]>([]);
@@ -110,16 +109,24 @@ export function CalibrationWizard() {
     }
   }, [step, fetchCombinedTracks]);
 
-  // ── Artist Confirm/Reject (Step 2) ─────────────────────
+  // ── Artist Hierarchical Ranking (Step 2) ────────────────
 
-  function toggleArtistReject(artist: CalibrationArtist) {
-    setRejectedArtists((prev) => {
-      const next = new Set(prev);
-      if (next.has(artist.name)) {
-        next.delete(artist.name);
-      } else {
-        next.add(artist.name);
-      }
+  // Initialize artist order from API data when it arrives
+  useEffect(() => {
+    if (artistsData?.artists && artistOrder.length === 0) {
+      setArtistOrder(artistsData.artists.map((a) => a.name));
+    }
+  }, [artistsData, artistOrder.length]);
+
+  // Drag state for reordering
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+
+  function moveArtist(fromIdx: number, toIdx: number) {
+    if (fromIdx === toIdx) return;
+    setArtistOrder((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
       return next;
     });
   }
@@ -148,7 +155,7 @@ export function CalibrationWizard() {
   function buildCalibrationItems(): CalibrationItem[] {
     const items: CalibrationItem[] = [];
 
-    // Playlists: 5x weight (stored as playlist type)
+    // Playlists: 5x weight
     for (const [id, pl] of selectedPlaylists) {
       items.push({
         calibration_type: "playlist",
@@ -158,15 +165,24 @@ export function CalibrationWizard() {
       });
     }
 
-    // Rejected artists
-    const artists = artistsData?.artists || [];
-    for (const artist of artists) {
-      if (rejectedArtists.has(artist.name)) {
+    // Artists in hierarchical order — top 3 get "top_artist" type (triggers enrichment)
+    // Rest get "artist_rank" with descending weight based on position
+    for (let i = 0; i < artistOrder.length; i++) {
+      const name = artistOrder[i];
+      if (i < 3) {
         items.push({
-          calibration_type: "artist_reject",
-          item_id: artist.name.toLowerCase(),
-          item_name: artist.name,
-          weight: 0.1,
+          calibration_type: "top_artist",
+          item_id: name.toLowerCase(),
+          item_name: name,
+          weight: 5.0,
+        });
+      } else {
+        const weight = Math.max(1.0, 3.0 - (i - 3) * 0.2);
+        items.push({
+          calibration_type: "artist_rank",
+          item_id: name.toLowerCase(),
+          item_name: name,
+          weight,
         });
       }
     }
@@ -326,13 +342,13 @@ export function CalibrationWizard() {
     </div>
   );
 
-  // ── Step 2: Artist Confirm/Reject ──────────────────────
+  // ── Step 2: Hierarchical Artist Ranking ─────────────────
 
   const artistsStep = (
     <div>
       <p className="text-sm text-muted-foreground mb-4">
-        We detected these artists from your library. Reject any you don&apos;t
-        actually listen to — they&apos;ll be demoted in your profile.
+        Drag to reorder your artists by priority. The top 3 get their full
+        discography analyzed for better recommendations.
       </p>
       {artistsLoading ? (
         <div className="space-y-2">
@@ -346,51 +362,75 @@ export function CalibrationWizard() {
           skip this step.
         </p>
       ) : (
-        <div className="space-y-1.5">
-          {artistsData.artists.map((artist) => {
-            const isRejected = rejectedArtists.has(artist.name);
+        <div className="space-y-1 max-h-[50vh] overflow-y-auto pr-1">
+          {artistOrder.map((name, idx) => {
+            const artist = artistsData.artists.find((a) => a.name === name);
+            if (!artist) return null;
+            const isTop3 = idx < 3;
 
             return (
               <div
-                key={artist.name}
-                className={`flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors ${
-                  isRejected
-                    ? "bg-red-500/10 border border-red-500/20"
-                    : "bg-card border border-border"
+                key={name}
+                draggable
+                onDragStart={() => setDragIdx(idx)}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  if (dragIdx !== null && dragIdx !== idx) {
+                    moveArtist(dragIdx, idx);
+                    setDragIdx(idx);
+                  }
+                }}
+                onDragEnd={() => setDragIdx(null)}
+                className={`flex items-center gap-3 rounded-lg px-3 py-2.5 cursor-grab active:cursor-grabbing select-none transition-colors ${
+                  dragIdx === idx
+                    ? "opacity-50 border border-purple-500/50 bg-purple-500/5"
+                    : isTop3
+                      ? "bg-purple-500/10 border border-purple-500/20"
+                      : "bg-card border border-border"
                 }`}
               >
+                {/* Rank badge */}
+                <span
+                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                    isTop3
+                      ? "bg-purple-500 text-white"
+                      : "bg-muted text-muted-foreground"
+                  }`}
+                >
+                  {idx + 1}
+                </span>
+
+                {/* Artist info */}
                 <div className="flex-1 min-w-0">
-                  <p
-                    className={`text-sm font-medium truncate ${
-                      isRejected ? "text-muted-foreground line-through" : ""
-                    }`}
-                  >
-                    {artist.name}
-                  </p>
+                  <p className="text-sm font-medium truncate">{name}</p>
                   <p className="text-xs text-muted-foreground">
                     {artist.song_count} songs &middot; affinity{" "}
                     {Math.round(artist.score * 100)}%
                   </p>
                 </div>
-                <Button
-                  variant={isRejected ? "outline" : "ghost"}
-                  size="sm"
-                  onClick={() => toggleArtistReject(artist)}
-                  className={
-                    isRejected
-                      ? "text-red-400 border-red-500/30 hover:bg-red-500/10"
-                      : "text-muted-foreground hover:text-red-400"
-                  }
-                >
-                  {isRejected ? (
-                    <>
-                      <X className="h-3.5 w-3.5 mr-1" />
-                      Rejected
-                    </>
-                  ) : (
-                    "Reject"
-                  )}
-                </Button>
+
+                {/* Top 3 indicator */}
+                {isTop3 && (
+                  <span className="text-[10px] font-medium text-purple-400 uppercase tracking-wider shrink-0">
+                    Full scan
+                  </span>
+                )}
+
+                {/* Grab handle */}
+                <div className="flex flex-col gap-px text-muted-foreground shrink-0">
+                  <div className="flex gap-px">
+                    <div className="h-1 w-1 rounded-full bg-current" />
+                    <div className="h-1 w-1 rounded-full bg-current" />
+                  </div>
+                  <div className="flex gap-px">
+                    <div className="h-1 w-1 rounded-full bg-current" />
+                    <div className="h-1 w-1 rounded-full bg-current" />
+                  </div>
+                  <div className="flex gap-px">
+                    <div className="h-1 w-1 rounded-full bg-current" />
+                    <div className="h-1 w-1 rounded-full bg-current" />
+                  </div>
+                </div>
               </div>
             );
           })}

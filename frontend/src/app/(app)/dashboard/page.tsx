@@ -24,7 +24,7 @@ import { useEffect } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useTasteProfile } from "@/hooks/use-taste";
-import { useCalibrationStatus } from "@/hooks/use-calibration";
+import { useCalibrationStatus, useCalibrationEntries, type CalibrationItem } from "@/hooks/use-calibration";
 import { useServices } from "@/hooks/use-services";
 import {
   PieChart,
@@ -92,12 +92,26 @@ export default function DashboardPage() {
   const { data: profile, isLoading, error } = useTasteProfile();
   const { data: calibrationStatus } = useCalibrationStatus();
   const { data: servicesData } = useServices();
+  const { data: calibrationEntries } = useCalibrationEntries();
 
   const hasConnectedService = servicesData?.services.some(
     (s) => s.status === "connected"
   );
   const showCalibrationBanner =
     hasConnectedService && calibrationStatus && !calibrationStatus.completed;
+  const showCalibrationSummary =
+    calibrationStatus?.completed && calibrationEntries?.items?.length;
+
+  // Group calibration entries by type
+  const calTopArtists = (calibrationEntries?.items || []).filter(
+    (i: CalibrationItem) => i.calibration_type === "top_artist"
+  );
+  const calPlaylists = (calibrationEntries?.items || []).filter(
+    (i: CalibrationItem) => i.calibration_type === "playlist"
+  );
+  const calSongs = (calibrationEntries?.items || []).filter(
+    (i: CalibrationItem) => i.calibration_type === "playlist_song"
+  );
 
   useEffect(() => {
     if (error) {
@@ -169,6 +183,47 @@ export default function DashboardPage() {
                 Start
               </Button>
             </Link>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Calibration summary — shows after completing onboarding */}
+      {showCalibrationSummary && (
+        <Card className="border-purple-500/20 bg-purple-500/5">
+          <CardContent className="py-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-purple-400" />
+                <span className="text-xs font-medium uppercase tracking-wider text-purple-400">
+                  Your Calibration
+                </span>
+              </div>
+              <Link href="/onboarding">
+                <Button variant="ghost" size="sm" className="h-6 text-xs text-muted-foreground">
+                  Edit
+                </Button>
+              </Link>
+            </div>
+            <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
+              {calTopArtists.length > 0 && (
+                <span>
+                  <Mic2 className="h-3 w-3 inline mr-1 text-purple-400" />
+                  Top: {calTopArtists.map((a: CalibrationItem) => a.item_name).join(", ")}
+                </span>
+              )}
+              {calPlaylists.length > 0 && (
+                <span>
+                  <Music className="h-3 w-3 inline mr-1 text-purple-400" />
+                  {calPlaylists.length} playlist{calPlaylists.length !== 1 ? "s" : ""}
+                </span>
+              )}
+              {calSongs.length > 0 && (
+                <span>
+                  <Music className="h-3 w-3 inline mr-1 text-purple-400" />
+                  {calSongs.length} fav song{calSongs.length !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
           </CardContent>
         </Card>
       )}

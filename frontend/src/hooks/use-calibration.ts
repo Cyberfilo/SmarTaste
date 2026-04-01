@@ -85,9 +85,22 @@ export function useSaveCalibration() {
           body: JSON.stringify({ items }),
         }
       ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["calibration", "status"] });
+    onSuccess: (_data, variables) => {
+      // Set cache directly so layout redirect doesn't race
+      queryClient.setQueryData<CalibrationStatusResponse>(
+        ["calibration", "status"],
+        { completed: true, item_count: variables.length },
+      );
       queryClient.invalidateQueries({ queryKey: ["taste"] });
     },
+  });
+}
+
+export function useCalibrationEntries() {
+  return useQuery<{ items: CalibrationItem[] }>({
+    queryKey: ["calibration", "entries"],
+    queryFn: () =>
+      apiFetch<{ items: CalibrationItem[] }>("/api/calibration/entries"),
+    staleTime: 60 * 1000,
   });
 }
