@@ -180,29 +180,15 @@ async def _discover_for_user(engine, user_id: str) -> int:
 
     logger.info("  User %s: %d unique artists in library", user_id[:8], len(artist_data))
 
-    # Filter relevant artists (skip outliers)
-    relevant: list[str] = []
-    skipped_outliers: list[str] = []
-    for name, data in sorted(artist_data.items(), key=lambda x: x[1]["count"], reverse=True):
-        artist_genres = data["genres"]
-        if not artist_genres or not user_genres:
-            if data["count"] >= 3:
-                relevant.append(name)
-            continue
+    # Take top 80% of artists by song count (skip the long tail)
+    sorted_artists = sorted(artist_data.items(), key=lambda x: x[1]["count"], reverse=True)
+    cutoff = max(1, int(len(sorted_artists) * 0.8))
+    relevant = [name for name, _ in sorted_artists[:cutoff]]
+    skipped = [name for name, _ in sorted_artists[cutoff:]]
 
-        overlap = len(artist_genres & user_genres) / len(artist_genres)
-        if overlap >= GENRE_OVERLAP_THRESHOLD:
-            relevant.append(name)
-        else:
-            skipped_outliers.append(name)
-
-    if skipped_outliers:
-        logger.info(
-            "  Skipped %d outlier artists: %s",
-            len(skipped_outliers),
-            ", ".join(skipped_outliers[:5]) + ("..." if len(skipped_outliers) > 5 else ""),
-        )
-    logger.info("  %d relevant artists to fetch discographies for", len(relevant))
+    if skipped:
+        logger.info("  Skipped bottom %d artists (long tail)", len(skipped))
+    logger.info("  %d artists to fetch discographies for", len(relevant))
 
     if not relevant:
         return 0
