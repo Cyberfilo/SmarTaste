@@ -168,13 +168,21 @@ async def _discover_and_enrich_for_user(engine, user_id: str) -> int:
     user_genres = set(g.lower() for g in genre_vector.keys())
 
     # Get all distinct artists from user's library with their genres
+    # genre_names can be a JSON array, a plain string, or null — handle all cases
     async with engine.begin() as conn:
         artists_result = await conn.execute(sa.text(
             "SELECT artist_name, "
             "       json_agg(DISTINCT g) FILTER (WHERE g IS NOT NULL) AS genres, "
             "       COUNT(*) AS song_count "
-            "FROM song_metadata_cache, "
-            "     json_array_elements_text(genre_names::json) AS g "
+            "FROM song_metadata_cache "
+            "LEFT JOIN LATERAL json_array_elements_text( "
+            "    CASE "
+            "        WHEN genre_names IS NULL THEN '[]'::json "
+            "        WHEN genre_names::text = '' THEN '[]'::json "
+            "        WHEN left(genre_names::text, 1) = '[' THEN genre_names::json "
+            "        ELSE json_build_array(genre_names::text) "
+            "    END "
+            ") AS g ON true "
             "WHERE user_id = :uid AND artist_name != '' "
             "GROUP BY artist_name "
             "ORDER BY song_count DESC"
