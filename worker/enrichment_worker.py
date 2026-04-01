@@ -45,24 +45,93 @@ RECCOBEATS_API = "https://api.reccobeats.com/v1/analysis/audio-features"
 # ── Proxy Manager ────────────────────────────────────────────────────────────
 
 
+PROXY_URLS = os.environ.get("PROXY_URLS", "").split(",")
+# Default Geonode free proxy list
+DEFAULT_PROXY_URL = (
+    "https://proxylist.geonode.com/api/proxy-list"
+    "?limit=200&page=1&sort_by=lastChecked&sort_type=desc&protocols=http"
+)
+
+
 class ProxyManager:
-    """Load proxies from proxy.txt, rotate on failure/rate-limit."""
+    """Load proxies from proxy.txt, URLs, or Geonode API. Rotate on failure."""
 
     def __init__(self) -> None:
         self.proxies: list[str] = []
         self.failed: set[str] = set()
-        self._load()
 
-    def _load(self) -> None:
+    async def load(self) -> None:
+        """Load proxies from all sources."""
+        # 1. proxy.txt file
+        self._load_file()
+        # 2. Environment URLs
+        for url in PROXY_URLS:
+            url = url.strip()
+            if url:
+                await self._load_url(url)
+        # 3. Default Geonode if nothing loaded
+        if not self.proxies:
+            await self._load_url(DEFAULT_PROXY_URL)
+
+        if self.proxies:
+            logger.info("Loaded %d proxies total", len(self.proxies))
+        else:
+            logger.info("No proxies loaded — using direct connection")
+
+    def _load_file(self) -> None:
         path = Path(__file__).parent / "proxy.txt"
         if not path.exists():
             return
+        count = 0
         for line in path.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 self.proxies.append(line)
-        if self.proxies:
-            logger.info("Loaded %d proxies from proxy.txt", len(self.proxies))
+                count += 1
+        if count:
+            logger.info("Loaded %d proxies from proxy.txt", count)
+
+    async def _load_url(self, url: str) -> None:
+        """Fetch proxies from a URL. Supports Geonode API format and plain text."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "")
+
+                if "json" in content_type or url.endswith("json") or "geonode" in url:
+                    data = resp.json()
+                    # Geonode format: {"data": [{"ip": "...", "port": "...", "protocols": [...]}]}
+                    items = data.get("data", [])
+                    if not items and isinstance(data, list):
+                        items = data
+                    count = 0
+                    for item in items:
+                        if isinstance(item, dict):
+                            ip = item.get("ip", "")
+                            port = item.get("port", "")
+                            protocols = item.get("protocols", ["http"])
+                            if ip and port:
+                                proto = protocols[0] if protocols else "http"
+                                proxy = f"{proto}://{ip}:{port}"
+                                if proxy not in self.proxies:
+                                    self.proxies.append(proxy)
+                                    count += 1
+                    logger.info("Loaded %d proxies from %s", count, url[:60])
+                else:
+                    # Plain text: one proxy per line
+                    count = 0
+                    for line in resp.text.splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            if "://" not in line:
+                                line = f"http://{line}"
+                            if line not in self.proxies:
+                                self.proxies.append(line)
+                                count += 1
+                    logger.info("Loaded %d proxies from %s", count, url[:60])
+        except Exception as e:
+            logger.warning("Failed to load proxies from %s: %s", url[:60], e)
 
     def get(self) -> str | None:
         """Get a random working proxy, or None for direct connection."""
@@ -110,6 +179,10 @@ async def main() -> None:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     engine = create_async_engine(url, pool_size=20, max_overflow=20)
+
+    # Load proxies from file + URLs + Geonode
+    await proxy_mgr.load()
+
     logger.info("Worker started — concurrency=%d, batch=%d, proxies=%d",
                 CONCURRENCY, BATCH_SIZE, len(proxy_mgr.proxies))
 
