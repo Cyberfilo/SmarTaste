@@ -120,8 +120,14 @@ class CalibrationService:
                 )
             )
 
-            # Insert new selections
+            # Insert new selections, dedup by (calibration_type, item_id)
+            seen: set[tuple[str, str]] = set()
+            inserted = 0
             for item in items:
+                key = (item["calibration_type"], item["item_id"])
+                if key in seen:
+                    continue
+                seen.add(key)
                 await conn.execute(
                     user_calibration.insert().values(
                         user_id=user_id,
@@ -131,8 +137,9 @@ class CalibrationService:
                         weight=item["weight"],
                     )
                 )
+                inserted += 1
 
-        return len(items)
+        return inserted
 
     async def get_calibration_status(
         self,

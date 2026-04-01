@@ -46,11 +46,25 @@ If a known artist appears in a genre with cosine score < 0.2, their artist_match
 - **Tier 2** (requires `ffmpeg` + `librosa`): 7-dimension audio feature extraction from 30s previews
 - **Tier 3** (macOS only): SoundAnalysis classification labels via Swift CLI helper
 
+### Onboarding Taste Calibration
+3-step wizard shown after service connection to compensate for Apple Music's lack of play counts:
+1. **Playlists** (max 5): pick playlists you listen to on repeat → 5x weight
+2. **Artists** (hierarchical drag-to-reorder): position = priority, top 3 get full discography enrichment → descending weight (5x → 1x)
+3. **Songs**: pick favorites from the selected playlists' combined tracks → 3x weight
+
+Calibration weights are applied as song duplication in the profile builder input (simpler than threading params through every sub-function). Top 3 artists trigger background discography fetch + audio enrichment.
+
+**API endpoints** (`api/calibration/`): `GET /albums`, `GET /artists`, `POST /save`, `GET /status`, `GET /entries`
+**Frontend**: `/onboarding` route, `CalibrationWizard` component, `CalibrationManager` in settings
+**DB table**: `user_calibration` (user_id, calibration_type, item_id, item_name, weight)
+**Calibration types**: `top_artist`, `artist_rank`, `playlist`, `playlist_song`
+
 ### New DB Tables (adaptive engine)
 - `recommendation_feedback` — user feedback on recommendations (thumbs_up/down, skipped, added_to_library)
 - `audio_features_cache` — extracted audio features (tempo, energy, brightness, danceability, acousticness, valence_proxy, beat_strength)
 - `sound_classification_cache` — optional SoundAnalysis labels
 - `play_count_proxy` — approximate play counts from recently-played observations
+- `user_calibration` — onboarding wizard selections (calibration_type, item_id, weight)
 
 ## Code Style
 - All tool inputs: Pydantic BaseModel with Field() descriptions
