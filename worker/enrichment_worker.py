@@ -351,9 +351,9 @@ async def _discover_for_user(engine, user_id: str) -> int:
 
 
 async def _deezer_artist_top(artist_name: str) -> list[dict]:
-    """Fetch an artist's top 50 tracks from Deezer."""
+    """Fetch an artist's top 50 tracks from Deezer. Always direct (no proxy)."""
     try:
-        async with _get_client(10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 f"{DEEZER_API}/search/artist",
                 params={"q": artist_name, "limit": 1},
@@ -432,7 +432,7 @@ async def _enrich_track(engine, track: dict) -> str:
     # Stage 1: Deezer (skip search if preview_url already known)
     if not preview_url:
         try:
-            async with _get_client(10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
                     f"{DEEZER_API}/search",
                     params={"q": f"{name} {artist_name}", "limit": 1},
