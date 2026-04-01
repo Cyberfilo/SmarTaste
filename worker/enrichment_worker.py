@@ -479,30 +479,44 @@ async def _enrich_track(engine, track: dict) -> str:
 
 
 async def _reccobeats_with_retry(preview_url: str, max_retries: int = 4) -> dict | None:
-    """Download preview → upload to ReccoBeats. Retry on 429 with Retry-After.
-    Rotates proxy on rate limit."""
+    """Download preview → upload to ReccoBeats.
 
-    # Download preview once
+    Download uses proxy (GET, Deezer CDN — proxy-friendly).
+    Upload uses DIRECT connection (POST, free proxies block uploads).
+    Only uses proxy for ReccoBeats on 429 rate-limit (rotate IP).
+    """
+
+    # Download preview via proxy (GET request — proxies handle this fine)
     audio_bytes: bytes | None = None
     try:
         async with _get_client(20.0) as client:
             resp = await client.get(preview_url)
             audio_bytes = resp.content
     except Exception:
-        return None
+        # Fallback: try direct if proxy failed
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                resp = await client.get(preview_url)
+                audio_bytes = resp.content
+        except Exception:
+            return None
 
     if not audio_bytes or len(audio_bytes) < 1000:
         return None
 
-    current_proxy = proxy_mgr.get()
+    # Upload to ReccoBeats — start DIRECT (no proxy), use proxy only on 429
+    use_proxy = False
 
     for attempt in range(max_retries):
         try:
-            transport = None
-            if current_proxy:
-                transport = httpx.AsyncHTTPTransport(proxy=current_proxy)
+            if use_proxy:
+                current_proxy = proxy_mgr.get()
+                transport = httpx.AsyncHTTPTransport(proxy=current_proxy) if current_proxy else None
+                client_kwargs = {"timeout": 60.0, "transport": transport}
+            else:
+                client_kwargs = {"timeout": 60.0}
 
-            async with httpx.AsyncClient(timeout=60.0, transport=transport) as client:
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 files = {"audioFile": ("p.mp3", audio_bytes, "audio/mpeg")}
                 rr = await client.post(RECCOBEATS_API, files=files)
 
@@ -517,33 +531,27 @@ async def _reccobeats_with_retry(preview_url: str, max_retries: int = 4) -> dict
                         wait = 3.0 + attempt * 2
 
                     logger.info(
-                        "ReccoBeats 429 (attempt %d/%d), Retry-After: %.0fs, rotating proxy",
+                        "ReccoBeats 429 (attempt %d/%d), waiting %.0fs, switching to proxy",
                         attempt + 1, max_retries, wait,
                     )
-
-                    # Mark current proxy as rate-limited, try another
-                    proxy_mgr.mark_rate_limited(current_proxy)
-                    current_proxy = proxy_mgr.get()
-
+                    use_proxy = True  # Next attempt through proxy (different IP)
                     await asyncio.sleep(wait)
                     continue
 
-                # Other error — don't retry
+                # Other HTTP error
+                logger.warning("ReccoBeats HTTP %d on attempt %d", rr.status_code, attempt + 1)
                 return None
 
         except httpx.ReadTimeout:
-            logger.debug("ReccoBeats timeout attempt %d/%d", attempt + 1, max_retries)
-            # Try different proxy on timeout
-            if current_proxy:
-                proxy_mgr.mark_failed(current_proxy)
-                current_proxy = proxy_mgr.get()
+            logger.info("ReccoBeats timeout attempt %d/%d", attempt + 1, max_retries)
+            use_proxy = True  # Switch to proxy on timeout
             continue
-        except httpx.ProxyError:
-            if current_proxy:
-                proxy_mgr.mark_failed(current_proxy)
-                current_proxy = proxy_mgr.get()
+        except httpx.ProxyError as e:
+            logger.debug("Proxy error: %s", e)
+            use_proxy = True
             continue
-        except Exception:
+        except Exception as e:
+            logger.warning("ReccoBeats unexpected error: %s", type(e).__name__)
             return None
 
     del audio_bytes
