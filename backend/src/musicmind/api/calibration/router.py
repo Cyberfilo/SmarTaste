@@ -176,6 +176,27 @@ async def get_calibration_status(
     return CalibrationStatusResponse(**result)
 
 
+@router.get("/entries")
+async def get_calibration_entries(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Return the user's current calibration selections for display/editing."""
+    try:
+        entries = await calibration_service.get_calibration_entries(
+            request.app.state.engine,
+            user_id=current_user["user_id"],
+        )
+    except Exception:
+        logger.exception("Failed to fetch calibration entries")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch calibration entries",
+        )
+
+    return {"items": entries}
+
+
 # ── Background Enrichment ─────────────────────────────────────────────────
 
 
@@ -189,10 +210,14 @@ async def _enrich_top_artists_discography(
 ) -> None:
     """Fetch and enrich full discographies for top 3 calibrated artists.
 
-    Searches each artist by name, fetches their top songs, and runs audio
-    enrichment so the recommendation engine has rich features for these
-    high-priority artists.
+    For each artist:
+    1. Check which tracks are already cached in song_metadata_cache
+    2. Only fetch from the service API if tracks are missing
+    3. Cache newly fetched tracks into song_metadata_cache
+    4. Run audio enrichment on all tracks (skips already-enriched ones)
     """
+    import json
+
     import httpx
     import sqlalchemy as sa
 
@@ -205,7 +230,13 @@ async def _enrich_top_artists_discography(
         generate_apple_developer_token,
         get_user_connections,
     )
-    from musicmind.db.schema import service_connections as sc_table
+    from musicmind.db.schema import (
+        audio_features_cache,
+        song_metadata_cache,
+    )
+    from musicmind.db.schema import (
+        service_connections as sc_table,
+    )
     from musicmind.engine.enrichment.orchestrator import enrich_tracks
 
     connections = await get_user_connections(engine, user_id=user_id)
@@ -241,8 +272,67 @@ async def _enrich_top_artists_discography(
         )
 
     all_tracks: list[dict] = []
+    fetched_new = 0
+    cached_hit = 0
+
     for artist_name in artist_names[:3]:
         try:
+            # Check what we already have cached for this artist
+            async with engine.begin() as conn:
+                existing = await conn.execute(
+                    sa.select(
+                        song_metadata_cache.c.catalog_id,
+                    ).where(
+                        sa.and_(
+                            song_metadata_cache.c.user_id == user_id,
+                            sa.func.lower(song_metadata_cache.c.artist_name)
+                            == artist_name.lower(),
+                        )
+                    )
+                )
+                cached_ids = {r.catalog_id for r in existing}
+
+                # Also check which of those already have audio features
+                enriched = await conn.execute(
+                    sa.select(audio_features_cache.c.catalog_id).where(
+                        sa.and_(
+                            audio_features_cache.c.user_id == user_id,
+                            audio_features_cache.c.catalog_id.in_(cached_ids)
+                            if cached_ids
+                            else sa.literal(False),
+                            audio_features_cache.c.energy.isnot(None),
+                        )
+                    )
+                )
+                enriched_ids = {r.catalog_id for r in enriched}
+
+            # If we have cached songs that need enrichment, use those
+            if cached_ids - enriched_ids:
+                unenriched = cached_ids - enriched_ids
+                logger.info(
+                    "%s: %d cached, %d need enrichment",
+                    artist_name, len(cached_ids), len(unenriched),
+                )
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(song_metadata_cache).where(
+                            sa.and_(
+                                song_metadata_cache.c.user_id == user_id,
+                                song_metadata_cache.c.catalog_id.in_(unenriched),
+                            )
+                        )
+                    )
+                    for r in result:
+                        all_tracks.append({
+                            "catalog_id": r.catalog_id,
+                            "name": r.name,
+                            "artist_name": r.artist_name,
+                            "isrc": r.isrc,
+                            "service_source": r.service_source,
+                        })
+                        cached_hit += 1
+
+            # Fetch from API to get more tracks we don't have yet
             artist_id = await _search_artist_id(
                 service, access_token, artist_name,
                 developer_token=developer_token,
@@ -258,14 +348,55 @@ async def _enrich_top_artists_discography(
                     storefront=storefront,
                     limit=25,
                 )
-                all_tracks.extend(tracks)
+
+            # Cache new tracks into song_metadata_cache and collect for enrichment
+            new_tracks = [t for t in tracks if t.get("catalog_id") not in cached_ids]
+            if new_tracks:
+                async with engine.begin() as conn:
+                    for track in new_tracks:
+                        cid = track.get("catalog_id", "")
+                        if not cid:
+                            continue
+                        # Check if already exists (race condition safety)
+                        exists = await conn.execute(
+                            sa.select(song_metadata_cache.c.catalog_id).where(
+                                sa.and_(
+                                    song_metadata_cache.c.catalog_id == cid,
+                                    song_metadata_cache.c.user_id == user_id,
+                                )
+                            )
+                        )
+                        if exists.first():
+                            continue
+
+                        await conn.execute(
+                            song_metadata_cache.insert().values(
+                                catalog_id=cid,
+                                user_id=user_id,
+                                name=track.get("name", ""),
+                                artist_name=track.get("artist_name", ""),
+                                album_name=track.get("album_name", ""),
+                                genre_names=json.dumps(
+                                    track.get("genre_names", [])
+                                ),
+                                duration_ms=track.get("duration_ms"),
+                                release_date=track.get("release_date"),
+                                isrc=track.get("isrc"),
+                                preview_url=track.get("preview_url", ""),
+                                service_source=service,
+                            )
+                        )
+                        fetched_new += 1
+
+                all_tracks.extend(new_tracks)
+
         except Exception:
-            logger.debug("Failed to fetch discography for %s", artist_name)
+            logger.warning("Failed to process discography for %s", artist_name)
 
     if all_tracks:
         logger.info(
-            "Enriching %d tracks from top %d calibrated artists for user %s",
-            len(all_tracks), len(artist_names[:3]), user_id,
+            "Top artist enrichment for %s: %d tracks (%d from cache, %d newly fetched)",
+            user_id, len(all_tracks), cached_hit, fetched_new,
         )
         await enrich_tracks(
             engine, all_tracks, user_id=user_id,

@@ -7,6 +7,7 @@ import { ServiceConnections } from "@/components/settings/service-connections";
 import { BYOKKeyManager } from "@/components/settings/byok-key-manager";
 import { ModelSelector } from "@/components/settings/model-selector";
 import { OpenAIKeyManager } from "@/components/settings/openai-key-manager";
+import { CalibrationManager } from "@/components/settings/calibration-manager";
 import { useCalibrationStatus } from "@/hooks/use-calibration";
 
 export default function SettingsPage() {
@@ -46,6 +47,7 @@ export default function SettingsPage() {
         </p>
       </div>
       <ServiceConnections />
+      <CalibrationManager />
       <BYOKKeyManager />
       <ModelSelector />
       <OpenAIKeyManager />
