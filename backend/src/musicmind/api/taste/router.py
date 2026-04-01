@@ -291,10 +291,14 @@ async def enrichment_status(
         )
         total_library = total_q.scalar() or 0
 
-        # Enriched = all audio features cached (library + discography)
+        # Enriched = only tracks with REAL audio data (energy != null)
+        # Excludes empty marker rows from failed enrichment attempts
         enriched_q = await conn.execute(
             sa.select(sa.func.count()).select_from(audio_features_cache).where(
-                audio_features_cache.c.user_id == user_id
+                sa.and_(
+                    audio_features_cache.c.user_id == user_id,
+                    audio_features_cache.c.energy.isnot(None),
+                )
             )
         )
         enriched = enriched_q.scalar() or 0

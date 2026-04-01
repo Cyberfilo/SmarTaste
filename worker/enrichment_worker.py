@@ -41,6 +41,9 @@ SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "5"))
 DEEZER_API = "https://api.deezer.com"
 RECCOBEATS_API = "https://api.reccobeats.com/v1/analysis/audio-features"
 
+# Global dedup: tracks already processed in this run (avoid duplicate work)
+_processed_ids: set[str] = set()
+
 
 # ── Proxy Manager ────────────────────────────────────────────────────────────
 
@@ -415,8 +418,13 @@ async def _enrich_track(engine, track: dict) -> str:
     preview_url = track.get("preview_url", "")
 
     if not catalog_id or not user_id or not name:
-        await _store_empty(engine, catalog_id, user_id)
         return "failed"
+
+    # Skip if already processed in this run
+    dedup_key = f"{catalog_id}:{user_id}"
+    if dedup_key in _processed_ids:
+        return "skipped"
+    _processed_ids.add(dedup_key)
 
     features: dict = {}
     feature_source: dict = {}
