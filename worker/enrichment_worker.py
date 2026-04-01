@@ -146,10 +146,10 @@ async def _discover_for_user(engine, user_id: str) -> int:
     # Get artists — simpler query that doesn't use json_array_elements
     async with engine.begin() as conn:
         artists_result = await conn.execute(sa.text(
-            "SELECT artist_name, genre_names, COUNT(*) AS song_count "
+            "SELECT artist_name, genre_names::text, COUNT(*) AS song_count "
             "FROM song_metadata_cache "
             "WHERE user_id = :uid AND artist_name != '' "
-            "GROUP BY artist_name, genre_names "
+            "GROUP BY artist_name, genre_names::text "
             "ORDER BY song_count DESC"
         ), {"uid": user_id})
         raw_artists = artists_result.fetchall()
