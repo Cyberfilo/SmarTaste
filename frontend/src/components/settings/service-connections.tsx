@@ -17,6 +17,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Loader2, Unplug } from "lucide-react";
 import { toast } from "sonner";
+import { useRouter } from "next/navigation";
 import {
   useServices,
   useSpotifyConnect,
@@ -25,6 +26,7 @@ import {
   useDisconnectService,
   type ServiceConnection,
 } from "@/hooks/use-services";
+import { useCalibrationStatus } from "@/hooks/use-calibration";
 
 // ── MusicKit JS loader ──────────────────────────────────
 
@@ -183,11 +185,13 @@ function ServiceRow({
 }
 
 export function ServiceConnections() {
+  const router = useRouter();
   const { data, isLoading } = useServices();
   const spotifyConnect = useSpotifyConnect();
   const appleMusicToken = useAppleMusicDeveloperToken();
   const appleMusicConnect = useAppleMusicConnect();
   const disconnectService = useDisconnectService();
+  const { data: calibrationStatus } = useCalibrationStatus();
   const [appleMusicLoading, setAppleMusicLoading] = useState(false);
 
   const spotify = data?.services.find((s) => s.service === "spotify");
@@ -238,7 +242,12 @@ export function ServiceConnections() {
       // 5. Send the user token to our backend
       appleMusicConnect.mutate(musicUserToken, {
         onSuccess: () => {
-          toast.success("Apple Music connected!");
+          toast.success("Apple Music connected!", {
+            description: "Calibrate your taste for better recommendations.",
+            action: calibrationStatus && !calibrationStatus.completed
+              ? { label: "Calibrate", onClick: () => router.push("/onboarding") }
+              : undefined,
+          });
         },
         onError: (err) => {
           toast.error(err.message || "Failed to store Apple Music connection");

@@ -500,6 +500,70 @@ class TasteService:
                     )
                 )
 
+    async def _apply_calibration_weights(
+        self,
+        engine,
+        *,
+        user_id: str,
+        songs: list[dict],
+    ) -> list[dict]:
+        """Apply user calibration weights to song list.
+
+        - Album calibrations (weight 5.0): duplicate songs from selected albums
+        - Artist rejections (weight 0.1): scale down rejected artists' songs
+        - Playlist song calibrations (weight 3.0): duplicate selected songs
+
+        Uses song duplication to amplify weights — simpler than threading
+        weight params through every profile sub-function.
+        """
+        from musicmind.db.schema import user_calibration
+
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(user_calibration).where(
+                    user_calibration.c.user_id == user_id
+                )
+            )
+            entries = result.fetchall()
+
+        if not entries:
+            return songs
+
+        # Build lookup maps
+        album_weights: dict[str, float] = {}
+        artist_reject: set[str] = set()
+        song_weights: dict[str, float] = {}
+
+        for entry in entries:
+            if entry.calibration_type == "album":
+                album_weights[entry.item_name.lower()] = entry.weight
+            elif entry.calibration_type == "artist_reject":
+                artist_reject.add(entry.item_id.lower())
+            elif entry.calibration_type == "playlist_song":
+                song_weights[entry.item_id] = entry.weight
+
+        calibrated: list[dict] = []
+        for song in songs:
+            album_name = (song.get("album_name") or "").lower()
+            artist_name = (song.get("artist_name") or "").lower()
+            catalog_id = song.get("catalog_id", "")
+
+            # Determine multiplier
+            multiplier = 1.0
+            if album_name in album_weights:
+                multiplier = max(multiplier, album_weights[album_name])
+            if catalog_id in song_weights:
+                multiplier = max(multiplier, song_weights[catalog_id])
+            if artist_name in artist_reject:
+                multiplier = 0.1  # Override — rejection wins
+
+            # Duplicate songs based on integer part of multiplier
+            copies = max(1, int(multiplier))
+            for _ in range(copies):
+                calibrated.append(song)
+
+        return calibrated
+
     async def _compute_and_save_profile(
         self,
         engine,
@@ -547,8 +611,13 @@ class TasteService:
         except Exception:
             logger.warning("Failed to load audio features for centroid, continuing without")
 
+        # Apply calibration weights before building profile
+        calibrated_songs = await self._apply_calibration_weights(
+            engine, user_id=user_id, songs=songs,
+        )
+
         profile = build_taste_profile(
-            songs, history,
+            calibrated_songs, history,
             use_temporal_decay=True,
             audio_features_map=audio_features_map or None,
         )

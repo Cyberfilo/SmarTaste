@@ -34,7 +34,7 @@ logger = logging.getLogger("worker")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 SOUNDSTAT_API_KEY = os.environ.get("SOUNDSTAT_API_KEY", "")
-CONCURRENCY = int(os.environ.get("CONCURRENCY", "30"))
+CONCURRENCY = int(os.environ.get("CONCURRENCY", "10"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "500"))
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "5"))
 
@@ -504,19 +504,11 @@ async def _reccobeats_with_retry(preview_url: str, max_retries: int = 4) -> dict
     if not audio_bytes or len(audio_bytes) < 1000:
         return None
 
-    # Upload to ReccoBeats — start DIRECT (no proxy), use proxy only on 429
-    use_proxy = False
-
+    # Upload to ReccoBeats — ALWAYS DIRECT (proxies break multipart uploads)
+    # On 429: wait Retry-After and retry direct (same IP, fresh window)
     for attempt in range(max_retries):
         try:
-            if use_proxy:
-                current_proxy = proxy_mgr.get()
-                transport = httpx.AsyncHTTPTransport(proxy=current_proxy) if current_proxy else None
-                client_kwargs = {"timeout": 60.0, "transport": transport}
-            else:
-                client_kwargs = {"timeout": 60.0}
-
-            async with httpx.AsyncClient(**client_kwargs) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 files = {"audioFile": ("p.mp3", audio_bytes, "audio/mpeg")}
                 rr = await client.post(RECCOBEATS_API, files=files)
 
@@ -528,30 +520,23 @@ async def _reccobeats_with_retry(preview_url: str, max_retries: int = 4) -> dict
                     try:
                         wait = float(retry_after)
                     except (ValueError, TypeError):
-                        wait = 3.0 + attempt * 2
+                        wait = 5.0 + attempt * 3
 
                     logger.info(
-                        "ReccoBeats 429 (attempt %d/%d), waiting %.0fs, switching to proxy",
+                        "ReccoBeats 429 (attempt %d/%d), waiting %.0fs",
                         attempt + 1, max_retries, wait,
                     )
-                    use_proxy = True  # Next attempt through proxy (different IP)
                     await asyncio.sleep(wait)
                     continue
 
-                # Other HTTP error
-                logger.warning("ReccoBeats HTTP %d on attempt %d", rr.status_code, attempt + 1)
+                logger.warning("ReccoBeats HTTP %d", rr.status_code)
                 return None
 
         except httpx.ReadTimeout:
-            logger.info("ReccoBeats timeout attempt %d/%d", attempt + 1, max_retries)
-            use_proxy = True  # Switch to proxy on timeout
-            continue
-        except httpx.ProxyError as e:
-            logger.debug("Proxy error: %s", e)
-            use_proxy = True
+            logger.debug("ReccoBeats timeout attempt %d/%d", attempt + 1, max_retries)
             continue
         except Exception as e:
-            logger.warning("ReccoBeats unexpected error: %s", type(e).__name__)
+            logger.warning("ReccoBeats error: %s", type(e).__name__)
             return None
 
     del audio_bytes
