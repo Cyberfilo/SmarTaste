@@ -122,35 +122,18 @@ async def save_calibration(
             detail="Failed to save calibration",
         )
 
-    # Trigger profile rebuild so calibration weights take effect
-    from musicmind.api.taste.service import TasteService
-
-    taste_svc = TasteService()
-    try:
-        await taste_svc.get_profile(
-            request.app.state.engine,
-            request.app.state.encryption,
-            request.app.state.settings,
-            user_id=current_user["user_id"],
-            force_refresh=True,
-        )
-    except Exception:
-        logger.warning("Profile rebuild after calibration failed, will rebuild on next access")
-
-    # Enrich top 3 artists' full discographies in background
-    top_artist_names = [
-        item.item_name for item in body.items
-        if item.calibration_type == "top_artist"
-    ]
-    if top_artist_names:
-        background_tasks.add_task(
-            _enrich_top_artists_discography,
-            engine=request.app.state.engine,
-            encryption=request.app.state.encryption,
-            settings=request.app.state.settings,
-            user_id=current_user["user_id"],
-            artist_names=top_artist_names,
-        )
+    # Profile rebuild + enrichment both run in background so response is instant
+    background_tasks.add_task(
+        _background_post_calibration,
+        engine=request.app.state.engine,
+        encryption=request.app.state.encryption,
+        settings=request.app.state.settings,
+        user_id=current_user["user_id"],
+        top_artist_names=[
+            item.item_name for item in body.items
+            if item.calibration_type == "top_artist"
+        ],
+    )
 
     return {"message": "Calibration saved", "items_saved": count}
 
@@ -198,6 +181,36 @@ async def get_calibration_entries(
 
 
 # ── Background Enrichment ─────────────────────────────────────────────────
+
+
+async def _background_post_calibration(
+    *,
+    engine,
+    encryption,
+    settings,
+    user_id: str,
+    top_artist_names: list[str],
+) -> None:
+    """Run profile rebuild + top artist enrichment after calibration save."""
+    # 1. Rebuild taste profile with new calibration weights
+    try:
+        from musicmind.api.taste.service import TasteService
+
+        taste_svc = TasteService()
+        await taste_svc.get_profile(
+            engine, encryption, settings,
+            user_id=user_id, force_refresh=True,
+        )
+        logger.info("Profile rebuilt after calibration for user %s", user_id)
+    except Exception:
+        logger.warning("Profile rebuild after calibration failed for %s", user_id)
+
+    # 2. Enrich top artists' discographies
+    if top_artist_names:
+        await _enrich_top_artists_discography(
+            engine=engine, encryption=encryption, settings=settings,
+            user_id=user_id, artist_names=top_artist_names,
+        )
 
 
 async def _enrich_top_artists_discography(
