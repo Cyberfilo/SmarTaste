@@ -1,5 +1,10 @@
-# Free proxy list — one per line
+# Proxy list — one per line
 # Format: http://ip:port or socks5://ip:port
-# Add proxies from free-proxy-list.net, proxyscrape.com, etc.
 # Lines starting with # are ignored
-# Empty lines are ignored
+#
+# Proxies are also auto-loaded from:
+# 1. PROXY_URLS env var (comma-separated URLs)
+# 2. Geonode API (default, 200 proxies, if nothing else loaded)
+#
+# To add custom proxy list URLs:
+#   PROXY_URLS="https://example.com/proxies.txt,https://other.com/list" python3 enrichment_worker.py
