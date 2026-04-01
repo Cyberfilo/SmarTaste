@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { authApi, apiFetch } from "@/lib/api";
+import { useCalibrationStatus } from "@/hooks/use-calibration";
+import { useServices } from "@/hooks/use-services";
 import { Button } from "@/components/ui/button";
 import { DevPanel } from "@/components/admin/dev-panel";
 import {
@@ -51,6 +53,22 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const enrichmentActive = enrichmentData
     ? (!enrichmentData.complete || enrichmentData.indexing) && enrichmentData.total_songs > 0
     : false;
+
+  // Redirect to onboarding if user has a service connected but hasn't calibrated
+  const { data: calibrationStatus } = useCalibrationStatus();
+  const { data: servicesData } = useServices();
+  const isOnboarding = pathname === "/onboarding";
+  const isSettings = pathname === "/settings";
+
+  useEffect(() => {
+    if (!isAuthenticated || isOnboarding || isSettings) return;
+    const hasConnected = servicesData?.services.some(
+      (s) => s.status === "connected"
+    );
+    if (hasConnected && calibrationStatus && !calibrationStatus.completed) {
+      router.replace("/onboarding");
+    }
+  }, [isAuthenticated, isOnboarding, isSettings, calibrationStatus, servicesData, router]);
 
   // Keep triggering /me periodically while enrichment is incomplete
   // Each /me call processes up to 50 un-enriched songs in background

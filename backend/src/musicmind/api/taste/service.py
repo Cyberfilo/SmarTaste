@@ -509,8 +509,9 @@ class TasteService:
     ) -> list[dict]:
         """Apply user calibration weights to song list.
 
-        - Album calibrations (weight 5.0): duplicate songs from selected albums
-        - Artist rejections (weight 0.1): scale down rejected artists' songs
+        - Playlist calibrations (weight 5.0): duplicate all songs by those artists/playlists
+        - Top artist picks (weight 5.0): boost top-3 artists' songs
+        - Artist ranking (weight based on position): ordered priority
         - Playlist song calibrations (weight 3.0): duplicate selected songs
 
         Uses song duplication to amplify weights — simpler than threading
@@ -530,32 +531,28 @@ class TasteService:
             return songs
 
         # Build lookup maps
-        album_weights: dict[str, float] = {}
-        artist_reject: set[str] = set()
+        artist_weights: dict[str, float] = {}
         song_weights: dict[str, float] = {}
 
         for entry in entries:
-            if entry.calibration_type == "album":
-                album_weights[entry.item_name.lower()] = entry.weight
-            elif entry.calibration_type == "artist_reject":
-                artist_reject.add(entry.item_id.lower())
+            if entry.calibration_type == "top_artist":
+                artist_weights[entry.item_id.lower()] = entry.weight
+            elif entry.calibration_type == "artist_rank":
+                artist_weights[entry.item_id.lower()] = entry.weight
             elif entry.calibration_type == "playlist_song":
                 song_weights[entry.item_id] = entry.weight
 
         calibrated: list[dict] = []
         for song in songs:
-            album_name = (song.get("album_name") or "").lower()
             artist_name = (song.get("artist_name") or "").lower()
             catalog_id = song.get("catalog_id", "")
 
             # Determine multiplier
             multiplier = 1.0
-            if album_name in album_weights:
-                multiplier = max(multiplier, album_weights[album_name])
+            if artist_name in artist_weights:
+                multiplier = max(multiplier, artist_weights[artist_name])
             if catalog_id in song_weights:
                 multiplier = max(multiplier, song_weights[catalog_id])
-            if artist_name in artist_reject:
-                multiplier = 0.1  # Override — rejection wins
 
             # Duplicate songs based on integer part of multiplier
             copies = max(1, int(multiplier))

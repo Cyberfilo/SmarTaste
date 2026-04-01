@@ -282,10 +282,30 @@ async def _discover_for_user(engine, user_id: str) -> int:
     cutoff = max(1, int(len(sorted_artists) * 0.8))
     relevant = [name for name, _ in sorted_artists[:cutoff]]
 
-    logger.info("  User %s: %d artists, fetching top %d discographies",
-                user_id[:8], len(sorted_artists), len(relevant))
+    # Split collab names into individual artists
+    # "Shablo, Marracash & Carl Brave" → ["Shablo", "Marracash", "Carl Brave"]
+    import re
+    individual: set[str] = set()
+    for name in relevant:
+        # Split on feat./ft./featuring first
+        parts = re.split(r'\s*(?:\(|\[)?\s*(?:feat\.?|ft\.?|featuring)\s+', name, maxsplit=1, flags=re.IGNORECASE)
+        primary = parts[0]
+        # Split on , & x
+        for sub in re.split(r'\s*(?:,\s*|\s+&\s+|\s+x\s+|\s+X\s+)', primary):
+            sub = sub.strip()
+            if sub and len(sub) > 1:
+                individual.add(sub)
+        # Also add featuring artists
+        if len(parts) > 1:
+            for sub in re.split(r'\s*(?:,\s*|\s+&\s+)', parts[1].rstrip(')').rstrip(']')):
+                sub = sub.strip()
+                if sub and len(sub) > 1:
+                    individual.add(sub)
 
-    if not relevant:
+    logger.info("  User %s: %d raw artists → %d individual names, fetching discographies",
+                user_id[:8], len(relevant), len(individual))
+
+    if not individual:
         return 0
 
     # Fetch discographies concurrently
@@ -295,8 +315,9 @@ async def _discover_for_user(engine, user_id: str) -> int:
         async with semaphore:
             return await _deezer_artist_top(name)
 
+    individual_list = sorted(individual)
     results = await asyncio.gather(
-        *[_fetch(n) for n in relevant[:100]],
+        *[_fetch(n) for n in individual_list[:150]],
         return_exceptions=True,
     )
 
@@ -310,7 +331,7 @@ async def _discover_for_user(engine, user_id: str) -> int:
             all_tracks.extend(result)
 
     logger.info("  Fetched %d tracks from %d/%d artists on Deezer",
-                len(all_tracks), artists_found, len(relevant))
+                len(all_tracks), artists_found, len(individual_list))
 
     # Deduplicate
     seen: set[str] = set()
