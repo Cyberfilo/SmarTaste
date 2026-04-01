@@ -62,8 +62,8 @@ def _language_match(
             candidate_regions.add(region)
 
     if not candidate_regions:
-        # Candidate has no regional tag — penalize slightly
-        return 0.2
+        # Candidate has no regional tag — neutral, don't penalize
+        return 0.5
 
     # Score: weighted overlap
     total_user_weight = sum(user_regions.values())
@@ -171,6 +171,7 @@ def score_candidate(
     user_audio_centroid: dict[str, float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     staleness_index: dict[str, dict[str, Any]] | None = None,
+    calibration_artists: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Score a single candidate song against a taste profile.
 
@@ -182,8 +183,6 @@ def score_candidate(
     w = weights or DEFAULT_WEIGHTS
     genre_vector = profile.get("genre_vector", {})
     top_artists = profile.get("top_artists", [])
-    release_dist = profile.get("release_year_distribution", {})
-    familiarity = profile.get("familiarity_score", 0.5)
 
     # 1. Language/region match (most important for regional listeners)
     language_score = _language_match(
@@ -234,41 +233,51 @@ def score_candidate(
     # 8. Mood boost (set by filter_candidates_by_mood)
     mood_boost = candidate.get("_mood_boost", 0.0)
 
-    # Weighted combination: language 45%, audio 32%, genre 13%, artist 10%
+    # 9. Calibration boost — top artists from onboarding get a direct boost
+    cal_boost = 0.0
+    if calibration_artists:
+        cal_weight = calibration_artists.get(artist_name, 0.0)
+        if cal_weight >= 5.0:
+            cal_boost = 0.15  # Top 3 calibrated artist
+        elif cal_weight >= 2.0:
+            cal_boost = 0.08  # Highly ranked artist
+        elif cal_weight >= 1.0:
+            cal_boost = 0.03  # Ranked artist
+
+    # Weighted combination: genre 35%, audio 25%, artist 20%, language 20%
     # When audio features are unavailable, redistribute audio weight
-    # proportionally to other dimensions instead of scoring 0.5 (neutral)
+    # proportionally to other dimensions
     has_audio = audio_features is not None and user_audio_centroid is not None
-    w_lang = w.get("language", 0.45)
-    w_audio = w.get("audio", 0.32)
-    w_genre = w.get("genre", 0.13)
-    w_artist = w.get("artist", 0.10)
+    w_genre = w.get("genre", 0.35)
+    w_audio = w.get("audio", 0.25)
+    w_artist = w.get("artist", 0.20)
+    w_lang = w.get("language", 0.20)
 
     if not has_audio:
         # Redistribute audio weight proportionally
-        other_total = w_lang + w_genre + w_artist
+        other_total = w_genre + w_artist + w_lang
         if other_total > 0:
             scale = (other_total + w_audio) / other_total
-            w_lang *= scale
             w_genre *= scale
             w_artist *= scale
-        w_audio = 0.0  # Don't count audio at all
+            w_lang *= scale
+        w_audio = 0.0
 
     overall = (
-        w_lang * language_score
+        w_genre * genre_score
         + w_audio * audio_sim
-        + w_genre * genre_score
         + w_artist * artist_match
+        + w_lang * language_score
         - 0.05 * diversity_penalty
         - 0.03 * staleness
         + cross_bonus
         + mood_boost * 0.1
+        + cal_boost
     )
     overall = max(0.0, min(1.0, overall))
 
     # Build explanation
     parts = []
-    if language_score > 0.7:
-        parts.append("matches your language/region")
     if genre_score > 0.5:
         top_genres = ", ".join(candidate.get("genre_names", [])[:2])
         parts.append(f"genre match ({top_genres})")
@@ -276,6 +285,10 @@ def score_candidate(
         parts.append("sounds like your taste")
     if artist_match > 0.5:
         parts.append(f"you like {candidate.get('artist_name', 'this artist')}")
+    if cal_boost > 0.1:
+        parts.append("top calibrated artist")
+    if language_score > 0.7:
+        parts.append("matches your language/region")
     if cross_bonus > 0:
         parts.append(f"found by {strategy_count} strategies")
     if mood_boost > 0.2:
@@ -285,10 +298,11 @@ def score_candidate(
         **candidate,
         "_score": round(overall, 3),
         "_breakdown": {
-            "language_match": round(language_score, 3),
-            "audio_similarity": round(audio_sim, 3),
             "genre_match": round(genre_score, 3),
+            "audio_similarity": round(audio_sim, 3),
             "artist_match": round(artist_match, 3),
+            "language_match": round(language_score, 3),
+            "calibration_boost": round(cal_boost, 3),
             "diversity_penalty": round(diversity_penalty, 3),
             "staleness": round(staleness, 3),
             "cross_strategy_bonus": round(cross_bonus, 3),
@@ -307,6 +321,7 @@ def rank_candidates(
     audio_features_map: dict[str, dict[str, Any]] | None = None,
     user_audio_centroid: dict[str, float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
+    calibration_artists: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Rank candidates using MMR-style scoring with diversity.
 
@@ -329,6 +344,7 @@ def rank_candidates(
             audio_features=af_map.get(c.get("catalog_id", "")),
             user_audio_centroid=user_audio_centroid,
             staleness_index=staleness_idx,
+            calibration_artists=calibration_artists,
         )
         base_scored.append(scored)
 

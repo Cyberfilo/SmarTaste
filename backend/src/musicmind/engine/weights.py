@@ -14,10 +14,10 @@ from typing import Any
 import numpy as np
 
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "language": 0.45,
-    "audio": 0.32,
-    "genre": 0.13,
-    "artist": 0.10,
+    "genre": 0.35,
+    "audio": 0.25,
+    "artist": 0.20,
+    "language": 0.20,
 }
 
 MIN_FEEDBACK_FOR_OPTIMIZATION = 10
@@ -32,10 +32,9 @@ FEEDBACK_TARGETS: dict[str, float] = {
 # Maps weight keys to breakdown keys for score recomputation
 _BREAKDOWN_MAP: dict[str, str] = {
     "genre": "genre_match",
-    "artist": "artist_match",
     "audio": "audio_similarity",
-    "novelty": "novelty",
-    "freshness": "freshness",
+    "artist": "artist_match",
+    "language": "language_match",
     "diversity": "diversity_penalty",
     "staleness": "staleness",
 }

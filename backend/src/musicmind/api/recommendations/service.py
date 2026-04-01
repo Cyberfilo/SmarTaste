@@ -210,6 +210,11 @@ class RecommendationService:
 
         user_audio_centroid = profile.get("audio_centroid") or None
 
+        # Step 6b: Load calibration artist weights
+        calibration_artists = await self._load_calibration_artists(
+            engine, user_id=user_id,
+        )
+
         # Step 7: Apply mood filter
         resolved_mood: str | None = None
         if mood:
@@ -227,6 +232,7 @@ class RecommendationService:
         pre_ranked = rank_candidates(
             unique, profile, count=min(limit * 3, 30),
             weights=weights,
+            calibration_artists=calibration_artists,
         )
 
         # Pass 2: Lazy-enrich top candidates, then re-score with audio
@@ -241,6 +247,7 @@ class RecommendationService:
             pre_ranked, profile, count=limit, weights=weights,
             audio_features_map=audio_features_map,
             user_audio_centroid=user_audio_centroid,
+            calibration_artists=calibration_artists,
         )
 
         # Step 9: Build explanations
@@ -366,10 +373,10 @@ class RecommendationService:
         # Map breakdown keys to the 7 reportable dimensions
         breakdown = result.get("_breakdown", {})
         dimension_map: list[tuple[str, str, str]] = [
-            ("language_match", "Language/Region", "language"),
-            ("audio_similarity", "Audio Similarity", "audio"),
             ("genre_match", "Genre Match", "genre"),
+            ("audio_similarity", "Audio Similarity", "audio"),
             ("artist_match", "Artist Affinity", "artist"),
+            ("language_match", "Language/Region", "language"),
         ]
 
         dimensions: list[dict[str, Any]] = []
@@ -767,6 +774,37 @@ class RecommendationService:
             len(candidates) - len(filtered), len(candidates),
         )
         return filtered if filtered else candidates[:5]  # Fallback if all filtered
+
+    @staticmethod
+    async def _load_calibration_artists(
+        engine,
+        *,
+        user_id: str,
+    ) -> dict[str, float] | None:
+        """Load calibrated artist weights for scoring boost.
+
+        Returns dict of lowercased artist name -> calibration weight,
+        or None if no calibration exists.
+        """
+        from musicmind.db.schema import user_calibration
+
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(user_calibration).where(
+                    sa.and_(
+                        user_calibration.c.user_id == user_id,
+                        user_calibration.c.calibration_type.in_(
+                            ["top_artist", "artist_rank"]
+                        ),
+                    )
+                )
+            )
+            rows = result.fetchall()
+
+        if not rows:
+            return None
+
+        return {row.item_id: row.weight for row in rows}
 
     @staticmethod
     async def _load_adaptive_weights(

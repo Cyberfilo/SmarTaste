@@ -18,14 +18,14 @@ Tools are organized by domain: library, catalog, playback, manage, taste, recomm
 ## Adaptive Recommendation Engine
 The scorer uses 7 weighted dimensions with adaptive weights learned from user feedback. Additional bonuses: cross-strategy convergence, mood filtering, optional SoundAnalysis labels.
 
-### Default Weight Distribution (genre-first)
-- **genre: 0.35** — most important signal; uses regional genre prioritization
-- **audio: 0.20** — beat/style similarity from audio features
-- **novelty: 0.12** — rewards new artists in familiar genres (Gaussian bell curve)
-- **freshness: 0.10** — matches user's release year preferences
-- **diversity: 0.08** — MMR penalty to avoid echo chambers
-- **artist: 0.08** — deliberately low; style matters more than specific artist
-- **staleness: 0.07** — cooldown on recently recommended songs
+### Default Weight Distribution (genre-first, calibration-aware)
+- **genre: 0.35** — primary signal; uses regional genre prioritization + cosine similarity
+- **audio: 0.25** — beat/style similarity from enriched audio features (redistributed when unavailable)
+- **artist: 0.20** — boosted by calibration data; penalized if known artist in wrong genre
+- **language: 0.20** — regional/language match bonus (neutral 0.5 for non-regional music, not penalty)
+- **calibration_boost** — additive: +0.15 for top 3 calibrated artists, +0.08 for highly ranked, +0.03 for ranked
+- **diversity** — MMR penalty applied during greedy selection (not in base weights)
+- **staleness** — cooldown penalty on recently recommended songs
 
 ### Regional Genre Prioritization
 When building genre vectors and computing cosine similarity:
