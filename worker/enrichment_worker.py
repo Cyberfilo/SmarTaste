@@ -1,17 +1,10 @@
 """Standalone enrichment worker with full artist discography support.
 
-Runs on your Mac or any server. Connects to Railway PostgreSQL directly.
-Three phases per cycle:
+Connects to Railway PostgreSQL. Two phases:
   1. Enrich un-enriched library tracks (Deezer → ReccoBeats)
-  2. Discover discography tracks for relevant artists
-  3. Enrich discography tracks
+  2. Discover + enrich full discographies of relevant artists
 
-Outlier artists (e.g. Mariah Carey in an Italian trap library) are
-detected and skipped based on genre overlap with user's profile.
-
-Usage:
-    DATABASE_URL="postgresql://..." python enrichment_worker.py
-    DATABASE_URL="postgresql://..." CONCURRENCY=15 python enrichment_worker.py
+Run on Mac: DATABASE_URL="postgresql://..." python3 enrichment_worker.py
 """
 
 from __future__ import annotations
@@ -37,47 +30,40 @@ logger = logging.getLogger("worker")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 SOUNDSTAT_API_KEY = os.environ.get("SOUNDSTAT_API_KEY", "")
-CONCURRENCY = int(os.environ.get("CONCURRENCY", "15"))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "200"))
+CONCURRENCY = int(os.environ.get("CONCURRENCY", "30"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "500"))
 SLEEP_SECONDS = int(os.environ.get("SLEEP_SECONDS", "5"))
-
-# Minimum genre overlap ratio for an artist to be considered "relevant"
-# to the user's taste (vs an outlier like Christmas songs)
 GENRE_OVERLAP_THRESHOLD = 0.2
 
 DEEZER_API = "https://api.deezer.com"
 RECCOBEATS_API = "https://api.reccobeats.com/v1/analysis/audio-features"
 
 
-# ── Main Loop ────────────────────────────────────────────────────────────────
-
-
 async def main() -> None:
     if not DATABASE_URL:
-        logger.error("Set DATABASE_URL to your Railway PostgreSQL connection string")
+        logger.error("Set DATABASE_URL to your Railway PostgreSQL URL")
         sys.exit(1)
 
     url = DATABASE_URL
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-    engine = create_async_engine(url, pool_size=10, max_overflow=10)
-    logger.info(
-        "Worker started — concurrency=%d, batch=%d, sleep=%ds",
-        CONCURRENCY, BATCH_SIZE, SLEEP_SECONDS,
-    )
+    engine = create_async_engine(url, pool_size=20, max_overflow=20)
+    logger.info("Worker started — concurrency=%d, batch=%d", CONCURRENCY, BATCH_SIZE)
 
     try:
+        # Phase 1: Library tracks
+        lib_count = await enrich_library_tracks(engine)
+        logger.info("Phase 1 complete: %d library tracks processed", lib_count)
+
+        # Phase 2: Artist discographies (main work)
+        await enrich_artist_discographies(engine)
+
+        # Loop: keep checking for new tracks
         while True:
-            # Phase 1: Enrich existing un-enriched library tracks
             lib_count = await enrich_library_tracks(engine)
-
-            # Phase 2: Discover + enrich artist discographies
-            disco_count = await enrich_artist_discographies(engine)
-
-            if lib_count == 0 and disco_count == 0:
-                logger.info("Nothing to do, sleeping %ds", SLEEP_SECONDS)
-
+            if lib_count == 0:
+                logger.info("All done. Sleeping %ds before next check.", SLEEP_SECONDS)
             await asyncio.sleep(SLEEP_SECONDS)
     finally:
         await engine.dispose()
@@ -87,7 +73,6 @@ async def main() -> None:
 
 
 async def enrich_library_tracks(engine) -> int:
-    """Find and enrich un-enriched library tracks across all users."""
     async with engine.begin() as conn:
         result = await conn.execute(sa.text(
             "SELECT s.catalog_id, s.user_id, s.name, s.artist_name, s.isrc, "
@@ -108,13 +93,9 @@ async def enrich_library_tracks(engine) -> int:
          "artist_name": r[3], "isrc": r[4] or "", "service_source": r[5] or ""}
         for r in rows
     ]
-
-    logger.info("Phase 1: Enriching %d library tracks", len(tracks))
+    logger.info("Phase 1: Enriching %d library tracks...", len(tracks))
     stats = await _enrich_batch(engine, tracks)
-    logger.info(
-        "Phase 1 done: %d enriched, %d failed, %d skipped",
-        stats["ok"], stats["fail"], stats["skip"],
-    )
+    logger.info("Phase 1: %d ok, %d fail, %d skip", stats["ok"], stats["fail"], stats["skip"])
     return len(tracks)
 
 
@@ -122,178 +103,173 @@ async def enrich_library_tracks(engine) -> int:
 
 
 async def enrich_artist_discographies(engine) -> int:
-    """For each user, fetch relevant artists' full discographies and enrich."""
-    # Get all users with connected services
     async with engine.begin() as conn:
         users_result = await conn.execute(sa.text(
             "SELECT DISTINCT user_id FROM service_connections"
         ))
         user_ids = [r[0] for r in users_result.fetchall()]
 
-    if not user_ids:
-        return 0
+    logger.info("Phase 2: Found %d users with connected services", len(user_ids))
 
-    total_discovered = 0
+    total = 0
     for user_id in user_ids:
-        count = await _discover_and_enrich_for_user(engine, user_id)
-        total_discovered += count
+        count = await _discover_for_user(engine, user_id)
+        total += count
+    return total
 
-    return total_discovered
 
-
-async def _discover_and_enrich_for_user(engine, user_id: str) -> int:
-    """Discover discography tracks for one user's relevant artists."""
-    # Get user's genre profile (to detect outlier artists)
+async def _discover_for_user(engine, user_id: str) -> int:
+    # Get genre profile
     async with engine.begin() as conn:
-        profile_result = await conn.execute(sa.text(
+        result = await conn.execute(sa.text(
             "SELECT genre_vector FROM taste_profile_snapshots "
             "WHERE user_id = :uid ORDER BY computed_at DESC LIMIT 1"
         ), {"uid": user_id})
-        profile_row = profile_result.first()
+        row = result.first()
 
-    if not profile_row:
+    if not row:
+        logger.info("  User %s: no taste profile, skipping", user_id[:8])
         return 0
 
-    genre_vector = profile_row[0]
+    genre_vector = row[0]
     if isinstance(genre_vector, str):
         try:
             genre_vector = json.loads(genre_vector)
         except (json.JSONDecodeError, TypeError):
             genre_vector = {}
-
     if not genre_vector:
+        logger.info("  User %s: empty genre vector, skipping", user_id[:8])
         return 0
 
-    # Get user's top genres (normalized names, lowercase)
     user_genres = set(g.lower() for g in genre_vector.keys())
 
-    # Get all distinct artists from user's library with their genres
-    # genre_names can be a JSON array, a plain string, or null — handle all cases
+    # Get artists — simpler query that doesn't use json_array_elements
     async with engine.begin() as conn:
         artists_result = await conn.execute(sa.text(
-            "SELECT artist_name, "
-            "       json_agg(DISTINCT g) FILTER (WHERE g IS NOT NULL) AS genres, "
-            "       COUNT(*) AS song_count "
+            "SELECT artist_name, genre_names, COUNT(*) AS song_count "
             "FROM song_metadata_cache "
-            "LEFT JOIN LATERAL json_array_elements_text( "
-            "    CASE "
-            "        WHEN genre_names IS NULL THEN '[]'::json "
-            "        WHEN genre_names::text = '' THEN '[]'::json "
-            "        WHEN left(genre_names::text, 1) = '[' THEN genre_names::json "
-            "        ELSE json_build_array(genre_names::text) "
-            "    END "
-            ") AS g ON true "
             "WHERE user_id = :uid AND artist_name != '' "
-            "GROUP BY artist_name "
+            "GROUP BY artist_name, genre_names "
             "ORDER BY song_count DESC"
         ), {"uid": user_id})
-        artists = artists_result.fetchall()
+        raw_artists = artists_result.fetchall()
 
-    if not artists:
-        return 0
+    # Aggregate artists (same artist may appear with different genre_names rows)
+    artist_data: dict[str, dict] = {}
+    for row in raw_artists:
+        name = row[0]
+        raw_genres = row[1]
+        count = row[2]
 
-    # Filter to relevant artists (skip outliers)
-    relevant_artists: list[str] = []
-    for row in artists:
-        artist_name = row[0]
-        artist_genres_raw = row[1] or []
-        if isinstance(artist_genres_raw, str):
+        if name not in artist_data:
+            artist_data[name] = {"genres": set(), "count": 0}
+        artist_data[name]["count"] += count
+
+        # Parse genres from various formats
+        if raw_genres:
+            genres_str = raw_genres if isinstance(raw_genres, str) else json.dumps(raw_genres)
             try:
-                artist_genres_raw = json.loads(artist_genres_raw)
+                parsed = json.loads(genres_str)
+                if isinstance(parsed, list):
+                    artist_data[name]["genres"].update(g.lower() for g in parsed)
+                elif isinstance(parsed, str):
+                    artist_data[name]["genres"].add(parsed.lower())
             except (json.JSONDecodeError, TypeError):
-                artist_genres_raw = []
+                if isinstance(raw_genres, str) and raw_genres.strip():
+                    artist_data[name]["genres"].add(raw_genres.lower())
 
-        artist_genres = set(g.lower() for g in artist_genres_raw)
+    logger.info("  User %s: %d unique artists in library", user_id[:8], len(artist_data))
 
+    # Filter relevant artists (skip outliers)
+    relevant: list[str] = []
+    skipped_outliers: list[str] = []
+    for name, data in sorted(artist_data.items(), key=lambda x: x[1]["count"], reverse=True):
+        artist_genres = data["genres"]
         if not artist_genres or not user_genres:
-            # No genre data — include if they have 3+ songs
-            if row[2] >= 3:
-                relevant_artists.append(artist_name)
+            if data["count"] >= 3:
+                relevant.append(name)
             continue
 
         overlap = len(artist_genres & user_genres) / len(artist_genres)
         if overlap >= GENRE_OVERLAP_THRESHOLD:
-            relevant_artists.append(artist_name)
+            relevant.append(name)
         else:
-            logger.debug(
-                "Skipping outlier artist '%s' (%.0f%% genre overlap)",
-                artist_name, overlap * 100,
-            )
+            skipped_outliers.append(name)
 
-    if not relevant_artists:
+    if skipped_outliers:
+        logger.info(
+            "  Skipped %d outlier artists: %s",
+            len(skipped_outliers),
+            ", ".join(skipped_outliers[:5]) + ("..." if len(skipped_outliers) > 5 else ""),
+        )
+    logger.info("  %d relevant artists to fetch discographies for", len(relevant))
+
+    if not relevant:
         return 0
 
-    logger.info(
-        "Phase 2: %d relevant artists (of %d total) for user %s",
-        len(relevant_artists), len(artists), user_id[:8],
-    )
-
-    # For each relevant artist, search Deezer for their discography
-    all_disco_tracks: list[dict] = []
+    # Fetch discographies concurrently
     semaphore = asyncio.Semaphore(CONCURRENCY)
 
-    async def _fetch_artist_disco(artist_name: str) -> list[dict]:
+    async def _fetch(name: str) -> list[dict]:
         async with semaphore:
-            return await _deezer_artist_discography(artist_name)
+            return await _deezer_artist_top(name)
 
-    disco_results = await asyncio.gather(
-        *[_fetch_artist_disco(name) for name in relevant_artists[:50]],
-        return_exceptions=True,
-    )
+    all_tasks = [_fetch(name) for name in relevant[:100]]  # Cap at 100 artists
+    disco_results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
-    for result in disco_results:
+    all_tracks: list[dict] = []
+    for i, result in enumerate(disco_results):
         if isinstance(result, list):
-            all_disco_tracks.extend(result)
+            for t in result:
+                t["user_id"] = user_id
+            all_tracks.extend(result)
 
-    if not all_disco_tracks:
-        return 0
+    logger.info("  Fetched %d discography tracks from %d artists", len(all_tracks), len(relevant))
 
-    # Deduplicate by catalog_id
+    # Deduplicate
     seen: set[str] = set()
-    unique_tracks: list[dict] = []
-    for t in all_disco_tracks:
+    unique: list[dict] = []
+    for t in all_tracks:
         cid = t.get("catalog_id", "")
         if cid and cid not in seen:
             seen.add(cid)
-            t["user_id"] = user_id
-            unique_tracks.append(t)
+            unique.append(t)
 
-    # Filter out already-enriched tracks
+    # Filter already-enriched
     async with engine.begin() as conn:
-        existing_result = await conn.execute(sa.text(
+        existing = await conn.execute(sa.text(
             "SELECT catalog_id FROM audio_features_cache WHERE user_id = :uid"
         ), {"uid": user_id})
-        existing_ids = {r[0] for r in existing_result.fetchall()}
+        existing_ids = {r[0] for r in existing.fetchall()}
 
-    to_enrich = [t for t in unique_tracks if t["catalog_id"] not in existing_ids]
+    to_enrich = [t for t in unique if t["catalog_id"] not in existing_ids]
 
     if not to_enrich:
-        logger.info("Phase 2: All discography tracks already enriched for %s", user_id[:8])
+        logger.info("  All discography tracks already enriched")
         return 0
 
-    logger.info(
-        "Phase 2: Enriching %d new discography tracks (from %d unique) for %s",
-        len(to_enrich), len(unique_tracks), user_id[:8],
-    )
+    logger.info("  Enriching %d new discography tracks (%d already cached)...",
+                len(to_enrich), len(unique) - len(to_enrich))
 
-    # Enrich in batches
+    # Enrich in batches with progress
+    total_ok = 0
     for i in range(0, len(to_enrich), BATCH_SIZE):
         batch = to_enrich[i:i + BATCH_SIZE]
         stats = await _enrich_batch(engine, batch)
+        total_ok += stats["ok"]
         logger.info(
-            "Phase 2 batch: %d/%d enriched (total progress: %d/%d)",
-            stats["ok"], len(batch), i + len(batch), len(to_enrich),
+            "  Progress: %d/%d enriched (batch: %d ok, %d fail)",
+            i + len(batch), len(to_enrich), stats["ok"], stats["fail"],
         )
 
+    logger.info("  Done: %d discography tracks enriched for user %s", total_ok, user_id[:8])
     return len(to_enrich)
 
 
-async def _deezer_artist_discography(artist_name: str) -> list[dict]:
-    """Fetch an artist's top tracks from Deezer (up to 50 songs)."""
-    tracks: list[dict] = []
+async def _deezer_artist_top(artist_name: str) -> list[dict]:
+    """Fetch an artist's top 50 tracks from Deezer."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Search for the artist
             resp = await client.get(
                 f"{DEEZER_API}/search/artist",
                 params={"q": artist_name, "limit": 1},
@@ -306,35 +282,31 @@ async def _deezer_artist_discography(artist_name: str) -> list[dict]:
             if not artist_id:
                 return []
 
-            # Get their top tracks
             resp2 = await client.get(
                 f"{DEEZER_API}/artist/{artist_id}/top",
                 params={"limit": 50},
             )
             items = resp2.json().get("data", [])
 
-            for item in items:
-                tracks.append({
-                    "catalog_id": f"dz_{item.get('id', '')}",
+            return [
+                {
+                    "catalog_id": f"dz_{item['id']}",
                     "name": item.get("title", ""),
                     "artist_name": item.get("artist", {}).get("name", artist_name),
                     "isrc": "",
                     "service_source": "deezer",
-                    "deezer_id": str(item.get("id", "")),
                     "preview_url": item.get("preview", ""),
-                })
-
+                }
+                for item in items if item.get("id")
+            ]
     except Exception:
-        logger.debug("Failed to fetch discography for '%s'", artist_name)
-
-    return tracks
+        return []
 
 
-# ── Shared Enrichment Logic ──────────────────────────────────────────────────
+# ── Shared Enrichment ────────────────────────────────────────────────────────
 
 
 async def _enrich_batch(engine, tracks: list[dict]) -> dict[str, int]:
-    """Enrich a batch of tracks concurrently."""
     stats = {"ok": 0, "fail": 0, "skip": 0}
     semaphore = asyncio.Semaphore(CONCURRENCY)
 
@@ -346,39 +318,33 @@ async def _enrich_batch(engine, tracks: list[dict]) -> dict[str, int]:
         *[_bounded(t) for t in tracks],
         return_exceptions=True,
     )
-
     for r in results:
         if isinstance(r, Exception):
             stats["fail"] += 1
-        elif r in ("reccobeats", "deezer", "soundstat"):
+        elif r in ("reccobeats", "deezer"):
             stats["ok"] += 1
         elif r == "skipped":
             stats["skip"] += 1
         else:
             stats["fail"] += 1
-
     return stats
 
 
 async def _enrich_track(engine, track: dict) -> str:
-    """Enrich a single track: Deezer search → download preview → ReccoBeats."""
     catalog_id = track["catalog_id"]
     user_id = track.get("user_id", "")
     name = track.get("name", "")
     artist_name = track.get("artist_name", "")
+    preview_url = track.get("preview_url", "")
 
-    if not catalog_id or not user_id:
-        return "failed"
-
-    if not name or not artist_name:
+    if not catalog_id or not user_id or not name:
         await _store_empty(engine, catalog_id, user_id)
         return "failed"
 
     features: dict = {}
     feature_source: dict = {}
-    preview_url = track.get("preview_url", "")
 
-    # Stage 1: Deezer search (skip if we already have a preview URL from discography)
+    # Stage 1: Deezer (skip search if we already have preview_url from discography)
     if not preview_url:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -399,27 +365,25 @@ async def _enrich_track(engine, track: dict) -> str:
         except Exception:
             pass
 
-    # Stage 2: ReccoBeats — download preview and upload for analysis
+    # Stage 2: ReccoBeats
     if preview_url:
         try:
             async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-                preview_resp = await client.get(preview_url)
-                audio_bytes = preview_resp.content
+                audio_bytes = (await client.get(preview_url)).content
 
             if len(audio_bytes) > 1000:
                 for attempt in range(3):
                     try:
                         async with httpx.AsyncClient(timeout=60.0) as rc:
-                            files = {"audioFile": ("p.mp3", audio_bytes, "audio/mpeg")}
-                            rr = await rc.post(RECCOBEATS_API, files=files)
-
+                            rr = await rc.post(
+                                RECCOBEATS_API,
+                                files={"audioFile": ("p.mp3", audio_bytes, "audio/mpeg")},
+                            )
                             if rr.status_code == 200:
                                 data = rr.json()
                                 for field, key in [
-                                    ("energy", "energy"),
-                                    ("danceability", "danceability"),
-                                    ("acousticness", "acousticness"),
-                                    ("valence_proxy", "valence"),
+                                    ("energy", "energy"), ("danceability", "danceability"),
+                                    ("acousticness", "acousticness"), ("valence_proxy", "valence"),
                                     ("instrumentalness", "instrumentalness"),
                                 ]:
                                     if data.get(key) is not None:
@@ -430,23 +394,18 @@ async def _enrich_track(engine, track: dict) -> str:
                                     feature_source["tempo"] = "reccobeats"
                                 if data.get("loudness") is not None:
                                     raw = float(data["loudness"])
-                                    features["loudness"] = round(
-                                        max(0.0, min(1.0, (raw + 60) / 60)), 4
-                                    )
+                                    features["loudness"] = round(max(0.0, min(1.0, (raw + 60) / 60)), 4)
                                     feature_source["loudness"] = "reccobeats"
-                                break  # Success
-
+                                break
                             elif rr.status_code == 429:
                                 wait = float(rr.headers.get("Retry-After", "3"))
-                                logger.info("ReccoBeats 429, waiting %.0fs", wait)
                                 await asyncio.sleep(wait)
                             else:
-                                break  # Non-retryable error
+                                break
                     except httpx.ReadTimeout:
                         continue
                     except Exception:
                         break
-
                 del audio_bytes
         except Exception:
             pass
@@ -459,7 +418,7 @@ async def _enrich_track(engine, track: dict) -> str:
         return "failed"
 
 
-# ── Database Storage ─────────────────────────────────────────────────────────
+# ── DB ───────────────────────────────────────────────────────────────────────
 
 
 async def _store(engine, cid: str, uid: str, features: dict, source: dict) -> None:
