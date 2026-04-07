@@ -203,17 +203,12 @@ class RecommendationService:
             engine, unique, user_id=user_id,
         )
 
-        # Step 6: Load adaptive weights
-        weights, weights_adapted = await self._load_adaptive_weights(
+        # Step 6: Load calibration artist weights
+        calibration_artists = await self._load_calibration_artists(
             engine, user_id=user_id,
         )
 
         user_audio_centroid = profile.get("audio_centroid") or None
-
-        # Step 6b: Load calibration artist weights
-        calibration_artists = await self._load_calibration_artists(
-            engine, user_id=user_id,
-        )
 
         # Step 7: Apply mood filter
         resolved_mood: str | None = None
@@ -226,9 +221,31 @@ class RecommendationService:
             unique = filter_candidates_by_mood(unique, mapped)
             resolved_mood = mood
 
+        # Step 8: Compute context-adaptive weights
+        # Weights shift based on user's profile (regional concentration, etc.)
+        from musicmind.engine.weights import compute_context_weights
+
+        weights = compute_context_weights(
+            profile,
+            has_audio=bool(user_audio_centroid),
+            has_calibration=calibration_artists is not None,
+            mood_active=resolved_mood is not None,
+        )
+
+        # Layer feedback-learned weights on top if enough data
+        feedback_weights, weights_adapted = await self._load_adaptive_weights(
+            engine, user_id=user_id,
+        )
+        if weights_adapted:
+            # Blend: 60% context-adaptive + 40% feedback-learned
+            for k in weights:
+                if k in feedback_weights:
+                    weights[k] = 0.6 * weights[k] + 0.4 * feedback_weights[k]
+            total = sum(weights.values())
+            weights = {k: round(v / total, 4) for k, v in weights.items()}
+
         # ── Two-pass scoring ─────────────────────────────────
-        # Pass 1: Score on non-audio dimensions (instant, no API calls)
-        # language 45% + genre 13% + artist 10% = 68% of total weight
+        # Pass 1: Score on non-audio dimensions (instant)
         pre_ranked = rank_candidates(
             unique, profile, count=min(limit * 3, 30),
             weights=weights,

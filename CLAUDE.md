@@ -16,16 +16,31 @@ Python FastMCP server connecting Claude to Apple Music API. Three layers:
 Tools are organized by domain: library, catalog, playback, manage, taste, recommend.
 
 ## Adaptive Recommendation Engine
-The scorer uses 7 weighted dimensions with adaptive weights learned from user feedback. Additional bonuses: cross-strategy convergence, mood filtering, optional SoundAnalysis labels.
+The scorer uses context-adaptive weights that shift based on user profile characteristics, plus calibration bonuses and engagement data from play count proxy.
+
+### Context-Adaptive Weights
+Weights computed per-user from `compute_context_weights()` based on:
+- **Regional concentration**: >60% one language → language weight increases; <20% → language nearly zero
+- **Audio availability**: enriched features → audio weight +5%
+- **Calibration presence**: onboarding done → artist weight +5%
+- **Mood active**: audio becomes dominant at 40%
+- **Feedback-learned**: if 10+ ratings exist, blends 60% context + 40% feedback-optimized
 
 ### Default Weight Distribution (genre-first, calibration-aware)
 - **genre: 0.35** — primary signal; uses regional genre prioritization + cosine similarity
 - **audio: 0.25** — beat/style similarity from enriched audio features (redistributed when unavailable)
 - **artist: 0.20** — boosted by calibration data; penalized if known artist in wrong genre
 - **language: 0.20** — regional/language match bonus (neutral 0.5 for non-regional music, not penalty)
-- **calibration_boost** — additive: +0.15 for top 3 calibrated artists, +0.08 for highly ranked, +0.03 for ranked
+- **calibration_boost** — additive: continuous `min(0.20, weight * 0.03)` — zeroed if genre mismatch
 - **diversity** — MMR penalty applied during greedy selection (not in base weights)
 - **staleness** — cooldown penalty on recently recommended songs
+
+### Play Count Proxy (Apple Music Workaround)
+Apple Music has no play counts. The `play_count_proxy` table tracks `seen_count` from recently-played polling:
+- Each time recently-played is fetched, songs in the list get their `seen_count` incremented
+- Songs seen 5x get 5x weight in the profile (capped at 10x)
+- Songs with `last_seen` in past 7 days get 2x recency multiplier on top
+- `total_songs_analyzed` counts unique songs, not amplified duplicates
 
 ### Regional Genre Prioritization
 When building genre vectors and computing cosine similarity:
@@ -34,7 +49,7 @@ When building genre vectors and computing cosine similarity:
 - This ensures a user who listens to 90% Italian music gets Italian recommendations, not generic American equivalents that happen to share the parent genre
 
 ### Artist-in-Wrong-Genre Penalty
-If a known artist appears in a genre with cosine score < 0.2, their artist_match is penalized to 30%. This prevents "you listen to Artist X" from recommending their one country song to a drill listener.
+If a known artist appears in a genre with cosine score < 0.2, their artist_match is penalized to 30%. This prevents "you listen to Artist X" from recommending their one country song to a drill listener. Calibration boost is also zeroed out for genre_score < 0.15.
 
 ### Discovery Strategy Noise Reduction
 - **similar_artist_crawl**: default depth=1 (was 2) — two hops drifts too far
