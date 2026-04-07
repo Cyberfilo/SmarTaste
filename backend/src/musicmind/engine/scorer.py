@@ -233,16 +233,17 @@ def score_candidate(
     # 8. Mood boost (set by filter_candidates_by_mood)
     mood_boost = candidate.get("_mood_boost", 0.0)
 
-    # 9. Calibration boost — top artists from onboarding get a direct boost
+    # 9. Calibration boost — continuous function of calibration weight
+    # Scales smoothly: weight 5.0 → +0.15, 3.0 → +0.09, 1.0 → +0.03
+    # Zeroed out if the song's genre doesn't match user profile (wrong-genre penalty)
     cal_boost = 0.0
     if calibration_artists:
         cal_weight = calibration_artists.get(artist_name, 0.0)
-        if cal_weight >= 5.0:
-            cal_boost = 0.15  # Top 3 calibrated artist
-        elif cal_weight >= 2.0:
-            cal_boost = 0.08  # Highly ranked artist
-        elif cal_weight >= 1.0:
-            cal_boost = 0.03  # Ranked artist
+        if cal_weight > 0:
+            cal_boost = min(0.20, cal_weight * 0.03)
+            # Kill boost if this is a known artist in the wrong genre
+            if genre_score < 0.15:
+                cal_boost = 0.0
 
     # Weighted combination: genre 35%, audio 25%, artist 20%, language 20%
     # When audio features are unavailable, redistribute audio weight

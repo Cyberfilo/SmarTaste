@@ -1,10 +1,11 @@
-"""Adaptive weight optimizer — learns scoring weights from user feedback.
+"""Adaptive weight system — context-adaptive + feedback-learned weights.
 
-Uses coordinate descent to minimize MSE between predicted scores and
-feedback-derived targets. Each trial weight set recomputes the predicted
-score from stored per-dimension breakdowns, giving accurate gradients.
-
-Falls back to defaults when insufficient feedback exists.
+Two layers:
+1. Context-adaptive: weights shift based on user profile characteristics
+   (regional concentration, audio availability, calibration presence).
+   Works from day one, no feedback needed.
+2. Feedback-learned: coordinate descent on per-dimension breakdowns.
+   Requires 10+ feedback entries with stored breakdowns.
 """
 
 from __future__ import annotations
@@ -40,6 +41,105 @@ _BREAKDOWN_MAP: dict[str, str] = {
 }
 
 
+# ── Context-Adaptive Weights ─────────────────────────────────────────────
+
+
+def compute_context_weights(
+    profile: dict[str, Any],
+    *,
+    has_audio: bool = False,
+    has_calibration: bool = False,
+    mood_active: bool = False,
+) -> dict[str, float]:
+    """Compute scoring weights adapted to this user's profile characteristics.
+
+    Shifts weights based on:
+    - Regional concentration: users with >50% one language get higher language weight
+    - Audio availability: if enriched features exist, audio weight increases
+    - Calibration presence: if user did onboarding, artist weight increases
+    - Mood mode: if mood filter active, audio becomes dominant
+
+    Returns normalized weights summing to 1.0.
+    """
+    genre_vector = profile.get("genre_vector", {})
+
+    # ── Measure regional concentration ─────────────────────
+    regional_strength = _measure_regional_strength(genre_vector)
+
+    # ── Base weights, then shift ───────────────────────────
+    w_genre = 0.35
+    w_audio = 0.25
+    w_artist = 0.20
+    w_language = 0.20
+
+    # Regional listeners: boost language, reduce genre (they overlap)
+    if regional_strength > 0.6:
+        # Strong regional: e.g. 90% Italian → language matters a lot
+        boost = min(0.15, (regional_strength - 0.6) * 0.375)
+        w_language += boost
+        w_genre -= boost * 0.5  # Take some from genre (language subsumes genre)
+        w_audio -= boost * 0.5  # Take some from audio
+    elif regional_strength < 0.2:
+        # Global listener: language almost irrelevant
+        w_language = 0.05
+        w_genre += 0.10
+        w_audio += 0.05
+
+    # Audio features available: boost audio, take from language
+    if has_audio:
+        w_audio += 0.05
+        w_language -= 0.03
+        w_genre -= 0.02
+
+    # Calibration exists: boost artist (we have explicit user signal)
+    if has_calibration:
+        w_artist += 0.05
+        w_genre -= 0.03
+        w_language -= 0.02
+
+    # Mood active: audio becomes dominant for matching the vibe
+    if mood_active:
+        w_audio = max(w_audio, 0.40)
+        remaining = 1.0 - w_audio
+        other = w_genre + w_artist + w_language
+        ratio = remaining / other if other > 0 else 1.0
+        w_genre *= ratio
+        w_artist *= ratio
+        w_language *= ratio
+
+    return _normalize_weights({
+        "genre": w_genre,
+        "audio": w_audio,
+        "artist": w_artist,
+        "language": w_language,
+    })
+
+
+def _measure_regional_strength(genre_vector: dict[str, float]) -> float:
+    """Measure how regional/language-concentrated the user's taste is.
+
+    Returns 0.0 (completely global) to 1.0 (entirely one region).
+    Looks at genre names with regional prefixes (Italian, French, Korean, etc.)
+    and sums their weight in the genre vector.
+    """
+    if not genre_vector:
+        return 0.0
+
+    regional_weight = 0.0
+    for genre, weight in genre_vector.items():
+        parts = genre.split()
+        if len(parts) >= 2 and parts[0][0].isupper() and len(parts[0]) > 1:
+            regional_weight += weight
+        elif "-" in genre and len(genre.split("-")[0]) <= 2:
+            # K-Pop, J-Rock style
+            regional_weight += weight
+
+    return min(1.0, regional_weight)
+
+
+# ── Feedback-Learned Weights ──────────────────────────────────────────────
+
+
 def feedback_to_target(feedback_type: str) -> float:
     """Map feedback type to a target score (0-1)."""
     return FEEDBACK_TARGETS.get(feedback_type, 0.5)
@@ -57,22 +157,16 @@ def _recompute_score(
     breakdown: dict[str, float],
     weights: dict[str, float],
 ) -> float:
-    """Recompute overall score from per-dimension breakdown and weights.
-
-    This mirrors the weighted combination in score_candidate() but uses
-    stored breakdown values, giving accurate predictions for any weight set.
-    """
+    """Recompute overall score from per-dimension breakdown and weights."""
     score = 0.0
     for weight_key, breakdown_key in _BREAKDOWN_MAP.items():
         w = weights.get(weight_key, 0.0)
         dim_val = breakdown.get(breakdown_key, 0.0)
-        # diversity and staleness are penalties: score uses (1 - penalty)
         if weight_key in ("diversity", "staleness"):
             score += w * (1.0 - dim_val)
         else:
             score += w * dim_val
 
-    # Cross-strategy bonus and mood boost are additive, not weight-dependent
     score += breakdown.get("cross_strategy_bonus", 0.0)
     score += breakdown.get("mood_boost", 0.0) * 0.1
 
@@ -86,8 +180,7 @@ def optimize_weights(
     """Optimize scoring weights from feedback data.
 
     Uses coordinate descent: for each weight dimension, try a range of values
-    and keep the one that minimizes MSE against feedback targets. Recomputes
-    predicted scores from stored breakdowns for accurate gradients.
+    and keep the one that minimizes MSE against feedback targets.
 
     Returns default weights if insufficient feedback.
     """
@@ -97,7 +190,6 @@ def optimize_weights(
     weights = dict(current_weights or DEFAULT_WEIGHTS)
     dimensions = list(weights.keys())
 
-    # Build targets and breakdowns from feedback
     targets: list[float] = []
     breakdowns: list[dict[str, float]] = []
     for fb in feedback:
@@ -107,7 +199,6 @@ def optimize_weights(
             targets.append(target)
             breakdowns.append(breakdown)
         elif fb.get("predicted_score") is not None:
-            # Fallback for legacy feedback without breakdown: use predicted_score
             targets.append(target)
             breakdowns.append({})
 
@@ -117,24 +208,20 @@ def optimize_weights(
     targets_arr = np.array(targets)
     has_breakdowns = any(b for b in breakdowns)
 
-    # If no breakdowns stored yet, return defaults (can't optimize accurately)
     if not has_breakdowns:
         return dict(DEFAULT_WEIGHTS)
 
-    # Coordinate descent: 3 passes with early stopping
     prev_mse = float("inf")
     for _ in range(3):
         for dim in dimensions:
             best_mse = float("inf")
             best_val = weights[dim]
 
-            # Try values from 0.03 to 0.40
             for trial in np.linspace(0.03, 0.40, 15):
                 test_weights = dict(weights)
                 test_weights[dim] = float(trial)
                 test_weights = _normalize_weights(test_weights)
 
-                # Recompute predicted scores from breakdowns
                 predicted = np.array([
                     _recompute_score(bd, test_weights) if bd else 0.5
                     for bd in breakdowns
@@ -147,7 +234,6 @@ def optimize_weights(
 
             weights[dim] = best_val
 
-        # Early stopping: if MSE didn't improve meaningfully
         current_mse = best_mse
         if abs(prev_mse - current_mse) < 1e-6:
             break
