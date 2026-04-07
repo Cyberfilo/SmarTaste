@@ -24,7 +24,7 @@ import {
 
 /**
  * Protected app layout with navigation shell.
- * Checks auth on mount, shows loading spinner while checking.
+ * Shows the shell immediately with skeleton content while auth loads.
  * Mobile: bottom tab bar (fixed). Desktop lg+: sidebar (fixed left, w-64).
  */
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -36,7 +36,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [devView, setDevView] = useState(false);
   const isAdmin = user?.is_admin ?? false;
 
-  // Poll user's own enrichment progress (no admin required)
+  // Poll enrichment progress — only when authenticated, slow interval
   const { data: enrichmentData } = useQuery<{
     total_songs: number;
     enriched_songs: number;
@@ -47,7 +47,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     queryKey: ["enrichment-status"],
     queryFn: () => apiFetch("/api/taste/enrichment-status"),
     enabled: isAuthenticated,
-    refetchInterval: 3000,
+    refetchInterval: 15_000, // 15s, not 3s
+    staleTime: 10_000,
   });
 
   const enrichmentActive = enrichmentData
@@ -70,13 +71,12 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     }
   }, [isAuthenticated, isOnboarding, isSettings, calibrationStatus, servicesData, router]);
 
-  // Keep triggering /me periodically while enrichment is incomplete
-  // Each /me call processes up to 50 un-enriched songs in background
+  // Trigger /me for background enrichment — only when actively indexing
   useEffect(() => {
     if (!enrichmentActive) return;
     const interval = setInterval(() => {
       authApi.me().catch(() => {});
-    }, 30000); // Every 30s while enrichment is active
+    }, 60_000); // 60s, not 30s
     return () => clearInterval(interval);
   }, [enrichmentActive]);
 
@@ -94,15 +94,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     router.push("/login");
   }
 
-  if (isLoading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
+  // Redirect to login if not authenticated (after loading completes)
+  if (!isLoading && !isAuthenticated) {
     return null;
   }
 
@@ -116,7 +109,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">
-      {/* Desktop sidebar */}
+      {/* Desktop sidebar — always visible, even during auth loading */}
       <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 border-r border-border bg-card">
         <div className="flex h-16 items-center gap-2.5 px-6 border-b border-border">
           <Link href="/dashboard" className="flex items-center gap-2.5">
@@ -141,19 +134,26 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <div className="border-t border-border p-4">
           <div className="flex items-center justify-between">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">
-                {user?.display_name || user?.email || "User"}
-              </p>
-              {user?.display_name && (
-                <p className="truncate text-xs text-muted-foreground">
-                  {user.email}
-                </p>
+              {isLoading ? (
+                <div className="h-4 w-24 rounded bg-muted animate-pulse" />
+              ) : (
+                <>
+                  <p className="truncate text-sm font-medium">
+                    {user?.display_name || user?.email || "User"}
+                  </p>
+                  {user?.display_name && (
+                    <p className="truncate text-xs text-muted-foreground">
+                      {user.email}
+                    </p>
+                  )}
+                </>
               )}
             </div>
             <Button
               variant="ghost"
               size="icon"
               onClick={handleLogout}
+              disabled={isLoading}
               className="shrink-0 text-muted-foreground hover:text-foreground"
               aria-label="Log out"
             >
@@ -174,13 +174,18 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             </span>
           </Link>
           <div className="flex items-center gap-2">
-            <span className="text-sm text-muted-foreground">
-              {user?.display_name || user?.email || "User"}
-            </span>
+            {isLoading ? (
+              <div className="h-4 w-16 rounded bg-muted animate-pulse" />
+            ) : (
+              <span className="text-sm text-muted-foreground">
+                {user?.display_name || user?.email || "User"}
+              </span>
+            )}
             <Button
               variant="ghost"
               size="icon"
               onClick={handleLogout}
+              disabled={isLoading}
               className="text-muted-foreground hover:text-foreground"
               aria-label="Log out"
             >
@@ -239,17 +244,30 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        {/* Page content -- chat page manages its own padding and height */}
+        {/* Page content — shows skeleton pulse while auth is loading */}
         <main className={
           isChat
             ? "flex-1 overflow-hidden"
             : `flex-1 p-4 pb-20 sm:p-6 lg:pb-6 ${devView ? "pb-[45vh]" : ""}`
         }>
-          {children}
+          {isLoading ? (
+            <div className="space-y-4 animate-pulse">
+              <div className="h-8 w-48 rounded bg-muted" />
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                <div className="h-20 rounded-lg bg-muted" />
+                <div className="h-20 rounded-lg bg-muted" />
+                <div className="h-20 rounded-lg bg-muted" />
+                <div className="h-20 rounded-lg bg-muted" />
+              </div>
+              <div className="h-48 rounded-lg bg-muted" />
+            </div>
+          ) : (
+            children
+          )}
         </main>
       </div>
 
-      {/* Mobile bottom nav -- hidden on chat page which has its own input bar */}
+      {/* Mobile bottom nav */}
       <nav className={`fixed bottom-0 left-0 right-0 flex items-center justify-around border-t border-border bg-card py-2 lg:hidden ${isChat ? "hidden" : ""} ${devView ? "bottom-[40vh]" : ""}`}>
         {navItems.map((item) => (
           <Link

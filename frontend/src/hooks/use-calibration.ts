@@ -69,7 +69,7 @@ export function useCalibrationStatus() {
     queryKey: ["calibration", "status"],
     queryFn: () =>
       apiFetch<CalibrationStatusResponse>("/api/calibration/status"),
-    staleTime: 30 * 1000,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
