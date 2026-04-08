@@ -26,14 +26,23 @@ Weights computed per-user from `compute_context_weights()` based on:
 - **Mood active**: audio becomes dominant at 40%
 - **Feedback-learned**: if 10+ ratings exist, blends 60% context + 40% feedback-optimized
 
-### Default Weight Distribution (genre-first, calibration-aware)
-- **genre: 0.35** — primary signal; uses regional genre prioritization + cosine similarity
-- **audio: 0.25** — beat/style similarity from enriched audio features (redistributed when unavailable)
-- **artist: 0.20** — boosted by calibration data; penalized if known artist in wrong genre
-- **language: 0.20** — regional/language match bonus (neutral 0.5 for non-regional music, not penalty)
-- **calibration_boost** — additive: continuous `min(0.20, weight * 0.03)` — zeroed if genre mismatch
-- **diversity** — MMR penalty applied during greedy selection (not in base weights)
+### Scoring Architecture (6 Weighted Dimensions)
+| Dimension | Default Weight | Source |
+|-----------|---------------|--------|
+| Genre match (cosine) | 0.25 | Apple Music/Spotify genres with regional prioritization |
+| Tag similarity (cosine) | 0.15 | Last.fm crowd-sourced tags ("dark", "aggressive", "drill") |
+| Collaborative match | 0.10 | Last.fm track.getSimilar (billions of scrobbles) |
+| Audio similarity | 0.20 | Deezer + ReccoBeats + AcousticBrainz features |
+| Artist affinity | 0.15 | Library presence + calibration + featuring parse |
+| Language/region | 0.15 | Regional genre prefix detection |
+
+Plus additive bonuses:
+- **calibration_boost** — continuous `min(0.20, weight * 0.03)` — zeroed if genre mismatch
+- **collaborative_match** — +0.20 boost when candidate in Last.fm getSimilar set
+- **diversity** — MMR penalty applied during greedy selection
 - **staleness** — cooldown penalty on recently recommended songs
+
+Unused dimensions redistributed proportionally (graceful degradation when Last.fm/audio unavailable).
 
 ### Play Count Proxy (Apple Music Workaround)
 Apple Music has no play counts. The `play_count_proxy` table tracks `seen_count` from recently-played polling:
