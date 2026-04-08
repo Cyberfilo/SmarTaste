@@ -39,7 +39,6 @@ export default function SignupPage() {
         user_id: res.user_id,
         email: res.email,
         display_name: displayName,
-        is_admin: false,
       });
       router.push("/dashboard");
     } catch (err) {

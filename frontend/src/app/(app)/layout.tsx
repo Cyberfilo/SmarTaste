@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
@@ -9,15 +9,12 @@ import { authApi, apiFetch } from "@/lib/api";
 import { useCalibrationStatus } from "@/hooks/use-calibration";
 import { useServices } from "@/hooks/use-services";
 import { Button } from "@/components/ui/button";
-import { DevPanel } from "@/components/admin/dev-panel";
 import {
   LayoutDashboard,
   ListMusic,
   MessageCircle,
   Settings,
   LogOut,
-  Code,
-  User,
   Sparkles,
   Loader2,
 } from "lucide-react";
@@ -33,8 +30,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const { user, isLoading, isAuthenticated, checkAuth, clearUser } =
     useAuthStore();
   const isChat = pathname === "/chat";
-  const [devView, setDevView] = useState(false);
-  const isAdmin = user?.is_admin ?? false;
 
   // Poll enrichment progress — only when authenticated, slow interval
   const { data: enrichmentData } = useQuery<{
@@ -224,31 +219,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        {/* Admin dev/user toggle bar */}
-        {isAdmin && (
-          <div className="flex items-center justify-end gap-2 border-b border-purple-500/20 bg-[#0D0B1A]/80 px-4 py-1.5">
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              {devView ? "Dev View" : "User View"}
-            </span>
-            <button
-              onClick={() => setDevView(!devView)}
-              className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                devView
-                  ? "bg-purple-500/20 text-purple-300"
-                  : "bg-muted text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {devView ? <Code className="h-3 w-3" /> : <User className="h-3 w-3" />}
-              {devView ? "Dev" : "User"}
-            </button>
-          </div>
-        )}
-
         {/* Page content — shows skeleton pulse while auth is loading */}
         <main className={
           isChat
             ? "flex-1 overflow-hidden"
-            : `flex-1 p-4 pb-20 sm:p-6 lg:pb-6 ${devView ? "pb-[45vh]" : ""}`
+            : "flex-1 p-4 pb-20 sm:p-6 lg:pb-6"
         }>
           {isLoading ? (
             <div className="space-y-4 animate-pulse">
@@ -268,7 +243,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       </div>
 
       {/* Mobile bottom nav */}
-      <nav className={`fixed bottom-0 left-0 right-0 flex items-center justify-around border-t border-border bg-card py-2 lg:hidden ${isChat ? "hidden" : ""} ${devView ? "bottom-[40vh]" : ""}`}>
+      <nav className={`fixed bottom-0 left-0 right-0 flex items-center justify-around border-t border-border bg-card py-2 lg:hidden ${isChat ? "hidden" : ""}`}>
         {navItems.map((item) => (
           <Link
             key={item.href}
@@ -281,8 +256,6 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         ))}
       </nav>
 
-      {/* Admin dev panel (slides in from bottom) */}
-      {isAdmin && <DevPanel isOpen={devView} />}
     </div>
   );
 }

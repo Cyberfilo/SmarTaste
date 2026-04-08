@@ -34,7 +34,6 @@ export default function LoginPage() {
         user_id: res.user_id,
         email: res.email,
         display_name: "",
-        is_admin: false,
       });
       router.push("/dashboard");
     } catch (err) {

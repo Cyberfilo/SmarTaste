@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmarTaste Admin</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0f; color: #e4e4e7; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 2rem; width: 100%; max-width: 380px; }
+    h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.25rem; }
+    h1 span { color: #a855f7; }
+    .sub { color: #71717a; font-size: 0.875rem; margin-bottom: 1.5rem; }
+    label { display: block; font-size: 0.75rem; font-weight: 500; color: #a1a1aa; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+    input { width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #27272a; border-radius: 8px; background: #09090b; color: #e4e4e7; font-size: 0.875rem; margin-bottom: 1rem; outline: none; }
+    input:focus { border-color: #a855f7; }
+    button { width: 100%; padding: 0.625rem; border: none; border-radius: 8px; background: #a855f7; color: white; font-weight: 600; font-size: 0.875rem; cursor: pointer; }
+    button:hover { background: #9333ea; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error { color: #ef4444; font-size: 0.8rem; margin-bottom: 1rem; display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span>Smar</span>Taste Admin</h1>
+    <p class="sub">Sign in with your admin account</p>
+    <div class="error" id="error"></div>
+    <form id="loginForm">
+      <label>Email</label>
+      <input type="email" id="email" required autocomplete="email">
+      <label>Password</label>
+      <input type="password" id="password" required autocomplete="current-password">
+      <button type="submit" id="btn">Sign In</button>
+    </form>
+  </div>
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('btn');
+      const err = document.getElementById('error');
+      btn.disabled = true;
+      err.style.display = 'none';
+
+      try {
+        const resp = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            email: document.getElementById('email').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(data.detail || 'Login failed');
+        }
+
+        // Check if user is admin
+        const meResp = await fetch('/api/auth/me', { credentials: 'include' });
+        const me = await meResp.json();
+
+        if (!me.is_admin) {
+          err.textContent = 'Admin access required';
+          err.style.display = 'block';
+          btn.disabled = false;
+          return;
+        }
+
+        window.location.href = '/';
+      } catch (e) {
+        err.textContent = e.message;
+        err.style.display = 'block';
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
