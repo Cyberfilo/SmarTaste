@@ -15,10 +15,12 @@ from typing import Any
 import numpy as np
 
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "genre": 0.35,
-    "audio": 0.25,
-    "artist": 0.20,
-    "language": 0.20,
+    "genre": 0.25,
+    "tags": 0.15,
+    "collab": 0.10,
+    "audio": 0.20,
+    "artist": 0.15,
+    "language": 0.15,
 }
 
 MIN_FEEDBACK_FOR_OPTIMIZATION = 10
@@ -33,6 +35,8 @@ FEEDBACK_TARGETS: dict[str, float] = {
 # Maps weight keys to breakdown keys for score recomputation
 _BREAKDOWN_MAP: dict[str, str] = {
     "genre": "genre_match",
+    "tags": "tag_similarity",
+    "collab": "collaborative_match",
     "audio": "audio_similarity",
     "artist": "artist_match",
     "language": "language_match",
@@ -67,48 +71,52 @@ def compute_context_weights(
     regional_strength = _measure_regional_strength(genre_vector)
 
     # ── Base weights, then shift ───────────────────────────
-    w_genre = 0.35
-    w_audio = 0.25
-    w_artist = 0.20
-    w_language = 0.20
+    w_genre = 0.25
+    w_tags = 0.15
+    w_collab = 0.10
+    w_audio = 0.20
+    w_artist = 0.15
+    w_language = 0.15
 
-    # Regional listeners: boost language, reduce genre (they overlap)
+    # Regional listeners: boost language + tags (both encode regional signals)
     if regional_strength > 0.6:
-        # Strong regional: e.g. 90% Italian → language matters a lot
-        boost = min(0.15, (regional_strength - 0.6) * 0.375)
+        boost = min(0.10, (regional_strength - 0.6) * 0.25)
         w_language += boost
-        w_genre -= boost * 0.5  # Take some from genre (language subsumes genre)
-        w_audio -= boost * 0.5  # Take some from audio
+        w_genre -= boost * 0.5
+        w_audio -= boost * 0.5
     elif regional_strength < 0.2:
-        # Global listener: language almost irrelevant
         w_language = 0.05
-        w_genre += 0.10
-        w_audio += 0.05
+        w_genre += 0.05
+        w_tags += 0.05
 
-    # Audio features available: boost audio, take from language
+    # Audio features available: boost audio
     if has_audio:
         w_audio += 0.05
         w_language -= 0.03
         w_genre -= 0.02
 
-    # Calibration exists: boost artist (we have explicit user signal)
+    # Calibration exists: boost artist
     if has_calibration:
         w_artist += 0.05
         w_genre -= 0.03
         w_language -= 0.02
 
-    # Mood active: audio becomes dominant for matching the vibe
+    # Mood active: audio + tags become dominant
     if mood_active:
-        w_audio = max(w_audio, 0.40)
-        remaining = 1.0 - w_audio
-        other = w_genre + w_artist + w_language
+        w_audio = max(w_audio, 0.30)
+        w_tags = max(w_tags, 0.25)
+        remaining = 1.0 - w_audio - w_tags
+        other = w_genre + w_artist + w_language + w_collab
         ratio = remaining / other if other > 0 else 1.0
         w_genre *= ratio
         w_artist *= ratio
         w_language *= ratio
+        w_collab *= ratio
 
     return _normalize_weights({
         "genre": w_genre,
+        "tags": w_tags,
+        "collab": w_collab,
         "audio": w_audio,
         "artist": w_artist,
         "language": w_language,

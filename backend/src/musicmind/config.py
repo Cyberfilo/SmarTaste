@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # Logging database (separate PostgreSQL for request/enrichment logs)
     logs_database_url: str | None = None
 
+    # Last.fm API key (free, used for tags + similar tracks)
+    lastfm_api_key: str | None = None
+
     # Audio Enrichment APIs (optional — degrades gracefully)
     # SoundStat: paid API (0.01 EUR/track), used only for specific recommendations
     soundstat_api_key: str | None = None

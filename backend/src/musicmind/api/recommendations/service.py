@@ -210,6 +210,11 @@ class RecommendationService:
 
         user_audio_centroid = profile.get("audio_centroid") or None
 
+        # Step 6b: Load Last.fm tag profile + collaborative matches
+        user_tag_profile, collaborative_matches = await self._load_lastfm_data(
+            engine, user_id=user_id,
+        )
+
         # Step 7: Apply mood filter
         resolved_mood: str | None = None
         if mood:
@@ -250,6 +255,8 @@ class RecommendationService:
             unique, profile, count=min(limit * 3, 30),
             weights=weights,
             calibration_artists=calibration_artists,
+            user_tag_profile=user_tag_profile,
+            collaborative_matches=collaborative_matches,
         )
 
         # Pass 2: Lazy-enrich top candidates, then re-score with audio
@@ -265,6 +272,8 @@ class RecommendationService:
             audio_features_map=audio_features_map,
             user_audio_centroid=user_audio_centroid,
             calibration_artists=calibration_artists,
+            user_tag_profile=user_tag_profile,
+            collaborative_matches=collaborative_matches,
         )
 
         # Step 9: Build explanations
@@ -791,6 +800,102 @@ class RecommendationService:
             len(candidates) - len(filtered), len(candidates),
         )
         return filtered if filtered else candidates[:5]  # Fallback if all filtered
+
+    @staticmethod
+    async def _load_lastfm_data(
+        engine,
+        *,
+        user_id: str,
+    ) -> tuple[dict[str, float] | None, set[str] | None]:
+        """Load Last.fm tag profile and collaborative matches for a user.
+
+        Returns:
+            Tuple of (user_tag_profile, collaborative_matches).
+            - user_tag_profile: aggregated tag weights from user's top songs
+            - collaborative_matches: set of "artist:title" keys from Last.fm
+              getSimilar for the user's top songs
+        """
+        from collections import Counter
+
+        from musicmind.db.schema import (
+            lastfm_similar_tracks,
+            lastfm_tags_cache,
+            song_metadata_cache,
+        )
+
+        # Get user's top songs (most recent 100)
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.artist_name,
+                    song_metadata_cache.c.name,
+                )
+                .where(song_metadata_cache.c.user_id == user_id)
+                .order_by(song_metadata_cache.c.fetched_at.desc())
+                .limit(100)
+            )
+            user_songs = [
+                (row.artist_name, row.name) for row in result if row.artist_name and row.name
+            ]
+
+        if not user_songs:
+            return None, None
+
+        # Build user tag profile: aggregate tags from cached Last.fm tags
+        tag_counter: Counter[str] = Counter()
+        async with engine.begin() as conn:
+            for artist, title in user_songs[:50]:
+                entity_id = f"track:{artist.lower()}:{title.lower()}"
+                result = await conn.execute(
+                    sa.select(lastfm_tags_cache.c.tags).where(
+                        lastfm_tags_cache.c.entity_id == entity_id
+                    )
+                )
+                row = result.first()
+                if row and row.tags:
+                    tags = row.tags
+                    if isinstance(tags, str):
+                        import json
+
+                        try:
+                            tags = json.loads(tags)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                    for tag_name, weight in tags.items():
+                        tag_counter[tag_name] += weight
+
+        user_tag_profile: dict[str, float] | None = None
+        if tag_counter:
+            max_val = max(tag_counter.values())
+            user_tag_profile = {
+                k: round(v / max_val, 3) for k, v in tag_counter.most_common(30)
+            }
+
+        # Load collaborative matches: all similar tracks from user's top songs
+        collaborative_matches: set[str] = set()
+        async with engine.begin() as conn:
+            for artist, title in user_songs[:30]:
+                result = await conn.execute(
+                    sa.select(
+                        lastfm_similar_tracks.c.similar_artist,
+                        lastfm_similar_tracks.c.similar_title,
+                    ).where(
+                        sa.and_(
+                            sa.func.lower(lastfm_similar_tracks.c.source_artist)
+                            == artist.lower(),
+                            sa.func.lower(lastfm_similar_tracks.c.source_title)
+                            == title.lower(),
+                        )
+                    )
+                )
+                for row in result:
+                    key = f"{row.similar_artist.lower()}:{row.similar_title.lower()}"
+                    collaborative_matches.add(key)
+
+        return (
+            user_tag_profile,
+            collaborative_matches if collaborative_matches else None,
+        )
 
     @staticmethod
     async def _load_calibration_artists(
