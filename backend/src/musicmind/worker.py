@@ -455,10 +455,21 @@ async def _process_user(
             stats["tracks_skipped"] += 1
 
     if tracks_to_enrich:
+        # Enumerate all songs that will be enriched
         logger.info(
-            "User %s: enriching %d tracks (%d already enriched)",
+            "User %s: ENRICHMENT PLAN — %d tracks to enrich, %d already done, "
+            "%d total from %d artists. Songs:",
             user_id[:8], len(tracks_to_enrich), stats["tracks_skipped"],
+            len(all_tracks), stats["artists_processed"],
         )
+        for i, t in enumerate(tracks_to_enrich[:50]):  # Log first 50
+            logger.info(
+                "  [%d] %s - %s (isrc=%s)",
+                i + 1, t.get("artist_name", "?"), t.get("name", "?"),
+                t.get("isrc", "—"),
+            )
+        if len(tracks_to_enrich) > 50:
+            logger.info("  ... and %d more", len(tracks_to_enrich) - 50)
         enrich_result = await enrich_tracks(
             engine, tracks_to_enrich, user_id=user_id,
             soundstat_api_key=settings.soundstat_api_key,

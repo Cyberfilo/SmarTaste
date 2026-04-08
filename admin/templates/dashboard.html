@@ -71,24 +71,15 @@
   </div>
 
   <script>
-    // ── Auth check ───────────────────────────────────────
-    async function checkAuth() {
-      try {
-        const resp = await fetch('/api/auth/me', { credentials: 'include' });
-        if (!resp.ok) { window.location.href = '/login'; return false; }
-        const me = await resp.json();
-        if (!me.is_admin) { window.location.href = '/login'; return false; }
-        return true;
-      } catch { window.location.href = '/login'; return false; }
-    }
+    // Auth is handled server-side — if we're here, we're authenticated
 
     // ── Render helpers ───────────────────────────────────
     function statCard(label, value, sub) {
       return `<div class="card"><div class="card-label">${label}</div><div class="card-value">${value}</div>${sub ? `<div class="card-sub">${sub}</div>` : ''}</div>`;
     }
 
-    function progressRow(name, enriched, total, pct) {
-      return `<div class="progress-row"><span class="progress-name">${name}</span><div class="progress-bar-bg"><div class="progress-bar" style="width:${Math.min(100,pct)}%"></div></div><span class="progress-pct">${enriched}/${total}</span></div>`;
+    function progressRow(u) {
+      return `<div class="progress-row"><span class="progress-name">${u.display_name}</span><div class="progress-bar-bg"><div class="progress-bar" style="width:${Math.min(100,u.percentage)}%"></div></div><span class="progress-pct">${u.enriched_songs}/${u.total_songs}</span></div><div style="font-size:0.65rem;color:#52525b;margin:-0.5rem 0 0.5rem 0;padding-left:128px">Library: ${u.library_songs} | Worker: ${u.worker_songs || 0} | Artists: ${u.unique_artists || '?'}</div>`;
     }
 
     function errorRow(err) {
@@ -125,7 +116,7 @@
           const p = await progressResp.json();
           if (p.users && p.users.length > 0) {
             document.getElementById('progress').innerHTML = p.users.map(u =>
-              progressRow(u.display_name, u.enriched_songs, u.total_songs, u.percentage)
+              progressRow(u)
             ).join('');
           } else {
             document.getElementById('progress').innerHTML = '<div class="loading">No users with songs</div>';
@@ -158,10 +149,8 @@
 
     // ── Init ─────────────────────────────────────────────
     (async () => {
-      if (await checkAuth()) {
-        await fetchData();
-        setInterval(fetchData, 30000);
-      }
+      await fetchData();
+      setInterval(fetchData, 30000);
     })();
   </script>
 </body>
