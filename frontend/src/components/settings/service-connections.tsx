@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -194,6 +194,24 @@ export function ServiceConnections() {
   const { data: calibrationStatus } = useCalibrationStatus();
   const [appleMusicLoading, setAppleMusicLoading] = useState(false);
 
+  // Pre-load MusicKit JS and developer token on mount so the click
+  // handler stays within the browser's "user activation" window.
+  // Without this, the authorize() popup is silently blocked.
+  const [devToken, setDevToken] = useState<string | null>(null);
+  const [musicKitReady, setMusicKitReady] = useState(false);
+
+  useEffect(() => {
+    // Pre-fetch developer token
+    appleMusicToken.mutate(undefined, {
+      onSuccess: (res) => setDevToken(res.developer_token),
+    });
+    // Pre-load MusicKit JS
+    loadMusicKitJS()
+      .then(() => setMusicKitReady(true))
+      .catch(() => {}); // Will retry on click if needed
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const spotify = data?.services.find((s) => s.service === "spotify");
   const appleMusic = data?.services.find((s) => s.service === "apple_music");
 
@@ -211,78 +229,52 @@ export function ServiceConnections() {
   const handleAppleMusicConnect = useCallback(async () => {
     setAppleMusicLoading(true);
     try {
-      // 1. Get developer token from backend
-      let tokenRes: { developer_token: string };
-      try {
-        tokenRes = await new Promise<{ developer_token: string }>(
-          (resolve, reject) => {
-            appleMusicToken.mutate(undefined, {
-              onSuccess: resolve,
-              onError: reject,
-            });
-          }
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown error";
-        toast.error("Failed to get Apple Music developer token", {
-          description: msg.includes("401") || msg.includes("Session")
-            ? "Your session may have expired. Try refreshing the page."
-            : msg,
-        });
-        return;
+      // Use pre-loaded token, or fetch on demand if pre-load failed
+      let token = devToken;
+      if (!token) {
+        try {
+          const res = await new Promise<{ developer_token: string }>(
+            (resolve, reject) => {
+              appleMusicToken.mutate(undefined, {
+                onSuccess: resolve,
+                onError: reject,
+              });
+            }
+          );
+          token = res.developer_token;
+        } catch {
+          toast.error("Failed to get Apple Music token", {
+            description: "Try refreshing the page.",
+          });
+          return;
+        }
       }
 
-      if (!tokenRes?.developer_token) {
-        toast.error("Apple Music not configured on this server");
-        return;
+      // Ensure MusicKit is loaded (should already be from pre-load)
+      if (!musicKitReady) {
+        try {
+          await loadMusicKitJS();
+        } catch {
+          toast.error("Failed to load Apple Music SDK");
+          return;
+        }
       }
 
-      // 2. Load MusicKit JS
-      toast.info("Loading Apple Music...");
-      try {
-        await loadMusicKitJS();
-      } catch (err) {
-        toast.error("Failed to load Apple Music SDK", {
-          description: "Check your internet connection or try a different browser.",
-        });
-        return;
-      }
+      // Configure + authorize — must happen fast after user click
+      // so the browser allows the popup (user activation window)
+      const music = await window.MusicKit.configure({
+        developerToken: token,
+        app: { name: "SmarTaste", build: "1.0.0" },
+      });
 
-      // 3. Configure MusicKit with our developer token
-      let music: MusicKitInstance;
-      try {
-        music = await window.MusicKit.configure({
-          developerToken: tokenRes.developer_token,
-          app: { name: "SmarTaste", build: "1.0.0" },
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Configuration failed";
-        toast.error("Apple Music configuration failed", {
-          description: msg,
-        });
-        return;
-      }
-
-      // 4. Authorize — opens Apple's sign-in popup
-      let musicUserToken: string;
-      try {
-        musicUserToken = await music.authorize();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "Authorization failed";
-        toast.error("Apple Music authorization failed", {
-          description: msg.includes("popup")
-            ? "Your browser may be blocking popups. Allow popups for this site."
-            : msg,
-        });
-        return;
-      }
+      const musicUserToken = await music.authorize();
 
       if (!musicUserToken) {
         toast.error("Apple Music authorization was cancelled");
         return;
       }
 
-      // 5. Send the user token to our backend
+      // Send the user token to our backend
       appleMusicConnect.mutate(musicUserToken, {
         onSuccess: () => {
           toast.success("Apple Music connected!", {
@@ -299,11 +291,18 @@ export function ServiceConnections() {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Failed to connect Apple Music";
-      toast.error(message);
+      // Detect popup blocker
+      if (message.includes("popup") || message.includes("blocked")) {
+        toast.error("Popup blocked", {
+          description: "Allow popups for this site and try again.",
+        });
+      } else {
+        toast.error(message);
+      }
     } finally {
       setAppleMusicLoading(false);
     }
-  }, [appleMusicToken, appleMusicConnect, calibrationStatus, router]);
+  }, [devToken, musicKitReady, appleMusicToken, appleMusicConnect, calibrationStatus, router]);
 
   function handleDisconnect(service: string) {
     disconnectService.mutate(service, {
