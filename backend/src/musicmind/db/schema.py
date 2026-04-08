@@ -516,6 +516,25 @@ lastfm_tags_cache = sa.Table(
     sa.PrimaryKeyConstraint("entity_type", "entity_id"),
 )
 
+lastfm_similar_tracks = sa.Table(
+    "lastfm_similar_tracks",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("source_artist", sa.Text, nullable=False),
+    sa.Column("source_title", sa.Text, nullable=False),
+    sa.Column("similar_artist", sa.Text, nullable=False),
+    sa.Column("similar_title", sa.Text, nullable=False),
+    sa.Column("similarity_score", sa.Float, nullable=False),
+    sa.Column("similar_mbid", sa.Text, nullable=True),
+    sa.Column(
+        "fetched_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Index("ix_lastfm_similar_source", "source_artist", "source_title"),
+)
+
 generated_playlists = sa.Table(
     "generated_playlists",
     metadata,

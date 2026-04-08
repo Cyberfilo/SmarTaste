@@ -480,6 +480,13 @@ async def _process_user(
             + enrich_result.get("soundstat", 0)
         )
 
+        # Last.fm enrichment: tags + similar tracks (collaborative filtering)
+        if settings.lastfm_api_key:
+            await _enrich_lastfm(
+                engine, all_tracks,
+                api_key=settings.lastfm_api_key,
+            )
+
         if log_writer:
             log_writer.log_enrichment(
                 user_id=user_id,
@@ -491,6 +498,61 @@ async def _process_user(
         logger.info("User %s: all tracks already enriched", user_id[:8])
 
     return stats
+
+
+# ── Last.fm Enrichment ────────────────────────────────────────────────────
+
+
+async def _enrich_lastfm(
+    engine,
+    tracks: list[dict[str, Any]],
+    *,
+    api_key: str,
+) -> None:
+    """Fetch Last.fm tags + similar tracks for a batch of tracks.
+
+    Runs after audio enrichment. Fetches tags for each track
+    and similar tracks for the user's top songs.
+    """
+    from musicmind.engine.enrichment.lastfm import (
+        fetch_similar_tracks,
+        fetch_track_tags,
+    )
+
+    tag_count = 0
+    similar_count = 0
+
+    # Deduplicate by (artist, title) to avoid redundant API calls
+    seen: set[str] = set()
+
+    for track in tracks:
+        artist = track.get("artist_name", "")
+        title = track.get("name", "")
+        if not artist or not title:
+            continue
+
+        key = f"{artist.lower()}:{title.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Fetch tags (always — they're cheap and useful)
+        tags = await fetch_track_tags(api_key, artist, title, engine=engine)
+        if tags:
+            tag_count += 1
+
+        # Fetch similar tracks (for enrichment — builds collaborative graph)
+        similar = await fetch_similar_tracks(
+            api_key, artist, title, engine=engine, limit=15,
+        )
+        if similar:
+            similar_count += 1
+
+    if tag_count > 0 or similar_count > 0:
+        logger.info(
+            "Last.fm enrichment: %d tracks tagged, %d with similar tracks",
+            tag_count, similar_count,
+        )
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────

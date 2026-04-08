@@ -161,6 +161,33 @@ def _compute_staleness(
     return 0.0
 
 
+def _tag_cosine(
+    candidate_tags: dict[str, float] | None,
+    user_tag_profile: dict[str, float] | None,
+) -> float:
+    """Cosine similarity between candidate's Last.fm tags and user tag profile.
+
+    Tags encode mood/vibe signals ("dark", "aggressive", "Italian drill")
+    that structured genres miss. Returns 0.5 (neutral) if either is None.
+    """
+    if not candidate_tags or not user_tag_profile:
+        return 0.5
+
+    all_tags = set(candidate_tags.keys()) | set(user_tag_profile.keys())
+    if not all_tags:
+        return 0.5
+
+    vec_a = np.array([candidate_tags.get(t, 0.0) for t in all_tags])
+    vec_b = np.array([user_tag_profile.get(t, 0.0) for t in all_tags])
+
+    dot = np.dot(vec_a, vec_b)
+    norm_a = np.linalg.norm(vec_a)
+    norm_b = np.linalg.norm(vec_b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.5
+    return float(dot / (norm_a * norm_b))
+
+
 def score_candidate(
     candidate: dict[str, Any],
     profile: dict[str, Any],
@@ -172,6 +199,9 @@ def score_candidate(
     recent_recommendations: list[dict[str, Any]] | None = None,
     staleness_index: dict[str, dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
+    candidate_tags: dict[str, float] | None = None,
+    user_tag_profile: dict[str, float] | None = None,
+    collaborative_matches: set[str] | None = None,
 ) -> dict[str, Any]:
     """Score a single candidate song against a taste profile.
 
@@ -233,7 +263,17 @@ def score_candidate(
     # 8. Mood boost (set by filter_candidates_by_mood)
     mood_boost = candidate.get("_mood_boost", 0.0)
 
-    # 9. Calibration boost — continuous function of calibration weight
+    # 9. Tag similarity (Last.fm crowd-sourced mood/vibe tags)
+    tag_sim = _tag_cosine(candidate_tags, user_tag_profile)
+
+    # 10. Collaborative match (Last.fm similar tracks)
+    collab_boost = 0.0
+    if collaborative_matches:
+        candidate_key = f"{artist_name}:{candidate.get('name', '').lower()}"
+        if candidate_key in collaborative_matches:
+            collab_boost = 0.20  # Direct collaborative signal
+
+    # 11. Calibration boost — continuous function of calibration weight
     # Scales smoothly: weight 5.0 → +0.15, 3.0 → +0.09, 1.0 → +0.03
     # Zeroed out if the song's genre doesn't match user profile (wrong-genre penalty)
     cal_boost = 0.0
@@ -245,30 +285,39 @@ def score_candidate(
             if genre_score < 0.15:
                 cal_boost = 0.0
 
-    # Weighted combination: genre 35%, audio 25%, artist 20%, language 20%
-    # When audio features are unavailable, redistribute audio weight
-    # proportionally to other dimensions
+    # Weighted combination — 6 dimensions + bonuses
+    # When audio/tags unavailable, redistribute weight proportionally
     has_audio = audio_features is not None and user_audio_centroid is not None
-    w_genre = w.get("genre", 0.35)
-    w_audio = w.get("audio", 0.25)
-    w_artist = w.get("artist", 0.20)
-    w_lang = w.get("language", 0.20)
+    has_tags = candidate_tags is not None and user_tag_profile is not None
 
+    w_genre = w.get("genre", 0.25)
+    w_audio = w.get("audio", 0.20)
+    w_artist = w.get("artist", 0.15)
+    w_lang = w.get("language", 0.15)
+    w_tags = w.get("tags", 0.15)
+    w_collab = w.get("collab", 0.10)
+
+    # Redistribute unavailable dimensions
     if not has_audio:
-        # Redistribute audio weight proportionally
-        other_total = w_genre + w_artist + w_lang
-        if other_total > 0:
-            scale = (other_total + w_audio) / other_total
-            w_genre *= scale
-            w_artist *= scale
-            w_lang *= scale
+        redistribute = w_audio
         w_audio = 0.0
+        w_genre += redistribute * 0.4
+        w_tags += redistribute * 0.3
+        w_artist += redistribute * 0.3
+
+    if not has_tags:
+        redistribute = w_tags
+        w_tags = 0.0
+        w_genre += redistribute * 0.5
+        w_lang += redistribute * 0.5
 
     overall = (
         w_genre * genre_score
         + w_audio * audio_sim
         + w_artist * artist_match
         + w_lang * language_score
+        + w_tags * tag_sim
+        + w_collab * min(1.0, collab_boost * 5.0)
         - 0.05 * diversity_penalty
         - 0.03 * staleness
         + cross_bonus
@@ -279,6 +328,10 @@ def score_candidate(
 
     # Build explanation
     parts = []
+    if collab_boost > 0:
+        parts.append("fans also listen to this")
+    if tag_sim > 0.6 and has_tags:
+        parts.append("similar vibe")
     if genre_score > 0.5:
         top_genres = ", ".join(candidate.get("genre_names", [])[:2])
         parts.append(f"genre match ({top_genres})")
@@ -300,6 +353,8 @@ def score_candidate(
         "_score": round(overall, 3),
         "_breakdown": {
             "genre_match": round(genre_score, 3),
+            "tag_similarity": round(tag_sim, 3),
+            "collaborative_match": round(collab_boost, 3),
             "audio_similarity": round(audio_sim, 3),
             "artist_match": round(artist_match, 3),
             "language_match": round(language_score, 3),
@@ -323,12 +378,13 @@ def rank_candidates(
     user_audio_centroid: dict[str, float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
+    user_tag_profile: dict[str, float] | None = None,
+    collaborative_matches: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Rank candidates using MMR-style scoring with diversity.
 
     Optimized: precomputes base scores (without diversity penalty), then
     applies diversity penalty incrementally during greedy selection.
-    Complexity: O(k * n) instead of O(k * n * score_candidate).
     """
     if not candidates:
         return []
@@ -339,6 +395,9 @@ def rank_candidates(
     # Step 1: Precompute base scores for all candidates (no diversity penalty)
     base_scored: list[dict[str, Any]] = []
     for c in candidates:
+        # Get candidate's Last.fm tags if available
+        c_tags = c.get("_lastfm_tags")
+
         scored = score_candidate(
             c, profile, already_selected=None,
             weights=weights,
@@ -346,6 +405,9 @@ def rank_candidates(
             user_audio_centroid=user_audio_centroid,
             staleness_index=staleness_idx,
             calibration_artists=calibration_artists,
+            candidate_tags=c_tags,
+            user_tag_profile=user_tag_profile,
+            collaborative_matches=collaborative_matches,
         )
         base_scored.append(scored)
 
