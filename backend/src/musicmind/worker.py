@@ -483,6 +483,9 @@ async def _process_user(
         # MusicBrainz credits: producers, songwriters (knowledge graph)
         await _enrich_musicbrainz_credits(engine, tracks_to_enrich)
 
+        # Genius lyrics: scrape + embed for semantic similarity
+        await _enrich_lyrics(engine, tracks_to_enrich, user_id=user_id)
+
         # Last.fm enrichment: tags + similar tracks (collaborative filtering)
         if settings.lastfm_api_key:
             await _enrich_lastfm(
@@ -501,6 +504,75 @@ async def _process_user(
         logger.info("User %s: all tracks already enriched", user_id[:8])
 
     return stats
+
+
+# ── Lyrics Enrichment ─────────────────────────────────────────────────────
+
+
+async def _enrich_lyrics(
+    engine,
+    tracks: list[dict[str, Any]],
+    *,
+    user_id: str,
+) -> None:
+    """Fetch lyrics from Genius and embed with sentence-transformers.
+
+    Stores embeddings in audio_embeddings table with model_version="lyrics-minilm-v2".
+    Skips tracks that already have lyric embeddings.
+    """
+    from musicmind.db.schema import audio_embeddings
+    from musicmind.engine.enrichment.genius import fetch_and_embed_lyrics
+
+    embedded = 0
+    seen: set[str] = set()
+
+    for track in tracks:
+        artist = track.get("artist_name", "")
+        title = track.get("name", "")
+        catalog_id = track.get("catalog_id", "")
+        if not artist or not title or not catalog_id:
+            continue
+
+        key = f"{artist.lower()}:{title.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Check if already embedded
+        async with engine.begin() as conn:
+            existing = await conn.execute(
+                sa.select(audio_embeddings.c.catalog_id).where(
+                    sa.and_(
+                        audio_embeddings.c.catalog_id == catalog_id,
+                        audio_embeddings.c.user_id == user_id,
+                        audio_embeddings.c.model_version == "lyrics-minilm-v2",
+                    )
+                )
+            )
+            if existing.first():
+                continue
+
+        # Fetch + embed
+        _lyrics, embedding = await fetch_and_embed_lyrics(artist, title)
+        if embedding:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(
+                    "INSERT INTO audio_embeddings "
+                    "(catalog_id, user_id, embedding, isrc, model_version, analyzed_at) "
+                    "VALUES (:cid, :uid, :emb, :isrc, :model, NOW()) "
+                    "ON CONFLICT (catalog_id, user_id) DO UPDATE SET "
+                    "embedding = :emb, model_version = :model, analyzed_at = NOW()"
+                ), {
+                    "cid": catalog_id,
+                    "uid": user_id,
+                    "emb": json.dumps(embedding),
+                    "isrc": track.get("isrc", ""),
+                    "model": "lyrics-minilm-v2",
+                })
+                embedded += 1
+
+    if embedded > 0:
+        logger.info("Lyrics embeddings: %d tracks embedded", embedded)
 
 
 # ── MusicBrainz Credits Enrichment ─────────────────────────────────────────

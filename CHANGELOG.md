@@ -7,6 +7,23 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 4.000 — 2026-04-08
+
+### Added — Recommendation Engine Overhaul
+- **Phase 1 — Last.fm integration**: Tags (crowd-sourced mood/vibe vectors) + track.getSimilar (collaborative filtering from billions of scrobbles). New lastfm_similar_tracks table. Tags cached in lastfm_tags_cache. Worker enriches all tracks.
+- **Phase 2 — MusicBrainz producers**: Recording-level credits (producer, songwriter, mixer, engineer) fetched via ISRC → MBID. Stored in kg_artists + kg_relationships. Enables "producer proximity" scoring.
+- **Phase 3 — Genius lyrics embeddings**: Scrape lyrics from Genius (free, no OAuth), embed with all-MiniLM-L6-v2 (384-dim, local). Stored in audio_embeddings (model_version="lyrics-minilm-v2"). Captures semantic content for Italian rap/drill.
+- **Phase 4 — Smart polling**: Apple Music ratings (Love/Dislike), Spotify saved status check, smart play count delta detection between polling snapshots.
+
+### Changed — Scorer Rebalanced to 6 Dimensions
+- genre 25%, tags 15%, collab 10%, audio 20%, artist 15%, language 15%
+- Tag similarity: cosine between Last.fm tag vectors
+- Collaborative match: +0.20 boost when candidate in Last.fm getSimilar set
+- Unused dimensions redistributed proportionally (graceful degradation)
+- Context-adaptive weights updated for 6 dimensions
+- Mood mode boosts audio (30%) + tags (25%)
+- sentence-transformers as optional dependency (`pip install .[lyrics]`)
+
 ## V 3.310 — 2026-04-08
 
 ### Added
