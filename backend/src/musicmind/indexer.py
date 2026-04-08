@@ -515,115 +515,135 @@ async def _backfill_tags_credits(
     settings,
     tracks: list[dict[str, Any]],
 ) -> None:
-    """Run Last.fm tags + MusicBrainz credits on a batch of tracks."""
+    """Run Last.fm tags + MusicBrainz credits on a batch of tracks.
+
+    Uses batch gap detection (single query) instead of per-song checks,
+    and concurrent Last.fm API calls (5 at a time) for speed.
+    """
+    import asyncio
+
     from musicmind.db.schema import kg_relationships, lastfm_tags_cache
 
-    # Last.fm tags
+    # ── Last.fm tags: batch gap detection ────────────────────────
     if settings.lastfm_api_key:
-        uncached: list[dict[str, Any]] = []
-        async with engine.begin() as conn:
-            for t in tracks:
-                if not t.get("artist_name") or not t.get("name"):
-                    continue
+        from musicmind.engine.enrichment.lastfm import (
+            fetch_artist_tags,
+            fetch_track_tags,
+        )
+
+        # Build entity IDs for all tracks
+        track_eids: list[tuple[dict, str]] = []
+        for t in tracks:
+            if t.get("artist_name") and t.get("name"):
                 eid = f"track:{t['artist_name'].lower()}:{t['name'].lower()}"
-                exists = await conn.execute(
+                track_eids.append((t, eid))
+
+        if track_eids:
+            # Single query: find which entity_ids already exist
+            all_eids = [eid for _, eid in track_eids]
+            async with engine.begin() as conn:
+                result = await conn.execute(
                     sa.select(lastfm_tags_cache.c.entity_id).where(
-                        lastfm_tags_cache.c.entity_id == eid
+                        lastfm_tags_cache.c.entity_id.in_(all_eids)
                     )
                 )
-                if not exists.first():
-                    uncached.append(t)
+                cached_eids = {row.entity_id for row in result}
 
-        if uncached:
-            from musicmind.engine.enrichment.lastfm import (
-                fetch_artist_tags,
-                fetch_track_tags,
+            uncached = [
+                (t, eid) for t, eid in track_eids if eid not in cached_eids
+            ]
+
+            if uncached:
+                sem = asyncio.Semaphore(5)
+
+                async def _fetch_and_store_tags(t: dict, eid: str) -> None:
+                    async with sem:
+                        try:
+                            tags = await fetch_track_tags(
+                                t["artist_name"], t["name"],
+                                api_key=settings.lastfm_api_key,
+                            )
+                            if not tags:
+                                tags = await fetch_artist_tags(
+                                    t["artist_name"],
+                                    api_key=settings.lastfm_api_key,
+                                )
+                            if tags:
+                                async with engine.begin() as conn:
+                                    await conn.execute(
+                                        sa.text(
+                                            "INSERT INTO lastfm_tags_cache"
+                                            " (entity_type, entity_id, tags)"
+                                            " VALUES (:t, :eid, :tags)"
+                                            " ON CONFLICT DO NOTHING"
+                                        ),
+                                        {
+                                            "t": "track",
+                                            "eid": eid,
+                                            "tags": json.dumps(tags),
+                                        },
+                                    )
+                        except Exception:
+                            pass
+
+                await asyncio.gather(
+                    *[_fetch_and_store_tags(t, eid) for t, eid in uncached]
+                )
+
+    # ── MusicBrainz credits: batch gap detection ─────────────────
+    isrc_tracks = [
+        (t, f"isrc:{t['isrc'].upper()}")
+        for t in tracks if t.get("isrc")
+    ]
+    if isrc_tracks:
+        all_mbids = [mbid for _, mbid in isrc_tracks]
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(sa.distinct(kg_relationships.c.source_mbid)).where(
+                    kg_relationships.c.source_mbid.in_(all_mbids)
+                )
             )
+            cached_mbids = {row[0] for row in result}
 
-            for t in uncached:
-                try:
-                    tags = await fetch_track_tags(
-                        t["artist_name"], t["name"],
-                        api_key=settings.lastfm_api_key,
-                    )
-                    if not tags:
-                        tags = await fetch_artist_tags(
-                            t["artist_name"],
-                            api_key=settings.lastfm_api_key,
-                        )
-                    if tags:
-                        eid = (
-                            f"track:{t['artist_name'].lower()}"
-                            f":{t['name'].lower()}"
-                        )
-                        async with engine.begin() as conn:
+        uncached_isrc = [
+            (t, mbid) for t, mbid in isrc_tracks if mbid not in cached_mbids
+        ]
+
+        for t, source_mbid in uncached_isrc:
+            try:
+                from musicmind.engine.enrichment.musicbrainz_credits import (
+                    fetch_recording_credits,
+                )
+
+                credits = await fetch_recording_credits(t["isrc"])
+                if credits:
+                    async with engine.begin() as conn:
+                        for c in credits:
                             await conn.execute(
                                 sa.text(
-                                    "INSERT INTO lastfm_tags_cache"
-                                    " (entity_type, entity_id, tags)"
-                                    " VALUES (:etype, :eid, :tags)"
+                                    "INSERT INTO kg_artists (mbid, name, type)"
+                                    " VALUES (:m, :n, :t)"
                                     " ON CONFLICT DO NOTHING"
                                 ),
                                 {
-                                    "etype": "track",
-                                    "eid": eid,
-                                    "tags": json.dumps(tags),
+                                    "m": c["artist_mbid"],
+                                    "n": c["artist_name"],
+                                    "t": c.get("role", "person"),
                                 },
                             )
-                except Exception:
-                    pass
-
-    # MusicBrainz credits
-    for t in tracks:
-        isrc = t.get("isrc")
-        if not isrc:
-            continue
-        source_mbid = f"isrc:{isrc.upper()}"
-        async with engine.begin() as conn:
-            exists = await conn.execute(
-                sa.select(kg_relationships.c.id).where(
-                    kg_relationships.c.source_mbid == source_mbid
-                ).limit(1)
-            )
-            if exists.first():
-                continue
-
-        try:
-            from musicmind.engine.enrichment.musicbrainz_credits import (
-                fetch_recording_credits,
-            )
-
-            credits = await fetch_recording_credits(isrc)
-            if credits:
-                async with engine.begin() as conn:
-                    for credit in credits:
-                        # Insert artist
-                        await conn.execute(
-                            sa.text(
-                                "INSERT INTO kg_artists (mbid, name, type)"
-                                " VALUES (:mbid, :name, :type)"
-                                " ON CONFLICT DO NOTHING"
-                            ),
-                            {
-                                "mbid": credit["artist_mbid"],
-                                "name": credit["artist_name"],
-                                "type": credit.get("role", "person"),
-                            },
-                        )
-                        # Insert relationship
-                        await conn.execute(
-                            sa.text(
-                                "INSERT INTO kg_relationships"
-                                " (source_mbid, target_mbid,"
-                                "  relationship_type)"
-                                " VALUES (:src, :tgt, :rel)"
-                                " ON CONFLICT DO NOTHING"
-                            ),
-                            {
-                                "src": source_mbid,
-                                "tgt": credit["artist_mbid"],
-                                "rel": credit.get("role", "producer"),
-                            },
-                        )
-        except Exception:
-            pass
+                            await conn.execute(
+                                sa.text(
+                                    "INSERT INTO kg_relationships"
+                                    " (source_mbid, target_mbid,"
+                                    "  relationship_type)"
+                                    " VALUES (:s, :tgt, :r)"
+                                    " ON CONFLICT DO NOTHING"
+                                ),
+                                {
+                                    "s": source_mbid,
+                                    "tgt": c["artist_mbid"],
+                                    "r": c.get("role", "producer"),
+                                },
+                            )
+            except Exception:
+                pass
