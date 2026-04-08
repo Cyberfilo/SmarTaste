@@ -95,6 +95,19 @@ async def main() -> None:
     except Exception:
         logger.exception("Startup scan failed, continuing to poll loop")
 
+    # ── Phase 1b: Backfill new signals on already-enriched songs ──────
+    logger.info("=== BACKFILL: checking for songs missing new enrichment signals ===")
+    try:
+        backfill_stats = await _backfill_new_signals(engine, settings)
+        logger.info(
+            "Backfill complete: %d tags added, %d credits fetched, %d lyrics embedded",
+            backfill_stats.get("tags", 0),
+            backfill_stats.get("credits", 0),
+            backfill_stats.get("lyrics", 0),
+        )
+    except Exception:
+        logger.exception("Backfill failed, continuing to poll loop")
+
     # ── Phase 2: Continuous loop — discover new artists + enrich ──────
     cycle = 0
     while True:
@@ -502,6 +515,141 @@ async def _process_user(
             )
     else:
         logger.info("User %s: all tracks already enriched", user_id[:8])
+
+    return stats
+
+
+# ── Backfill New Signals ──────────────────────────────────────────────────
+
+
+async def _backfill_new_signals(
+    engine,
+    settings,
+) -> dict[str, int]:
+    """Run new enrichment stages on songs that already have audio features.
+
+    Targets songs enriched before Last.fm, MusicBrainz credits, and lyrics
+    were added. Checks each signal independently — only runs what's missing.
+    """
+    from musicmind.db.schema import (
+        audio_embeddings,
+        lastfm_tags_cache,
+        song_metadata_cache,
+        users,
+    )
+
+    stats = {"tags": 0, "credits": 0, "lyrics": 0}
+
+    async with engine.begin() as conn:
+        result = await conn.execute(sa.select(users.c.id))
+        user_ids = [row.id for row in result]
+
+    for user_id in user_ids:
+        # Get all songs for this user
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.name,
+                    song_metadata_cache.c.artist_name,
+                    song_metadata_cache.c.isrc,
+                ).where(song_metadata_cache.c.user_id == user_id)
+            )
+            songs = result.fetchall()
+
+        if not songs:
+            continue
+
+        # ── Last.fm tags backfill ─────────────────────────────
+        if settings.lastfm_api_key:
+            songs_without_tags: list[dict[str, Any]] = []
+            async with engine.begin() as conn:
+                for song in songs:
+                    if not song.artist_name or not song.name:
+                        continue
+                    entity_id = f"track:{song.artist_name.lower()}:{song.name.lower()}"
+                    existing = await conn.execute(
+                        sa.select(lastfm_tags_cache.c.entity_id).where(
+                            lastfm_tags_cache.c.entity_id == entity_id
+                        )
+                    )
+                    if not existing.first():
+                        songs_without_tags.append({
+                            "artist_name": song.artist_name,
+                            "name": song.name,
+                            "catalog_id": song.catalog_id,
+                        })
+
+            if songs_without_tags:
+                logger.info(
+                    "User %s: %d songs missing Last.fm tags, backfilling...",
+                    user_id[:8], len(songs_without_tags),
+                )
+                await _enrich_lastfm(
+                    engine, songs_without_tags,
+                    api_key=settings.lastfm_api_key,
+                )
+                stats["tags"] += len(songs_without_tags)
+
+        # ── MusicBrainz credits backfill ──────────────────────
+        songs_without_credits: list[dict[str, Any]] = []
+        async with engine.begin() as conn:
+            from musicmind.db.schema import kg_relationships
+
+            for song in songs:
+                isrc = song.isrc
+                if not isrc:
+                    continue
+                source_mbid = f"isrc:{isrc.upper()}"
+                existing = await conn.execute(
+                    sa.select(kg_relationships.c.id).where(
+                        kg_relationships.c.source_mbid == source_mbid
+                    ).limit(1)
+                )
+                if not existing.first():
+                    songs_without_credits.append({
+                        "isrc": isrc,
+                        "catalog_id": song.catalog_id,
+                    })
+
+        if songs_without_credits:
+            logger.info(
+                "User %s: %d songs missing MusicBrainz credits, backfilling...",
+                user_id[:8], len(songs_without_credits),
+            )
+            await _enrich_musicbrainz_credits(engine, songs_without_credits)
+            stats["credits"] += len(songs_without_credits)
+
+        # ── Lyrics embeddings backfill ────────────────────────
+        songs_without_lyrics: list[dict[str, Any]] = []
+        async with engine.begin() as conn:
+            for song in songs:
+                if not song.artist_name or not song.name:
+                    continue
+                existing = await conn.execute(
+                    sa.select(audio_embeddings.c.catalog_id).where(
+                        sa.and_(
+                            audio_embeddings.c.catalog_id == song.catalog_id,
+                            audio_embeddings.c.user_id == user_id,
+                            audio_embeddings.c.model_version == "lyrics-minilm-v2",
+                        )
+                    )
+                )
+                if not existing.first():
+                    songs_without_lyrics.append({
+                        "artist_name": song.artist_name,
+                        "name": song.name,
+                        "catalog_id": song.catalog_id,
+                        "isrc": song.isrc or "",
+                    })
+
+        if songs_without_lyrics:
+            logger.info(
+                "User %s: %d songs missing lyrics embeddings, backfilling...",
+                user_id[:8], len(songs_without_lyrics),
+            )
+            await _enrich_lyrics(engine, songs_without_lyrics, user_id=user_id)
+            stats["lyrics"] += len(songs_without_lyrics)
 
     return stats
 
