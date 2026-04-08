@@ -480,6 +480,9 @@ async def _process_user(
             + enrich_result.get("soundstat", 0)
         )
 
+        # MusicBrainz credits: producers, songwriters (knowledge graph)
+        await _enrich_musicbrainz_credits(engine, tracks_to_enrich)
+
         # Last.fm enrichment: tags + similar tracks (collaborative filtering)
         if settings.lastfm_api_key:
             await _enrich_lastfm(
@@ -498,6 +501,32 @@ async def _process_user(
         logger.info("User %s: all tracks already enriched", user_id[:8])
 
     return stats
+
+
+# ── MusicBrainz Credits Enrichment ─────────────────────────────────────────
+
+
+async def _enrich_musicbrainz_credits(
+    engine,
+    tracks: list[dict[str, Any]],
+) -> None:
+    """Fetch producer/songwriter credits from MusicBrainz for tracks with ISRCs."""
+    from musicmind.engine.enrichment.musicbrainz_credits import fetch_recording_credits
+
+    enriched = 0
+    for track in tracks:
+        isrc = track.get("isrc", "")
+        if not isrc:
+            continue
+        try:
+            credits = await fetch_recording_credits(isrc, engine=engine)
+            if credits:
+                enriched += 1
+        except Exception:
+            pass  # MusicBrainz is best-effort, don't block on failures
+
+    if enriched > 0:
+        logger.info("MusicBrainz credits: %d tracks enriched with producer data", enriched)
 
 
 # ── Last.fm Enrichment ────────────────────────────────────────────────────
