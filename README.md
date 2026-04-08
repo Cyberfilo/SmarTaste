@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.200-8b5cf6?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-5.000-8b5cf6?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=nextdotjs&logoColor=white" alt="Next.js">
   <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
@@ -36,47 +36,54 @@
 │  Frontend (Vercel)                                          │
 │  Next.js 16 · React 19 · Tailwind 4 · shadcn/ui            │
 │  TanStack Query · Zustand · Recharts · SSE streaming        │
-│  Synesthesia theme (deep purple / electric violet / cream)  │
 └────────────────────────┬────────────────────────────────────┘
-                         │ REST + SSE (proxied via Next.js)
+                         │ REST + SSE
 ┌────────────────────────┴────────────────────────────────────┐
 │  Backend (Railway)                                          │
 │  FastAPI · SQLAlchemy Core · asyncpg · Alembic · Pydantic   │
 │                                                             │
-│  ┌─── API Layer (13 routers, 57 endpoints) ──────────────┐  │
+│  ┌─── API Layer (13 routers) ────────────────────────────┐  │
 │  │ Auth · Taste · Stats · Recommendations · Playlists     │  │
-│  │ Chat · Services · Calibration · Claude/OpenAI BYOK     │  │
-│  │ Tracks · Session · Admin (10 endpoints)                │  │
+│  │ Chat · Services · Calibration · Admin · Tracks         │  │
+│  └────────────────────────────────────────────────────────┘  │
+│  ┌─── Indexer (per-user, prioritized) ───────────────────┐  │
+│  │ 1. Library songs → 100% enriched                       │  │
+│  │ 2. Top artist → 100% discography                       │  │
+│  │ 3. 2nd artist → 70% · 3rd → 50% · rest → 30%          │  │
+│  │ 4. Suggested artists (40% of library count) → 50%      │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌─── Engine Layer ──────────────────────────────────────┐   │
 │  │ 6-dim Scorer (genre/tags/collab/audio/artist/language) │  │
-│  │ Profile Builder · Featuring Artist Parser              │  │
-│  │ Discovery Strategies · Mood Filter · Adaptive Weights  │  │
-│  │ ISRC Dedup · Genre Normalizer · Similarity             │  │
-│  └────────────────────────────────────────────────────────┘  │
-│  ┌─── Enrichment Pipeline (4 stages) ────────────────────┐   │
-│  │ 1. Deezer + ReccoBeats → 9 audio features (free)      │  │
-│  │ 2. Last.fm → crowd-sourced tags + similar tracks       │  │
-│  │ 3. MusicBrainz → producer/songwriter credits (ISRC)    │  │
-│  │ 4. Genius → lyrics scrape + MiniLM embedding (384-dim) │  │
-│  │ + SoundStat (optional paid) · AcousticBrainz (bulk)    │  │
+│  │ Profile Builder · Adaptive Weights · Mood Filter       │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌─── Data Layer ────────────────────────────────────────┐   │
-│  │ PostgreSQL 16 · 26 tables · user-scoped · encrypted    │  │
+│  │ PostgreSQL 16 · 29 tables · user-scoped + global       │  │
 │  │ + Logging DB (3 tables: requests, enrichment, errors)  │  │
 │  └────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
          ↕                    ↕                    ↕
    Spotify API          Apple Music API      Anthropic/OpenAI
-   (OAuth PKCE)         (MusicKit JS)        (BYOK keys)
 
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Worker       │  │  Admin       │  │  NocoDB      │
-│  (Railway)    │  │  (Railway)   │  │  (Railway)   │
-│  Enrichment   │  │  Dashboard   │  │  DB browser  │
-│  standalone   │  │  standalone  │  │  UI          │
-└──────────────┘  └──────────────┘  └──────────────┘
+┌──────────────────┐  ┌──────────────┐  ┌──────────────┐
+│  Worker (Railway)  │  │  Admin       │  │  NocoDB      │
+│  Artist cobweb     │  │  Dashboard   │  │  DB browser  │
+│  Global enrichment │  │  (standalone)│  │  (standalone) │
+│  No user_id        │  └──────────────┘  └──────────────┘
+│  Top 50 per artist │
+└──────────────────┘
 ```
+
+### Two Enrichment Systems
+
+| | **Indexer** (per-user) | **Worker** (global) |
+|---|---|---|
+| **Runs in** | Backend (background task) | Separate Railway service |
+| **Triggered by** | Service connection, manual | Always running |
+| **Stores in** | `song_metadata_cache` + `audio_features_cache` (user-scoped) | `global_song_cache` + `audio_features_global` (no user_id) |
+| **Artist selection** | Library artists ranked by play count/calibration | Artist cobweb (feats, similar, genre overlap) |
+| **Depth** | 100% → 70% → 50% → 30% (decreasing by rank) | Top 50 per artist |
+| **Suggested cap** | `library_artists * 0.4` new artists | Same cap on cobweb |
+| **Dashboard** | Per-user enrichment section | Worker status section |
 
 ## Recommendation Engine
 
@@ -97,20 +104,18 @@ Unused dimensions redistributed proportionally — graceful degradation when Las
 
 **Play count proxy** for Apple Music (no play counts in API): tracks `seen_count` from recently-played polling, songs played recently get up to 10x weight in profile building.
 
-## Enrichment Pipeline
+## Enrichment Pipeline (3 stages)
 
-Runs automatically via the standalone worker when a user connects a service:
+Shared by both indexer and worker. Each stage checks cache before making API calls — no duplicate requests.
 
 | Stage | Source | What it provides | Cost |
 |-------|--------|-----------------|------|
 | 1 | **Deezer + ReccoBeats** | 30s preview MP3 + 9 audio features (tempo, energy, danceability, acousticness, valence, brightness, beat strength, instrumentalness, loudness) | Free |
 | 2 | **Last.fm** | Crowd-sourced tags (mood/vibe/genre vectors) + track.getSimilar (collaborative filtering) | Free (API key required) |
 | 3 | **MusicBrainz** | Producer, songwriter, mixer, engineer credits via ISRC → MBID lookup | Free |
-| 4 | **Genius** | Lyrics scrape + 384-dim MiniLM-L6-v2 embedding for semantic similarity | Free |
 | opt | **SoundStat** | Spotify ID → complete features + key/scale | 0.01 EUR/track |
-| opt | **AcousticBrainz** | Bulk-imported mood/genre probabilities (CC0 dump) | Free (local import) |
 
-Global ISRC cache: audio features enriched once per song, shared across all users.
+Global ISRC cache (`audio_features_global`): features enriched once per song, shared across all users. Worker writes here directly; indexer writes to both per-user and global caches.
 
 ## Quick Start
 
@@ -290,7 +295,7 @@ smartaste/
 │   │   │   ├── weights.py          # Context-adaptive weight computation
 │   │   │   ├── mood.py             # Mood filtering (8 profiles)
 │   │   │   ├── audio/              # On-demand Essentia + cache layer
-│   │   │   ├── enrichment/         # 4-stage pipeline
+│   │   │   ├── enrichment/         # 3-stage pipeline (shared by indexer + worker)
 │   │   │   │   ├── orchestrator.py # Deezer → ReccoBeats → SoundStat cascade
 │   │   │   │   ├── lastfm.py       # Tags + similar tracks (collaborative)
 │   │   │   │   ├── musicbrainz_credits.py  # Producer/songwriter credits
@@ -299,10 +304,11 @@ smartaste/
 │   │   │   │   └── ...             # deezer.py, reccobeats.py, soundstat.py, musicbrainz.py
 │   │   │   └── ...                 # genres.py, dedup.py, similarity.py, session.py
 │   │   ├── db/
-│   │   │   ├── schema.py           # 26-table SQLAlchemy Core schema
+│   │   │   ├── schema.py           # 29-table SQLAlchemy Core schema
 │   │   │   └── logs.py             # 3-table logging DB + batched async writer
 │   │   ├── security/               # Fernet encryption
-│   │   └── worker.py               # Standalone enrichment worker
+│   │   ├── indexer.py              # Per-user prioritized enrichment (6-step pipeline)
+│   │   └── worker.py               # Global artist cobweb enrichment (no user_id)
 │   ├── alembic/                    # 21 database migrations
 │   ├── tests/                      # 92 tests
 │   └── pyproject.toml

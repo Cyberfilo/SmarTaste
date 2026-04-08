@@ -95,6 +95,74 @@ async def enrich_tracks(
     return stats
 
 
+async def enrich_tracks_global(
+    engine: Any,
+    tracks: list[dict[str, Any]],
+    *,
+    soundstat_api_key: str | None = None,
+) -> dict[str, int]:
+    """Enrich tracks and store ONLY in audio_features_global (by ISRC).
+
+    Used by the worker for global enrichment — no per-user audio_features_cache.
+    Skips tracks without ISRC (can't store globally without it).
+    Reuses the same Deezer → ReccoBeats pipeline but only writes globally.
+    """
+    stats = {"enriched": 0, "skipped": 0, "failed": 0, "total": len(tracks)}
+
+    for track in tracks:
+        isrc = track.get("isrc", "")
+        if not isrc:
+            stats["skipped"] += 1
+            continue
+
+        # Check if already globally enriched
+        existing = await _get_global_features(engine, isrc)
+        if existing and existing.get("energy") is not None:
+            stats["skipped"] += 1
+            continue
+
+        name = track.get("name", "")
+        artist_name = track.get("artist_name", "")
+        features: dict[str, Any] = {}
+        feature_source: dict[str, str] = {}
+
+        # Stage 1: Deezer
+        preview_url = None
+        if name and artist_name:
+            try:
+                deezer_result = await fetch_deezer_features(
+                    name=name, artist_name=artist_name,
+                )
+                if deezer_result:
+                    preview_url = deezer_result.pop("preview_url", None)
+                    deezer_result.pop("deezer_id", None)
+                    _merge_features(features, feature_source, deezer_result, "deezer")
+            except Exception:
+                pass
+
+        # Stage 2: ReccoBeats
+        if preview_url:
+            try:
+                audio_bytes = await _download_preview(preview_url)
+                if audio_bytes:
+                    recco_result = await _reccobeats_with_retry(audio_bytes)
+                    del audio_bytes
+                    if recco_result:
+                        _merge_features(
+                            features, feature_source, recco_result, "reccobeats",
+                        )
+            except Exception:
+                pass
+
+        if features and any(v is not None for v in features.values()):
+            await _store_global_features(engine, isrc, features, feature_source)
+            stats["enriched"] += 1
+        else:
+            stats["failed"] += 1
+
+    return stats
+
+
 async def enrich_candidates(
     engine: Any,
     candidates: list[dict[str, Any]],

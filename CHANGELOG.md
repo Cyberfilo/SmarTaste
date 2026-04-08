@@ -7,6 +7,49 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.000 — 2026-04-08
+
+### Architecture Split — Indexer vs Worker
+
+Major refactor separating enrichment into two independent systems:
+
+#### Per-User Indexer (`indexer.py` — NEW)
+Backend-managed, prioritized, user-scoped enrichment pipeline:
+1. **Library songs** — enrich all songs in the user's library (100%)
+2. **Top artist** — 100% discography enriched
+3. **2nd artist** — 70% discography
+4. **3rd artist** — 50% discography
+5. **Other library artists** — 30% discography each
+6. **Suggested artists** — `library_artists * 0.4` new artists from feats + similar tracks, 50% discography
+
+Artists ranked by calibration weight then play frequency. All results stored with user_id in per-user tables.
+
+#### Global Worker (`worker.py` — REWRITE)
+Standalone Railway service, always running, global enrichment:
+- Builds **artist cobweb** per user (from feats, Last.fm similar, genre overlap)
+- Enriches each cobweb artist's **top 50 songs** globally — no user_id
+- Stores in `global_song_cache` + `audio_features_global` (ISRC-keyed)
+- Promotes featured artists who appear alongside library artists
+- Caps discovered artists at `library_artists * 0.4` per user
+- Results available to ALL users for recommendation scoring
+
+#### New Tables (migration 017)
+- `user_indexing_status` — tracks per-user indexing step/progress
+- `artist_cobweb` — per-user artist network (source, priority, enriched status)
+- `global_song_cache` — worker-discovered songs without user_id
+
+#### Enrichment Pipeline
+- Now **3 stages** (lyrics embeddings removed): audio features → Last.fm tags → MusicBrainz credits
+- New `enrich_tracks_global()` in orchestrator — writes only to `audio_features_global`, skips per-user cache
+- Both systems check caches before API calls — no duplicate requests
+
+#### Admin Dashboard
+- Per-user progress shows indexing step indicator + cobweb stats
+- Worker status shows global cobweb building phase
+- "Discography" label replaces "Worker" in per-user breakdown
+
+---
+
 ## V 4.200 — 2026-04-08
 
 ### Added — Worker Heartbeat

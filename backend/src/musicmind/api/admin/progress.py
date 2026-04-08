@@ -16,10 +16,12 @@ from typing import Any
 import sqlalchemy as sa
 
 from musicmind.db.schema import (
+    artist_cobweb,
     audio_features_cache,
     kg_relationships,
     lastfm_tags_cache,
     song_metadata_cache,
+    user_indexing_status,
     users,
 )
 
@@ -122,6 +124,39 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
 
             worker_songs = total_songs - library_songs
 
+            # Indexing status
+            idx_q = await conn.execute(
+                sa.select(user_indexing_status).where(
+                    user_indexing_status.c.user_id == user.id
+                )
+            )
+            idx_row = idx_q.first()
+            indexing = None
+            if idx_row:
+                indexing = {
+                    "step": idx_row.step,
+                    "step_name": idx_row.step_name,
+                    "progress_current": idx_row.progress_current,
+                    "progress_total": idx_row.progress_total,
+                }
+
+            # Cobweb stats
+            cobweb_q = await conn.execute(
+                sa.select(sa.func.count()).select_from(artist_cobweb).where(
+                    artist_cobweb.c.user_id == user.id
+                )
+            )
+            cobweb_total = cobweb_q.scalar() or 0
+            cobweb_enriched_q = await conn.execute(
+                sa.select(sa.func.count()).select_from(artist_cobweb).where(
+                    sa.and_(
+                        artist_cobweb.c.user_id == user.id,
+                        artist_cobweb.c.enriched == sa.true(),
+                    )
+                )
+            )
+            cobweb_enriched = cobweb_enriched_q.scalar() or 0
+
             progress.append({
                 "user_id": user.id,
                 "email": user.email,
@@ -134,6 +169,9 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
                 "discovered_artists": discovered_artists,
                 "unique_artists": unique_artists,
                 "orphan_features": orphan_count,
+                "indexing": indexing,
+                "cobweb_total": cobweb_total,
+                "cobweb_enriched": cobweb_enriched,
                 "percentage": round(
                     min(enriched / total_songs, 1.0) * 100, 1
                 ) if total_songs > 0 else 0,
