@@ -2,10 +2,12 @@
 
 /**
  * TanStack Query provider for server state management.
+ * Global error handling for mutations via onError callback.
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, MutationCache } from "@tanstack/react-query";
 import { useState } from "react";
+import { toast } from "sonner";
 
 export function QueryProvider({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(
@@ -17,6 +19,14 @@ export function QueryProvider({ children }: { children: React.ReactNode }) {
             retry: 1,
           },
         },
+        mutationCache: new MutationCache({
+          onError: (error) => {
+            // Global fallback toast for mutations that don't handle their own errors
+            if (error.message && !error.message.includes("Session expired")) {
+              toast.error(error.message);
+            }
+          },
+        }),
       }),
   );
 

@@ -12,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from starlette.middleware.sessions import SessionMiddleware
 
 from musicmind import __version__
+from musicmind.api.middleware import RequestLoggingMiddleware
 from musicmind.api.rate_limit import limiter
 from musicmind.api.router import api_router
 from musicmind.config import Settings
@@ -44,6 +45,9 @@ app = FastAPI(title="SmarTaste", version=__version__, lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(api_router)
+
+# Request logging — every request logged with timing, status, user_id
+app.add_middleware(RequestLoggingMiddleware)
 
 # CORS — allow frontend origins to make credentialed requests
 # Default localhost origins + any extra from MUSICMIND_CORS_ORIGINS env var

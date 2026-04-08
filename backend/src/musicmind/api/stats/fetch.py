@@ -65,7 +65,7 @@ async def fetch_spotify_top_tracks_for_period(
     headers = {"Authorization": f"Bearer {access_token}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             while offset < limit:
                 page_size = min(50, limit - offset)
                 resp = await client.get(
@@ -149,7 +149,7 @@ async def fetch_spotify_top_artists_for_period(
     headers = {"Authorization": f"Bearer {access_token}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             while offset < limit:
                 page_size = min(50, limit - offset)
                 resp = await client.get(

@@ -15,6 +15,7 @@ from musicmind.api.calibration.schemas import (
     SaveCalibrationRequest,
 )
 from musicmind.api.calibration.service import CalibrationService
+from musicmind.api.rate_limit import CALIBRATION_LIMIT, limiter
 from musicmind.auth.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ async def get_artists(
 
 
 @router.post("/save")
+@limiter.limit(CALIBRATION_LIMIT)
 async def save_calibration(
     request: Request,
     body: SaveCalibrationRequest,
