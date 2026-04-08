@@ -516,6 +516,31 @@ lastfm_tags_cache = sa.Table(
     sa.PrimaryKeyConstraint("entity_type", "entity_id"),
 )
 
+acousticbrainz_cache = sa.Table(
+    "acousticbrainz_cache",
+    metadata,
+    sa.Column("mbid", sa.Text, primary_key=True),
+    # High-level descriptors (probabilities 0-1)
+    sa.Column("mood_aggressive", sa.Float, nullable=True),
+    sa.Column("mood_happy", sa.Float, nullable=True),
+    sa.Column("mood_relaxed", sa.Float, nullable=True),
+    sa.Column("mood_sad", sa.Float, nullable=True),
+    sa.Column("mood_party", sa.Float, nullable=True),
+    sa.Column("mood_electronic", sa.Float, nullable=True),
+    sa.Column("mood_acoustic", sa.Float, nullable=True),
+    sa.Column("danceability", sa.Float, nullable=True),
+    sa.Column("gender", sa.Text, nullable=True),  # male/female
+    sa.Column("voice_instrumental", sa.Text, nullable=True),  # voice/instrumental
+    sa.Column("tonal_atonal", sa.Text, nullable=True),
+    # Genre probabilities (top 3 as JSON: {"electronic": 0.8, "rock": 0.15})
+    sa.Column("genre_probabilities", sa.JSON, server_default="{}"),
+    # Low-level summary
+    sa.Column("average_loudness", sa.Float, nullable=True),
+    sa.Column("bpm", sa.Float, nullable=True),
+    sa.Column("key", sa.Text, nullable=True),
+    sa.Column("scale", sa.Text, nullable=True),
+)
+
 lastfm_similar_tracks = sa.Table(
     "lastfm_similar_tracks",
     metadata,
