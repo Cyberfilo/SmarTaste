@@ -8,9 +8,9 @@
 
 # SmarTaste <sup><sub>formerly MusicMind</sub></sup>
 
-> Your music, understood. A music discovery platform that connects to Spotify and Apple Music, analyzes your actual listening data, and delivers genuinely personalized recommendations — powered by language-aware scoring, real audio analysis, and conversational AI.
+> Your music, understood. A music discovery platform that connects to Spotify and Apple Music, analyzes your actual listening data, and delivers genuinely personalized recommendations — powered by a 6-dimension scoring engine, 4-stage audio/metadata enrichment pipeline, and conversational AI.
 
-**Live:** [music.menghi.dev](https://music.menghi.dev) · **Docs:** [`what.md`](what.md) · *Previously known as MusicMind*
+**Live:** [music.menghi.dev](https://music.menghi.dev) &middot; **Admin:** [admin.music.menghi.dev](https://admin.music.menghi.dev) &middot; **DB Browser:** [dbmanager.music.menghi.dev](https://dbmanager.music.menghi.dev)
 
 ---
 
@@ -18,16 +18,16 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Taste Profile** | Your musical DNA — top genres (with regional specificity), artists with featuring detection, audio traits, familiarity score |
-| **Smart Recommendations** | Language-first scoring (Italian Hip-Hop ≠ generic Hip-Hop) + audio similarity from Deezer/ReccoBeats analysis |
-| **Playlists** | Browse your real Apple Music / Spotify playlists with per-playlist recommendations |
+| **Taste Profile** | Your musical DNA — top genres (with regional specificity like "Italian Hip-Hop/Rap"), artists with featuring detection, audio traits, familiarity score |
+| **6-Dim Recommendations** | Genre + Last.fm tags + collaborative filtering + audio similarity + artist affinity + language/region — context-adaptive weights shift per user |
+| **4-Stage Enrichment** | Automatic pipeline: Deezer/ReccoBeats audio features, Last.fm crowd-sourced tags, MusicBrainz producer credits, Genius lyrics embeddings |
 | **Taste Calibration** | 3-step onboarding wizard: pick playlists, rank artists (drag-to-reorder), pick favorite songs — compensates for Apple Music's missing play counts |
-| **Audio Enrichment** | Automatic: Deezer preview → ReccoBeats analysis → 9 audio features per track (free, no auth) |
-| **AI Chat** | Ask Claude or GPT about your taste, get recommendations by description, explore music conversationally |
-| **Listening Timeline** | Chronological song view with date labels — critical for Apple Music's limited API |
+| **AI Chat** | Ask Claude or GPT about your taste, get recommendations by description, explore music conversationally (BYOK — bring your own API key) |
+| **Playlists** | Browse your real Apple Music / Spotify playlists with per-playlist recommendations |
+| **Listening Timeline** | Chronological song view with date labels |
 | **Multi-Service** | Connect Spotify and/or Apple Music — unified profiles with ISRC dedup and genre normalization |
-| **Admin Panel** | Live SSE log stream, enrichment progress bars, system status (admin users only) |
-| **BYOK** | Users bring their own Claude or OpenAI API keys — no shared billing |
+| **Admin Dashboard** | Standalone service with live SSE log stream, enrichment pipeline breakdown, worker status, DB capacity, per-user progress |
+| **Background Worker** | Standalone enrichment worker: artist discography crawl, featuring artist parse, 4-stage pipeline, global ISRC cache |
 
 ## Architecture
 
@@ -43,65 +43,74 @@
 │  Backend (Railway)                                          │
 │  FastAPI · SQLAlchemy Core · asyncpg · Alembic · Pydantic   │
 │                                                             │
-│  ┌─── API Layer ──────────────────────────────────────────┐ │
-│  │ Auth · Taste · Stats · Recommendations · Playlists     │ │
-│  │ Chat · Services · Claude/OpenAI BYOK · Admin · Tracks  │ │
-│  └────────────────────────────────────────────────────────┘ │
-│  ┌─── Engine Layer ──────────────────────────────────────┐  │
+│  ┌─── API Layer (13 routers, 57 endpoints) ──────────────┐  │
+│  │ Auth · Taste · Stats · Recommendations · Playlists     │  │
+│  │ Chat · Services · Calibration · Claude/OpenAI BYOK     │  │
+│  │ Tracks · Session · Admin (10 endpoints)                │  │
+│  └────────────────────────────────────────────────────────┘  │
+│  ┌─── Engine Layer ──────────────────────────────────────┐   │
 │  │ 6-dim Scorer (genre/tags/collab/audio/artist/language) │  │
-│  │ Profile Builder · Featuring Artist Parser             │  │
-│  │ Discovery Strategies · Mood Filter · Adaptive Weights │  │
-│  │ ISRC Dedup · Genre Normalizer · Similarity            │  │
-│  └────────────────────────────────────────────────────────┘ │
-│  ┌─── Enrichment Pipeline ───────────────────────────────┐  │
-│  │ Deezer (search → preview URL + BPM, free)             │  │
-│  │ ReccoBeats (upload preview → 9 audio features, free)  │  │
-│  │ SoundStat (Spotify ID → complete features, paid)      │  │
-│  │ MusicBrainz (ISRC → Spotify ID resolver)              │  │
-│  │ Batch processing (5/batch) · Rate limit backoff       │  │
-│  └────────────────────────────────────────────────────────┘ │
-│  ┌─── Data Layer ────────────────────────────────────────┐  │
-│  │ PostgreSQL 16 · 23 tables · user-scoped · encrypted   │  │
-│  │ + Separate logging DB (request/enrichment/error logs) │  │
-│  └────────────────────────────────────────────────────────┘ │
+│  │ Profile Builder · Featuring Artist Parser              │  │
+│  │ Discovery Strategies · Mood Filter · Adaptive Weights  │  │
+│  │ ISRC Dedup · Genre Normalizer · Similarity             │  │
+│  └────────────────────────────────────────────────────────┘  │
+│  ┌─── Enrichment Pipeline (4 stages) ────────────────────┐   │
+│  │ 1. Deezer + ReccoBeats → 9 audio features (free)      │  │
+│  │ 2. Last.fm → crowd-sourced tags + similar tracks       │  │
+│  │ 3. MusicBrainz → producer/songwriter credits (ISRC)    │  │
+│  │ 4. Genius → lyrics scrape + MiniLM embedding (384-dim) │  │
+│  │ + SoundStat (optional paid) · AcousticBrainz (bulk)    │  │
+│  └────────────────────────────────────────────────────────┘  │
+│  ┌─── Data Layer ────────────────────────────────────────┐   │
+│  │ PostgreSQL 16 · 26 tables · user-scoped · encrypted    │  │
+│  │ + Logging DB (3 tables: requests, enrichment, errors)  │  │
+│  └────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
          ↕                    ↕                    ↕
    Spotify API          Apple Music API      Anthropic/OpenAI
    (OAuth PKCE)         (MusicKit JS)        (BYOK keys)
 
-         ↕                    ↕
-   smartaste-logs         NocoDB
-   (PostgreSQL)           (Admin UI)
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│  Worker       │  │  Admin       │  │  NocoDB      │
+│  (Railway)    │  │  (Railway)   │  │  (Railway)   │
+│  Enrichment   │  │  Dashboard   │  │  DB browser  │
+│  standalone   │  │  standalone  │  │  UI          │
+└──────────────┘  └──────────────┘  └──────────────┘
 ```
 
 ## Recommendation Engine
 
-**Context-adaptive weights** — shift based on user profile characteristics:
+**6-dimension context-adaptive scorer** — weights shift based on user profile characteristics:
 
-| Dimension | Default | Adaptive Range | How it works |
-|-----------|---------|----------------|-------------|
-| Genre match | **35%** | 25-45% | Cosine similarity with regional prioritization |
-| Audio similarity | **25%** | 20-40% | Feature similarity from enriched audio; dominant when mood active |
-| Artist affinity | **20%** | 15-25% | Calibration-aware; boosted when onboarding complete |
-| Language/Region | **20%** | 5-35% | Regional match; high for Italian-only listeners, near-zero for global |
+| Dimension | Default | Adaptive Triggers | Source |
+|-----------|---------|-------------------|--------|
+| Genre match | **25%** | +10% if regional concentration >60% | Cosine similarity with regional prioritization (Italian Hip-Hop/Rap at 1.0, parent Hip-Hop/Rap at 0.3) |
+| Last.fm tags | **15%** | +10% in mood mode | Cosine between crowd-sourced tag vectors ("dark", "aggressive", "drill") |
+| Collaborative | **10%** | — | +0.20 boost when candidate in Last.fm `track.getSimilar` (billions of scrobbles) |
+| Audio similarity | **20%** | Dominant at 40% in mood mode | Feature distance from enriched audio (energy, danceability, tempo, valence, etc.) |
+| Artist affinity | **15%** | +5% when calibration present | Library presence + calibration ranking + featuring parse |
+| Language/Region | **15%** | Near-zero if <20% one language | Regional genre prefix detection |
 
-Plus: calibration boost (+0.03 to +0.20 based on artist ranking), diversity penalty (MMR), staleness cooldown, cross-strategy bonus, mood filtering.
+Plus additive bonuses: calibration boost (+0.03 to +0.20 based on artist ranking, zeroed on genre mismatch), diversity penalty (MMR), staleness cooldown, collaborative match boost.
+
+Unused dimensions redistributed proportionally — graceful degradation when Last.fm or audio features are unavailable.
 
 **Play count proxy** for Apple Music (no play counts in API): tracks `seen_count` from recently-played polling, songs played recently get up to 10x weight in profile building.
 
-Per-playlist recommendations build a mini-profile from the playlist's songs only.
+## Enrichment Pipeline
 
-## Audio Enrichment Pipeline
+Runs automatically via the standalone worker when a user connects a service:
 
-Runs automatically when a user connects a service or visits the app:
+| Stage | Source | What it provides | Cost |
+|-------|--------|-----------------|------|
+| 1 | **Deezer + ReccoBeats** | 30s preview MP3 + 9 audio features (tempo, energy, danceability, acousticness, valence, brightness, beat strength, instrumentalness, loudness) | Free |
+| 2 | **Last.fm** | Crowd-sourced tags (mood/vibe/genre vectors) + track.getSimilar (collaborative filtering) | Free (API key required) |
+| 3 | **MusicBrainz** | Producer, songwriter, mixer, engineer credits via ISRC → MBID lookup | Free |
+| 4 | **Genius** | Lyrics scrape + 384-dim MiniLM-L6-v2 embedding for semantic similarity | Free |
+| opt | **SoundStat** | Spotify ID → complete features + key/scale | 0.01 EUR/track |
+| opt | **AcousticBrainz** | Bulk-imported mood/genre probabilities (CC0 dump) | Free (local import) |
 
-| Stage | API | What it does | Cost |
-|-------|-----|-------------|------|
-| 1 | **Deezer** | Search by title+artist → 30s preview MP3 + BPM | Free |
-| 2 | **ReccoBeats** | Upload preview → acousticness, danceability, energy, instrumentalness, liveness, loudness, speechiness, tempo, valence | Free |
-| 3 | **SoundStat** | Spotify ID → complete features + key/scale (optional) | 0.01 EUR/track |
-
-Batch processing: 5 tracks/batch, 1s delay between tracks, `gc.collect()` between batches. Per-field provenance tracking (feature_source JSON).
+Global ISRC cache: audio features enriched once per song, shared across all users.
 
 ## Quick Start
 
@@ -130,8 +139,11 @@ Open **http://localhost:3000** — sign up, explore the dashboard. Music service
 |-----------|----------|-------|
 | Frontend | **Vercel** | Import repo → auto-detects `rootDirectory: frontend` → set `NEXT_PUBLIC_API_URL` |
 | Backend | **Railway** | Add PostgreSQL service → add GitHub service (backend/) → set env vars |
+| Worker | **Railway** | Separate service from worker/ directory → same DATABASE_URL + FERNET_KEY |
+| Admin | **Railway** | Separate service from admin/ directory → set ADMIN_PASSWORD + ADMIN_SECRET + BACKEND_URL |
+| Logs DB | **Railway** | Second PostgreSQL instance → set MUSICMIND_LOGS_DATABASE_URL on backend + worker |
+| NocoDB | **Railway** | Docker image `nocodb/nocodb` → separate metadata PostgreSQL |
 | Migrations | Auto | Dockerfile runs `alembic upgrade head` on every deploy |
-| Secrets | Auto | Fernet + JWT keys auto-generated on first deploy if not set |
 
 ## Environment Variables
 
@@ -147,13 +159,30 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 | `MUSICMIND_SPOTIFY_CLIENT_SECRET` | — | Spotify OAuth client secret |
 | `MUSICMIND_APPLE_TEAM_ID` | — | Apple Developer Team ID |
 | `MUSICMIND_APPLE_KEY_ID` | — | MusicKit key ID |
-| `MUSICMIND_APPLE_PRIVATE_KEY_PATH` | — | Path to `.p8` key file |
+| `MUSICMIND_APPLE_PRIVATE_KEY_PATH` | — | Path to `.p8` key file (or `_B64` for base64) |
 | `MUSICMIND_LOGS_DATABASE_URL` | — | Separate PostgreSQL for request/enrichment/error logs |
+| `MUSICMIND_LASTFM_API_KEY` | — | Last.fm API key (free, enables tags + collaborative filtering) |
 | `MUSICMIND_SOUNDSTAT_API_KEY` | — | SoundStat API key for premium enrichment |
+| `MUSICMIND_ADMIN_SECRET` | — | Shared secret for admin dashboard → backend auth |
 
 *Auto-generated on first Docker deploy if not set.
 
-### NocoDB (admin data browser)
+### Worker
+| Variable | Description |
+|----------|-------------|
+| `WORKER_CONCURRENCY` | Tracks enriched in parallel (default 5) |
+| `WORKER_BATCH_SIZE` | Tracks per enrichment batch (default 50) |
+| `WORKER_POLL_INTERVAL` | Seconds between cycles (default 60) |
+| `WORKER_ARTIST_DEPTH` | Top songs per artist to fetch (default 25) |
+
+### Admin Dashboard
+| Variable | Description |
+|----------|-------------|
+| `ADMIN_PASSWORD` | Login password for admin UI |
+| `ADMIN_SECRET` | Shared secret sent as `X-Admin-Secret` header to backend |
+| `BACKEND_URL` | Backend URL to proxy API requests to |
+
+### NocoDB
 | Variable | Description |
 |----------|-------------|
 | `NC_DB` | Internal PostgreSQL URL for NocoDB metadata storage |
@@ -161,7 +190,7 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 | `NC_PUBLIC_URL` | Public URL (set after generating Railway domain) |
 
 <details>
-<summary><b>Full API endpoint list</b></summary>
+<summary><b>Full API endpoint list (57 endpoints)</b></summary>
 
 ### Auth
 | Method | Endpoint | Description |
@@ -175,10 +204,11 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 ### Taste Profile
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/taste/profile` | Full taste profile |
+| GET | `/api/taste/profile` | Full taste profile (stale-while-revalidate) |
 | GET | `/api/taste/genres` | Top genres |
 | GET | `/api/taste/artists` | Top artists (with featuring detection) |
 | GET | `/api/taste/audio-traits` | Audio preferences |
+| GET | `/api/taste/enrichment-status` | Library enrichment progress (library songs only) |
 
 ### Listening Stats
 | Method | Endpoint | Description |
@@ -193,7 +223,7 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 |--------|----------|-------------|
 | GET | `/api/recommendations?strategy=all` | Get scored recommendations |
 | POST | `/api/recommendations/{id}/feedback` | Thumbs up/down |
-| GET | `/api/recommendations/{id}/breakdown` | 4-dim score breakdown |
+| GET | `/api/recommendations/{id}/breakdown` | 6-dimension score breakdown |
 
 ### Playlists
 | Method | Endpoint | Description |
@@ -201,6 +231,15 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 | GET | `/api/playlists` | User's service playlists |
 | GET | `/api/playlists/{id}/tracks?service=` | Playlist tracks |
 | GET | `/api/playlists/{id}/recommendations?service=` | Per-playlist suggestions |
+
+### Calibration
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/calibration/albums` | User's playlists for calibration |
+| GET | `/api/calibration/artists` | User's artists for ranking |
+| POST | `/api/calibration/save` | Save calibration selections |
+| GET | `/api/calibration/status` | Calibration completion status |
+| GET | `/api/calibration/entries` | Current calibration entries |
 
 ### Tracks
 | Method | Endpoint | Description |
@@ -216,13 +255,19 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 | GET | `/api/chat/conversations/{id}` | Load conversation |
 | DELETE | `/api/chat/conversations/{id}` | Delete conversation |
 
-### Admin (requires is_admin)
+### Admin (requires `X-Admin-Secret` or `is_admin`)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/admin/logs` | Recent log entries |
+| GET | `/api/admin/logs` | Recent log entries (from memory buffer) |
 | GET | `/api/admin/logs/stream` | Live SSE log stream |
 | GET | `/api/admin/progress` | Per-user enrichment progress |
 | GET | `/api/admin/status` | System health summary |
+| GET | `/api/admin/errors` | Recent 500 errors from logs DB |
+| GET | `/api/admin/request-stats` | Requests/errors/slow today |
+| GET | `/api/admin/recent-songs` | Latest cached songs with enrichment status |
+| GET | `/api/admin/enrichment-breakdown` | Pipeline-level: unenriched / partial / fully enriched |
+| GET | `/api/admin/db-capacity` | Database size usage (main + logs) |
+| GET | `/api/admin/worker-status` | Worker activity from enrichment_logs |
 
 </details>
 
@@ -232,34 +277,55 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 smartaste/
 ├── backend/
 │   ├── src/musicmind/
-│   │   ├── api/                  # REST endpoints (10 domains)
-│   │   │   ├── admin/            # Live logs, progress, status
-│   │   │   ├── playlists/        # Service playlist fetching
-│   │   │   └── ...               # Auth, taste, stats, recs, chat, etc.
-│   │   ├── auth/                 # JWT + bcrypt auth + admin roles
+│   │   ├── api/                    # REST endpoints (13 routers)
+│   │   │   ├── admin/              # Live logs, progress, status, worker, capacity
+│   │   │   ├── calibration/        # Onboarding wizard API
+│   │   │   ├── playlists/          # Service playlist fetching
+│   │   │   ├── chat/               # Claude/GPT conversation + SSE
+│   │   │   └── ...                 # Auth, taste, stats, recs, tracks, services, session
+│   │   ├── auth/                   # JWT + bcrypt auth + admin roles
 │   │   ├── engine/
-│   │   │   ├── scorer.py         # 4-dimension scoring (language-first)
-│   │   │   ├── profile.py        # Taste profile + featuring artist parser
-│   │   │   ├── enrichment/       # Deezer → ReccoBeats → SoundStat pipeline
-│   │   │   ├── audio/            # On-demand Essentia + cache layer
-│   │   │   ├── mood.py           # Mood filtering (8 profiles)
-│   │   │   └── ...               # Weights, genres, dedup, similarity
-│   │   ├── db/                   # 23-table SQLAlchemy Core schema + logs DB
-│   │   └── security/             # Fernet encryption
-│   ├── alembic/                  # 11 database migrations
-│   ├── tests/                    # 370+ tests
+│   │   │   ├── scorer.py           # 6-dimension scoring (context-adaptive)
+│   │   │   ├── profile.py          # Taste profile + featuring artist parser
+│   │   │   ├── weights.py          # Context-adaptive weight computation
+│   │   │   ├── mood.py             # Mood filtering (8 profiles)
+│   │   │   ├── audio/              # On-demand Essentia + cache layer
+│   │   │   ├── enrichment/         # 4-stage pipeline
+│   │   │   │   ├── orchestrator.py # Deezer → ReccoBeats → SoundStat cascade
+│   │   │   │   ├── lastfm.py       # Tags + similar tracks (collaborative)
+│   │   │   │   ├── musicbrainz_credits.py  # Producer/songwriter credits
+│   │   │   │   ├── genius.py       # Lyrics scrape + MiniLM embedding
+│   │   │   │   ├── acousticbrainz.py       # Bulk mood/genre features
+│   │   │   │   └── ...             # deezer.py, reccobeats.py, soundstat.py, musicbrainz.py
+│   │   │   └── ...                 # genres.py, dedup.py, similarity.py, session.py
+│   │   ├── db/
+│   │   │   ├── schema.py           # 26-table SQLAlchemy Core schema
+│   │   │   └── logs.py             # 3-table logging DB + batched async writer
+│   │   ├── security/               # Fernet encryption
+│   │   └── worker.py               # Standalone enrichment worker
+│   ├── alembic/                    # 21 database migrations
+│   ├── tests/                      # 92 tests
 │   └── pyproject.toml
 ├── frontend/
 │   ├── src/
-│   │   ├── app/                  # Pages: dashboard, recommendations, playlists, chat, settings
-│   │   ├── components/           # shadcn/ui + admin panel + charts
-│   │   ├── hooks/                # TanStack Query hooks
-│   │   ├── stores/               # Zustand auth store (with is_admin)
-│   │   └── lib/                  # API client, SSE, utils
+│   │   ├── app/                    # Pages: dashboard, recommendations, playlists, chat, settings, onboarding
+│   │   ├── components/             # 34 components (shadcn/ui + charts + calibration wizard)
+│   │   ├── hooks/                  # 10 TanStack Query hooks
+│   │   ├── stores/                 # Zustand auth store
+│   │   └── lib/                    # API client, SSE parser, utils
 │   └── package.json
-├── VERSION                       # Single source of truth
+├── admin/                          # Standalone admin dashboard (FastAPI + static HTML)
+│   ├── app.py                      # Password auth + API proxy + SSE streaming proxy
+│   ├── templates/                  # dashboard.html, login.html
+│   └── Dockerfile
+├── worker/                         # Standalone enrichment worker (Docker wrapper)
+│   ├── enrichment_worker.py
+│   └── Dockerfile
+├── scripts/
+│   └── import_acousticbrainz.py    # Bulk import AcousticBrainz CC0 dump
+├── VERSION                         # Single source of truth (4.110)
 ├── CHANGELOG.md
-├── what.md                       # Full technical documentation
+├── what.md                         # Full technical documentation
 ├── docker-compose.yml
 └── .env.example
 ```
@@ -268,12 +334,12 @@ smartaste/
 
 | Layer | Technologies |
 |-------|-------------|
-| **Frontend** | Next.js 16 · React 19 · TypeScript · Tailwind CSS 4 · shadcn/ui · TanStack Query · Zustand · Recharts · Sora + DM Sans |
-| **Backend** | Python 3.11+ · FastAPI · SQLAlchemy Core · asyncpg · Alembic · Pydantic · bcrypt · PyJWT · Fernet |
-| **AI** | Anthropic SDK · OpenAI SDK (BYOK — users bring their own keys) |
-| **Music APIs** | Spotify Web API (OAuth PKCE) · Apple Music API (MusicKit JS + ES256 JWT) |
-| **Audio Enrichment** | Deezer API (free) · ReccoBeats API (free) · SoundStat API (paid) · MusicBrainz (ISRC resolver) |
-| **Infrastructure** | PostgreSQL 16 · Docker Compose · Vercel (frontend) · Railway (backend) · uv + npm |
+| **Frontend** | Next.js 16 &middot; React 19 &middot; TypeScript &middot; Tailwind CSS 4 &middot; shadcn/ui &middot; TanStack Query &middot; Zustand &middot; Recharts &middot; Sora + DM Sans |
+| **Backend** | Python 3.11+ &middot; FastAPI &middot; SQLAlchemy Core &middot; asyncpg &middot; Alembic &middot; Pydantic &middot; bcrypt &middot; PyJWT &middot; Fernet |
+| **AI** | Anthropic SDK &middot; OpenAI SDK (BYOK) &middot; sentence-transformers (MiniLM-L6-v2 for lyrics) |
+| **Music APIs** | Spotify Web API (OAuth PKCE) &middot; Apple Music API (MusicKit JS + ES256 JWT) |
+| **Enrichment** | Deezer (free) &middot; ReccoBeats (free) &middot; Last.fm (free) &middot; MusicBrainz (free) &middot; Genius (free) &middot; SoundStat (paid) &middot; AcousticBrainz (bulk) |
+| **Infrastructure** | PostgreSQL 16 &middot; Docker Compose &middot; Vercel (frontend) &middot; Railway (backend + worker + admin + 2x Postgres + NocoDB) &middot; uv + npm |
 
 ## Tests
 
@@ -281,7 +347,7 @@ smartaste/
 cd backend && uv run python -m pytest tests/ -v
 ```
 
-370+ tests covering: auth, service connections, BYOK keys, taste profiles, stats, recommendations, multi-service unification, Claude/OpenAI chat, genre normalization, track deduplication, audio pipeline, scoring dimensions.
+92 tests covering: auth, service connections, BYOK keys, taste profiles, stats, recommendations, multi-service unification, Claude/OpenAI chat, genre normalization, track deduplication, audio pipeline, scoring dimensions.
 
 ## License
 
