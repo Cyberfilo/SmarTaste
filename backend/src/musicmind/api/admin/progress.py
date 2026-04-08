@@ -11,7 +11,10 @@ from typing import Any
 import sqlalchemy as sa
 
 from musicmind.db.schema import (
+    audio_embeddings,
     audio_features_cache,
+    kg_relationships,
+    lastfm_tags_cache,
     song_metadata_cache,
     users,
 )
@@ -96,3 +99,84 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
             })
 
     return progress
+
+
+async def get_enrichment_breakdown(engine) -> dict[str, Any]:
+    """Get pipeline-level enrichment breakdown across all songs.
+
+    Enrichment pipeline stages:
+    1. Audio features (audio_features_cache with energy IS NOT NULL)
+    2. Last.fm tags (lastfm_tags_cache with entity_type='track')
+    3. MusicBrainz credits (kg_relationships with source_mbid LIKE 'isrc:%')
+    4. Lyrics embeddings (audio_embeddings with model_version='lyrics-minilm-v2')
+
+    Returns counts for: unenriched, partially enriched (audio only), fully enriched (all 4).
+    """
+    async with engine.begin() as conn:
+        # Total songs across all users
+        total_q = await conn.execute(
+            sa.select(sa.func.count()).select_from(song_metadata_cache)
+        )
+        total_songs = total_q.scalar() or 0
+
+        if total_songs == 0:
+            return {"total": 0, "unenriched": 0, "partial": 0, "fully_enriched": 0}
+
+        # Songs with audio features
+        audio_q = await conn.execute(
+            sa.select(sa.func.count(sa.distinct(audio_features_cache.c.catalog_id))).where(
+                audio_features_cache.c.energy.isnot(None)
+            )
+        )
+        has_audio = audio_q.scalar() or 0
+
+        # Songs with Last.fm tags
+        tags_q = await conn.execute(
+            sa.select(sa.func.count()).select_from(lastfm_tags_cache).where(
+                lastfm_tags_cache.c.entity_type == "track"
+            )
+        )
+        has_tags = tags_q.scalar() or 0
+
+        # Songs with MusicBrainz credits
+        credits_q = await conn.execute(
+            sa.select(
+                sa.func.count(sa.distinct(kg_relationships.c.source_mbid))
+            ).where(kg_relationships.c.source_mbid.like("isrc:%"))
+        )
+        has_credits = credits_q.scalar() or 0
+
+        # Songs with lyrics embeddings
+        lyrics_q = await conn.execute(
+            sa.select(
+                sa.func.count(sa.distinct(audio_embeddings.c.catalog_id))
+            ).where(audio_embeddings.c.model_version == "lyrics-minilm-v2")
+        )
+        has_lyrics = lyrics_q.scalar() or 0
+
+        unenriched = total_songs - has_audio
+        partial = has_audio  # will subtract fully enriched below
+
+        # Fully enriched = has all 4 stages. Use min() as rough upper bound,
+        # since exact intersection query across 4 tables would be expensive.
+        # The true full count is bounded by the smallest stage count.
+        fully_enriched = min(has_audio, has_tags, has_credits, has_lyrics)
+        partial = has_audio - fully_enriched
+
+    pct = lambda n: round(n / total_songs * 100, 1) if total_songs > 0 else 0  # noqa: E731
+
+    return {
+        "total": total_songs,
+        "unenriched": unenriched,
+        "unenriched_pct": pct(unenriched),
+        "partial": partial,
+        "partial_pct": pct(partial),
+        "fully_enriched": fully_enriched,
+        "fully_enriched_pct": pct(fully_enriched),
+        "stages": {
+            "audio_features": has_audio,
+            "lastfm_tags": has_tags,
+            "musicbrainz_credits": has_credits,
+            "lyrics_embeddings": has_lyrics,
+        },
+    }

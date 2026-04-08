@@ -7,6 +7,22 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 4.110 — 2026-04-08
+
+### Added — Admin Dashboard Overhaul
+- **Enrichment pipeline breakdown**: unenriched / partially enriched / fully enriched counts + percentages. Per-stage progress bars (Audio Features, Last.fm Tags, MusicBrainz Credits, Lyrics Embeddings).
+- **Worker status panel**: last activity timestamp, enriched/failed today counts, recent enrichment entries with stage + result + duration.
+- **Live log feed**: SSE-powered real-time log stream from backend. Dark terminal theme with color-coded log levels. Auto-scrolls, reconnects on disconnect.
+- **DB capacity footer**: PostgreSQL database size for main DB and logs DB, shown as percentage bars (of Railway 5GB plan).
+- **SSE proxy in admin service**: dedicated streaming route for `/api/admin/logs/stream` — SSE can't go through the buffered catch-all proxy.
+
+### Backend
+- `GET /api/admin/enrichment-breakdown`: pipeline-level counts across 4 enrichment stages
+- `GET /api/admin/db-capacity`: `pg_database_size()` for both databases
+- `GET /api/admin/worker-status`: enrichment_logs queries for worker activity
+
+---
+
 ## V 4.100 — 2026-04-08
 
 ### Fixed
