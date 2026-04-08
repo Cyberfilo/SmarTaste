@@ -7,6 +7,19 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 4.200 — 2026-04-08
+
+### Added — Worker Heartbeat
+- **`worker_status` table** (migration 016): Single-row table the worker updates with current phase, progress, cycle count, and timestamp. Written to the main DB so the admin dashboard can read it directly.
+- **Live worker status panel**: Visual status bar showing current phase (cleanup/startup_scan/backfill/discovering/idle) with colored pulse dot, cycle count, detail text, and progress bar when available. Updates every 10s via dashboard polling.
+- **Worker heartbeat calls**: `_set_status()` called at every phase transition — cleanup, startup scan, backfill, discovering, idle.
+
+### Fixed
+- **`/api/admin/status` 5-7s SLOW**: Was calling `get_enrichment_progress()` (expensive per-user orphan-proof subqueries). Now uses fast direct counts in a single connection. Should be <100ms.
+- **Live logs only showed backend** — worker is a separate process, its logs never reached the backend's `AdminLogHandler`. The heartbeat system solves this — worker reports phase/progress to the main DB, dashboard reads it directly.
+
+---
+
 ## V 4.140 — 2026-04-08
 
 ### Changed — Admin Dashboard

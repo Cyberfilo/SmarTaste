@@ -623,6 +623,28 @@ user_calibration = sa.Table(
     sa.UniqueConstraint("user_id", "calibration_type", "item_id", name="uq_calibration_entry"),
 )
 
+worker_status = sa.Table(
+    "worker_status",
+    metadata,
+    sa.Column("id", sa.Integer, primary_key=True, server_default="1"),
+    sa.Column("phase", sa.Text, nullable=False, server_default="idle"),
+    sa.Column("detail", sa.Text, server_default=""),
+    sa.Column("progress_current", sa.Integer, server_default="0"),
+    sa.Column("progress_total", sa.Integer, server_default="0"),
+    sa.Column("cycle", sa.Integer, server_default="0"),
+    sa.Column(
+        "started_at",
+        sa.DateTime(timezone=True),
+        nullable=True,
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 playlist_items = sa.Table(
     "playlist_items",
     metadata,

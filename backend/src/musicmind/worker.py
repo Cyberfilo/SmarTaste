@@ -50,6 +50,39 @@ POLL_INTERVAL = int(os.environ.get("WORKER_POLL_INTERVAL", "60"))
 ARTIST_DEPTH = int(os.environ.get("WORKER_ARTIST_DEPTH", "25"))
 
 
+# ── Worker Status Heartbeat ──────────────────────────────────────────────
+
+
+async def _set_status(
+    engine,
+    phase: str,
+    detail: str = "",
+    *,
+    current: int = 0,
+    total: int = 0,
+    cycle: int = 0,
+) -> None:
+    """Update the worker_status singleton row in the main database."""
+    from datetime import UTC, datetime
+
+    from musicmind.db.schema import worker_status
+
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(worker_status).where(worker_status.c.id == 1).values(
+                    phase=phase,
+                    detail=detail,
+                    progress_current=current,
+                    progress_total=total,
+                    cycle=cycle,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+    except Exception:
+        pass  # Non-critical — don't crash the worker for status updates
+
+
 # ── Main Loop ─────────────────────────────────────────────────────────────
 
 
@@ -83,7 +116,18 @@ async def main() -> None:
         CONCURRENCY, BATCH_SIZE, POLL_INTERVAL, ARTIST_DEPTH,
     )
 
+    # Ensure worker_status row exists
+    try:
+        from musicmind.db.schema import worker_status
+        async with engine.begin() as conn:
+            row = await conn.execute(sa.select(worker_status.c.id).limit(1))
+            if not row.first():
+                await conn.execute(worker_status.insert().values(id=1))
+    except Exception:
+        logger.debug("worker_status init skipped", exc_info=True)
+
     # ── Phase 0: Clean orphaned audio_features_cache rows ──────────
+    await _set_status(engine, "cleanup", "Removing orphaned audio feature rows")
     logger.info("=== ORPHAN CLEANUP: removing stale audio_features_cache rows ===")
     try:
         from musicmind.api.admin.progress import cleanup_orphaned_features
@@ -107,6 +151,7 @@ async def main() -> None:
         logger.exception("Orphan cleanup failed, continuing")
 
     # ── Phase 1: Startup scan — enrich all unenriched tracks ──────────
+    await _set_status(engine, "startup_scan", "Finding unenriched songs")
     logger.info("=== STARTUP SCAN: checking all users for unenriched tracks ===")
     try:
         startup_stats = await _startup_scan(engine, log_writer=log_writer)
@@ -125,7 +170,8 @@ async def main() -> None:
     except Exception:
         logger.exception("Startup scan failed, continuing to poll loop")
 
-    # ── Phase 1b: Backfill Last.fm tags + MusicBrainz credits on enriched songs ─
+    # ── Phase 1b: Backfill Last.fm tags + MusicBrainz credits ────────
+    await _set_status(engine, "backfill", "Completing partial enrichment (tags + credits)")
     logger.info("=== BACKFILL: completing partial enrichment (tags + credits) ===")
     try:
         backfill_stats = await _backfill_new_signals(engine, settings)
@@ -150,6 +196,7 @@ async def main() -> None:
     while True:
         cycle += 1
         start = time.monotonic()
+        await _set_status(engine, "discovering", "Searching artist discographies", cycle=cycle)
         try:
             stats = await _run_cycle(
                 engine, encryption, settings,
@@ -181,6 +228,7 @@ async def main() -> None:
             logger.exception("Cycle %d failed", cycle)
 
         # Run backfill every cycle to complete partial enrichment
+        await _set_status(engine, "backfill", "Completing tags + credits", cycle=cycle)
         try:
             bf = await _backfill_new_signals(engine, settings)
             bf_total = bf.get("tags", 0) + bf.get("credits", 0)
@@ -199,6 +247,7 @@ async def main() -> None:
         except Exception:
             logger.debug("Cycle %d backfill failed", cycle, exc_info=True)
 
+        await _set_status(engine, "idle", f"Sleeping {POLL_INTERVAL}s", cycle=cycle)
         await asyncio.sleep(POLL_INTERVAL)
 
 

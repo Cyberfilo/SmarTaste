@@ -127,43 +127,53 @@ async def get_system_status(
     """Get system health + enrichment summary."""
     from musicmind import __version__
     from musicmind.db.schema import (
+        audio_features_cache,
         audio_features_global,
         listening_history,
         service_connections,
+        song_metadata_cache,
         user_calibration,
     )
 
     engine = request.app.state.engine
     settings = request.app.state.settings
 
+    # Fast direct counts — no expensive per-user subqueries
     async with engine.begin() as conn:
         user_count = (await conn.execute(
             sa.select(sa.func.count()).select_from(users)
         )).scalar() or 0
 
-        # Service connections count
         connections_count = (await conn.execute(
             sa.select(sa.func.count()).select_from(service_connections)
         )).scalar() or 0
 
-        # Global ISRC cache size
+        total_songs = (await conn.execute(
+            sa.select(sa.func.count()).select_from(song_metadata_cache)
+        )).scalar() or 0
+
+        # Enriched = audio_features_cache rows that have a matching song
+        existing_ids = sa.select(song_metadata_cache.c.catalog_id).correlate(None)
+        total_enriched = (await conn.execute(
+            sa.select(sa.func.count()).select_from(audio_features_cache).where(
+                sa.and_(
+                    audio_features_cache.c.energy.isnot(None),
+                    audio_features_cache.c.catalog_id.in_(existing_ids),
+                )
+            )
+        )).scalar() or 0
+
         global_cache_count = (await conn.execute(
             sa.select(sa.func.count()).select_from(audio_features_global)
         )).scalar() or 0
 
-        # Listening history entries
         history_count = (await conn.execute(
             sa.select(sa.func.count()).select_from(listening_history)
         )).scalar() or 0
 
-        # Calibrated users
         calibrated_users = (await conn.execute(
             sa.select(sa.func.count(sa.distinct(user_calibration.c.user_id)))
         )).scalar() or 0
-
-    progress = await get_enrichment_progress(engine)
-    total_songs = sum(u["total_songs"] for u in progress)
-    total_enriched = sum(u["enriched_songs"] for u in progress)
 
     return {
         "version": __version__,
@@ -401,10 +411,38 @@ async def get_worker_status(
     request: Request,
     _admin: None = Depends(require_admin),
 ) -> dict:
-    """Get worker status from enrichment_logs in logs DB."""
+    """Get worker status: live heartbeat from main DB + recent logs from logs DB."""
+    from musicmind.db.schema import worker_status
+
+    # Live heartbeat from main DB
+    engine = request.app.state.engine
+    heartbeat = None
+    try:
+        async with engine.begin() as conn:
+            row = (await conn.execute(
+                sa.select(worker_status).where(worker_status.c.id == 1)
+            )).first()
+            if row:
+                heartbeat = {
+                    "phase": row.phase,
+                    "detail": row.detail,
+                    "progress_current": row.progress_current,
+                    "progress_total": row.progress_total,
+                    "cycle": row.cycle,
+                    "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                    "started_at": row.started_at.isoformat() if row.started_at else None,
+                }
+    except Exception:
+        pass  # Table might not exist yet
+
+    # Recent activity from logs DB
     logs_engine = getattr(request.app.state, "logs_engine", None)
     if not logs_engine:
-        return {"available": False, "reason": "logs DB not connected"}
+        return {
+            "available": heartbeat is not None,
+            "heartbeat": heartbeat,
+            "reason": "logs DB not connected",
+        }
 
     try:
         from musicmind.db.logs import enrichment_logs
@@ -472,6 +510,7 @@ async def get_worker_status(
 
         return {
             "available": True,
+            "heartbeat": heartbeat,
             "last_activity": last_activity,
             "enriched_today": enriched_today,
             "failures_today": failures_today,
@@ -480,7 +519,11 @@ async def get_worker_status(
         }
     except Exception:
         logger.warning("Failed to get worker status", exc_info=True)
-        return {"available": False, "reason": "query failed"}
+        return {
+            "available": heartbeat is not None,
+            "heartbeat": heartbeat,
+            "reason": "logs query failed",
+        }
 
 
 @router.post("/cleanup-orphans")
