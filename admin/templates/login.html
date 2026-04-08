@@ -23,13 +23,11 @@
 <body>
   <div class="card">
     <h1><span>Smar</span>Taste Admin</h1>
-    <p class="sub">Sign in with your admin account</p>
+    <p class="sub">Enter the admin password</p>
     <div class="error" id="error"></div>
     <form id="loginForm">
-      <label>Email</label>
-      <input type="email" id="email" required autocomplete="email">
       <label>Password</label>
-      <input type="password" id="password" required autocomplete="current-password">
+      <input type="password" id="password" required autofocus>
       <button type="submit" id="btn">Sign In</button>
     </form>
   </div>
@@ -40,34 +38,17 @@
       const err = document.getElementById('error');
       btn.disabled = true;
       err.style.display = 'none';
-
       try {
-        const resp = await fetch('/api/auth/login', {
+        const resp = await fetch('/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({
-            email: document.getElementById('email').value,
-            password: document.getElementById('password').value,
-          }),
+          body: JSON.stringify({ password: document.getElementById('password').value }),
         });
-
         if (!resp.ok) {
           const data = await resp.json().catch(() => ({}));
-          throw new Error(data.detail || 'Login failed');
+          throw new Error(data.error || 'Login failed');
         }
-
-        // Check if user is admin
-        const meResp = await fetch('/api/auth/me', { credentials: 'include' });
-        const me = await meResp.json();
-
-        if (!me.is_admin) {
-          err.textContent = 'Admin access required';
-          err.style.display = 'block';
-          btn.disabled = false;
-          return;
-        }
-
         window.location.href = '/';
       } catch (e) {
         err.textContent = e.message;

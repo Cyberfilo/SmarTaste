@@ -1,6 +1,6 @@
 """Admin API endpoints — live logs, enrichment progress, system status.
 
-All endpoints require admin role (is_admin=true on user).
+Protected by ADMIN_SECRET header or is_admin user flag.
 """
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -15,34 +16,44 @@ from starlette.responses import StreamingResponse
 
 from musicmind.api.admin.log_stream import get_recent_logs, subscribe, unsubscribe
 from musicmind.api.admin.progress import get_enrichment_progress
-from musicmind.auth.dependencies import get_current_user
 from musicmind.db.schema import users
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
+ADMIN_SECRET = os.environ.get("MUSICMIND_ADMIN_SECRET", "")
 
-async def require_admin(
-    request: Request,
-    current_user: dict = Depends(get_current_user),
-) -> dict:
-    """Dependency that checks admin role. Raises 403 if not admin."""
-    engine = request.app.state.engine
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(users.c.is_admin).where(
-                users.c.id == current_user["user_id"]
+
+async def require_admin(request: Request) -> None:
+    """Check admin access via shared secret header or is_admin user flag."""
+    # Option 1: X-Admin-Secret header (used by admin dashboard service)
+    secret = request.headers.get("x-admin-secret", "")
+    if ADMIN_SECRET and secret == ADMIN_SECRET:
+        return
+
+    # Option 2: Authenticated user with is_admin flag
+    try:
+        from musicmind.auth.dependencies import get_current_user
+
+        current_user = await get_current_user(request)
+        engine = request.app.state.engine
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(users.c.is_admin).where(
+                    users.c.id == current_user["user_id"]
+                )
             )
-        )
-        row = result.first()
+            row = result.first()
+        if row and row.is_admin:
+            return
+    except Exception:
+        pass
 
-    if not row or not row.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
-    return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin access required",
+    )
 
 
 @router.get("/logs")
