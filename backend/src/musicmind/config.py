@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # Base64-encoded .p8 key contents (alternative to file path for cloud deploys)
     apple_private_key_b64: str | None = None
 
+    # Logging database (separate PostgreSQL for request/enrichment logs)
+    logs_database_url: str | None = None
+
     # Audio Enrichment APIs (optional — degrades gracefully)
     # SoundStat: paid API (0.01 EUR/track), used only for specific recommendations
     soundstat_api_key: str | None = None
@@ -73,7 +76,7 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "MUSICMIND_", "env_file": ".env"}
 
     def model_post_init(self, __context: object) -> None:
-        """Fix database URL after loading from env.
+        """Fix database URLs after loading from env.
 
         Railway/Heroku provide postgresql:// but asyncpg needs postgresql+asyncpg://.
         """
@@ -82,4 +85,10 @@ class Settings(BaseSettings):
                 self,
                 "database_url",
                 self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1),
+            )
+        if self.logs_database_url and self.logs_database_url.startswith("postgresql://"):
+            object.__setattr__(
+                self,
+                "logs_database_url",
+                self.logs_database_url.replace("postgresql://", "postgresql+asyncpg://", 1),
             )
