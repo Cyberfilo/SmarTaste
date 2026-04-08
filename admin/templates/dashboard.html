@@ -287,10 +287,136 @@
     }
     @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
+    /* ── Enrichment Breakdown ─────────────────────── */
+    .breakdown-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .breakdown-card {
+      text-align: center;
+      padding: 0.875rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-light);
+    }
+    .breakdown-card .bc-value { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .breakdown-card .bc-pct { font-size: 0.6875rem; font-weight: 600; margin-left: 0.25rem; }
+    .breakdown-card .bc-label { font-size: 0.6875rem; color: var(--text-secondary); margin-top: 0.125rem; }
+    .breakdown-card.red { background: var(--danger-bg); }
+    .breakdown-card.red .bc-value, .breakdown-card.red .bc-pct { color: var(--danger); }
+    .breakdown-card.amber { background: var(--accent-bg); }
+    .breakdown-card.amber .bc-value, .breakdown-card.amber .bc-pct { color: var(--accent); }
+    .breakdown-card.green { background: var(--success-bg); }
+    .breakdown-card.green .bc-value, .breakdown-card.green .bc-pct { color: var(--success); }
+
+    .stage-row {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.375rem 0;
+      font-size: 0.75rem;
+    }
+    .stage-row .stage-name { width: 130px; color: var(--text-secondary); font-weight: 500; white-space: nowrap; }
+    .stage-row .stage-bar { flex: 1; height: 6px; background: var(--border-light); border-radius: 3px; overflow: hidden; }
+    .stage-row .stage-fill { height: 100%; border-radius: 3px; background: var(--primary-light); transition: width 0.5s ease; }
+    .stage-row .stage-count { width: 50px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 0.6875rem; }
+
+    /* ── Worker Status ────────────────────────────── */
+    .worker-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 0.625rem;
+      margin-bottom: 0.75rem;
+    }
+    .worker-stat {
+      padding: 0.625rem 0.75rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-light);
+      background: var(--border-light);
+    }
+    .worker-stat .ws-label { font-size: 0.6875rem; color: var(--text-secondary); font-weight: 500; text-transform: uppercase; letter-spacing: 0.03em; }
+    .worker-stat .ws-value { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 0.125rem; }
+    .worker-recent {
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .worker-entry {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.25rem 0;
+      font-size: 0.75rem;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .worker-entry:last-child { border-bottom: none; }
+    .worker-entry .we-stage {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      padding: 0.0625rem 0.375rem;
+      border-radius: 4px;
+      background: var(--primary-bg);
+      color: var(--primary);
+    }
+    .worker-entry .we-result {
+      font-size: 0.6875rem;
+      font-weight: 600;
+    }
+    .worker-entry .we-result.success { color: var(--success); }
+    .worker-entry .we-result.fail { color: var(--danger); }
+
+    /* ── Live Log ─────────────────────────────────── */
+    .log-feed {
+      max-height: 280px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.6875rem;
+      line-height: 1.6;
+      background: #1E293B;
+      color: #CBD5E1;
+      border-radius: var(--radius-sm);
+      padding: 0.75rem;
+    }
+    .log-feed::-webkit-scrollbar { width: 6px; }
+    .log-feed::-webkit-scrollbar-track { background: transparent; }
+    .log-feed::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    .log-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0.0625rem 0; }
+    .log-line .ll-time { color: #64748B; }
+    .log-line .ll-level { font-weight: 700; }
+    .log-line .ll-level.INFO { color: #38BDF8; }
+    .log-line .ll-level.WARNING { color: #FBBF24; }
+    .log-line .ll-level.ERROR { color: #F87171; }
+    .log-line .ll-level.DEBUG { color: #818CF8; }
+    .log-line .ll-logger { color: #7C3AED; }
+    .log-line .ll-msg { color: #E2E8F0; }
+
+    /* ── DB Capacity Footer ──────────────────────── */
+    .capacity-footer {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 0.75rem 1.5rem 1.5rem;
+      display: flex;
+      gap: 1.5rem;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .cap-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+    }
+    .cap-item .cap-name { font-weight: 500; }
+    .cap-item .cap-bar { width: 60px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+    .cap-item .cap-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+    .cap-item .cap-fill.ok { background: var(--success); }
+    .cap-item .cap-fill.warn { background: var(--accent); }
+    .cap-item .cap-fill.danger { background: var(--danger); }
+    .cap-item .cap-pct { font-variant-numeric: tabular-nums; font-weight: 600; }
+
     /* ── Footer ───────────────────────────────────── */
     .footer {
       text-align: center;
-      padding: 1.5rem;
+      padding: 0.5rem 1.5rem 1.5rem;
       font-size: 0.6875rem;
       color: var(--text-muted);
     }
@@ -369,6 +495,34 @@
       </div>
     </div>
 
+    <!-- Enrichment Pipeline Breakdown -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.606 12.97a.75.75 0 01-.134 1.051 2.494 2.494 0 00-.93 2.437 2.494 2.494 0 002.437-.93.75.75 0 111.186.918 3.995 3.995 0 01-4.482 1.332.75.75 0 01-.461-.461 3.994 3.994 0 011.332-4.482.75.75 0 011.052.134z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M5.752 12A13.07 13.07 0 008 14.248l4.47-4.47-1.06-1.06-.177.176a1.25 1.25 0 01-2.033-.392l-.258-.644-1.355 1.355-.191.286a1.25 1.25 0 01-1.567.42l-.293-.146L5.752 12zM7.97 3.73l-.977.977.147.293a1.25 1.25 0 01-.42 1.567l-.286.19-1.355 1.356.644.258a1.25 1.25 0 01.392 2.033l-.176.177 1.06 1.06L11.47 7l-1.06-1.06-.176.176a1.25 1.25 0 01-2.033-.392l-.258-.644-1.355 1.355-.191.286a1.25 1.25 0 01-1.567.42l-.293-.146L7.97 3.73zm6.38-1.97a2.09 2.09 0 013.058 0l.833.833a2.09 2.09 0 010 3.058l-8.06 8.06-4.834-4.834 9.003-7.117z" clip-rule="evenodd"/></svg>
+          Enrichment Pipeline
+        </div>
+        <span class="section-badge badge-blue" id="pipelineTotal"></span>
+      </div>
+      <div id="enrichmentBreakdown">
+        <div class="empty-state">Loading pipeline data...</div>
+      </div>
+    </div>
+
+    <!-- Worker Status -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M14.5 10a4.5 4.5 0 004.284-5.882c-.105-.324-.51-.391-.752-.15L15.34 6.66a.454.454 0 01-.493.11 3.01 3.01 0 01-1.618-1.616.455.455 0 01.11-.494l2.694-2.692c.24-.241.174-.647-.15-.752a4.5 4.5 0 00-5.873 4.575c.055.873-.128 1.808-.8 2.368l-7.23 6.024a2.724 2.724 0 103.837 3.837l6.024-7.23c.56-.672 1.495-.855 2.368-.8.096.007.193.01.291.01zM5 16a1 1 0 11-2 0 1 1 0 012 0z" clip-rule="evenodd"/></svg>
+          Worker Status
+        </div>
+        <span class="section-badge badge-green" id="workerBadge">...</span>
+      </div>
+      <div id="workerStatus">
+        <div class="empty-state">Loading worker data...</div>
+      </div>
+    </div>
+
     <!-- Recent Errors -->
     <div class="section">
       <div class="section-header">
@@ -380,6 +534,20 @@
       </div>
       <div id="errors">
         <div class="empty-state">Loading error data...</div>
+      </div>
+    </div>
+
+    <!-- Live Log Feed -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3.25 3A2.25 2.25 0 001 5.25v9.5A2.25 2.25 0 003.25 17h13.5A2.25 2.25 0 0019 14.75v-9.5A2.25 2.25 0 0016.75 3H3.25zm.943 8.752a.75.75 0 01.055-1.06L6.128 9l-1.88-1.693a.75.75 0 111.004-1.114l2.5 2.25a.75.75 0 010 1.114l-2.5 2.25a.75.75 0 01-1.06-.055zM9.75 10.25a.75.75 0 000 1.5h2.5a.75.75 0 000-1.5h-2.5z" clip-rule="evenodd"/></svg>
+          Live Log
+        </div>
+        <span class="section-badge badge-green" id="logBadge">connecting...</span>
+      </div>
+      <div class="log-feed" id="logFeed">
+        <div class="log-line" style="color:#64748B">Connecting to log stream...</div>
       </div>
     </div>
   </div>
@@ -398,6 +566,8 @@
       </div>
     </div>
   </div>
+
+  <div class="capacity-footer" id="dbCapacity"></div>
 
   <div class="footer">
     SmarTaste Admin &middot; Auto-refreshes every 30s
@@ -470,12 +640,26 @@
     // ── Data fetching ─────────────────────────────────
     async function fetchData() {
       try {
-        const [statusResp, progressResp, reqStatsResp, errorsResp] = await Promise.all([
+        const [statusResp, progressResp, reqStatsResp, errorsResp, breakdownResp, workerResp, capacityResp] = await Promise.all([
           fetch('/api/admin/status', { credentials: 'include' }),
           fetch('/api/admin/progress', { credentials: 'include' }),
           fetch('/api/admin/request-stats', { credentials: 'include' }),
           fetch('/api/admin/errors?limit=20', { credentials: 'include' }),
+          fetch('/api/admin/enrichment-breakdown', { credentials: 'include' }),
+          fetch('/api/admin/worker-status', { credentials: 'include' }),
+          fetch('/api/admin/db-capacity', { credentials: 'include' }),
         ]);
+
+        // Check for auth failures first
+        if (statusResp.status === 401 || statusResp.status === 403) {
+          document.getElementById('stats').innerHTML =
+            `<div class="kpi-card" style="grid-column:1/-1;text-align:center;color:var(--danger)">
+              <b>API Error ${statusResp.status}</b><br>
+              Check ADMIN_SECRET env var on admin service and MUSICMIND_ADMIN_SECRET on backend.
+              <br><small>Backend URL: ${window.location.origin}/api/admin/status</small>
+            </div>`;
+          return;
+        }
 
         // Status cards
         if (statusResp.ok) {
@@ -516,6 +700,90 @@
           }
         }
 
+        // Enrichment pipeline breakdown
+        if (breakdownResp.ok) {
+          const b = await breakdownResp.json();
+          const el = document.getElementById('enrichmentBreakdown');
+          const badge = document.getElementById('pipelineTotal');
+          badge.textContent = `${b.total.toLocaleString()} songs`;
+
+          const stageNames = { audio_features: 'Audio Features', lastfm_tags: 'Last.fm Tags', musicbrainz_credits: 'MusicBrainz Credits', lyrics_embeddings: 'Lyrics Embeddings' };
+          const stages = b.stages || {};
+
+          el.innerHTML = `
+            <div class="breakdown-grid">
+              <div class="breakdown-card red">
+                <div class="bc-value">${b.unenriched.toLocaleString()} <span class="bc-pct">${b.unenriched_pct}%</span></div>
+                <div class="bc-label">Unenriched</div>
+              </div>
+              <div class="breakdown-card amber">
+                <div class="bc-value">${b.partial.toLocaleString()} <span class="bc-pct">${b.partial_pct}%</span></div>
+                <div class="bc-label">Partially Enriched</div>
+              </div>
+              <div class="breakdown-card green">
+                <div class="bc-value">${b.fully_enriched.toLocaleString()} <span class="bc-pct">${b.fully_enriched_pct}%</span></div>
+                <div class="bc-label">Fully Enriched</div>
+              </div>
+            </div>
+            ${Object.entries(stageNames).map(([key, label]) => {
+              const count = stages[key] || 0;
+              const pct = b.total > 0 ? Math.round(count / b.total * 100) : 0;
+              return `<div class="stage-row">
+                <span class="stage-name">${label}</span>
+                <div class="stage-bar"><div class="stage-fill" style="width:${pct}%"></div></div>
+                <span class="stage-count">${count.toLocaleString()}</span>
+              </div>`;
+            }).join('')}
+          `;
+        }
+
+        // Worker status
+        if (workerResp.ok) {
+          const w = await workerResp.json();
+          const el = document.getElementById('workerStatus');
+          const badge = document.getElementById('workerBadge');
+
+          if (!w.available) {
+            el.innerHTML = emptyState(w.reason || 'Worker logs unavailable');
+            badge.textContent = 'offline';
+            badge.className = 'section-badge badge-red';
+          } else {
+            const lastAgo = w.last_activity ? timeAgo(new Date(w.last_activity)) : 'never';
+            badge.textContent = lastAgo === 'never' ? 'idle' : 'active';
+            badge.className = 'section-badge badge-green';
+
+            let html = `<div class="worker-grid">
+              <div class="worker-stat">
+                <div class="ws-label">Last Activity</div>
+                <div class="ws-value">${lastAgo}</div>
+              </div>
+              <div class="worker-stat">
+                <div class="ws-label">Enriched Today</div>
+                <div class="ws-value" style="color:var(--success)">${w.enriched_today}</div>
+              </div>
+              <div class="worker-stat">
+                <div class="ws-label">Failures Today</div>
+                <div class="ws-value" style="color:${w.failures_today > 0 ? 'var(--danger)' : 'var(--text)'}">${w.failures_today}</div>
+              </div>
+            </div>`;
+
+            if (w.recent && w.recent.length > 0) {
+              html += '<div class="worker-recent">' + w.recent.map(r => {
+                const t = r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '';
+                const ok = r.result === 'success';
+                return `<div class="worker-entry">
+                  <span style="color:var(--text-muted);font-size:0.6875rem;min-width:60px">${t}</span>
+                  <span class="we-stage">${r.stage || '?'}</span>
+                  <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.75rem;color:var(--text-secondary)">${r.catalog_id || ''}</span>
+                  <span class="we-result ${ok ? 'success' : 'fail'}">${r.result}</span>
+                  ${r.duration_ms ? `<span style="font-size:0.6875rem;color:var(--text-muted)">${r.duration_ms}ms</span>` : ''}
+                </div>`;
+              }).join('') + '</div>';
+            }
+            el.innerHTML = html;
+          }
+        }
+
         // Errors
         if (errorsResp.ok) {
           const e = await errorsResp.json();
@@ -531,7 +799,8 @@
             badge.className = 'section-badge badge-green';
           }
         }
-        // Fetch recent songs
+
+        // Recent songs
         const songsResp = await fetch('/api/admin/recent-songs?limit=15', { credentials: 'include' });
         if (songsResp.ok) {
           const sd = await songsResp.json();
@@ -539,13 +808,13 @@
           const badge = document.getElementById('songCount');
           if (sd.songs && sd.songs.length > 0) {
             el.innerHTML = sd.songs.map(s => {
-              const dot = s.enriched ? '🟢' : '🔴';
-              const src = s.source === 'library' ? '📚' : '🔧';
+              const dot = s.enriched ? '\u{1F7E2}' : '\u{1F534}';
+              const src = s.source === 'library' ? '\u{1F4DA}' : '\u{1F527}';
               const time = s.fetched_at ? new Date(s.fetched_at).toLocaleTimeString() : '';
               return `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0;border-bottom:1px solid var(--border-light);font-size:0.8rem">
                 <span title="${s.enriched ? 'Enriched' : 'Not enriched'}">${dot}</span>
                 <span title="${s.source}">${src}</span>
-                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>${s.artist_name}</b> — ${s.name}</span>
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>${s.artist_name}</b> \u2014 ${s.name}</span>
                 <span style="color:var(--text-muted);font-size:0.7rem">${s.service}</span>
                 <span style="color:var(--text-muted);font-size:0.7rem">${time}</span>
               </div>`;
@@ -557,15 +826,24 @@
           }
         }
 
-        // Check for auth failures
-        if (statusResp.status === 401 || statusResp.status === 403) {
-          document.getElementById('stats').innerHTML =
-            `<div class="kpi-card" style="grid-column:1/-1;text-align:center;color:var(--danger)">
-              <b>API Error ${statusResp.status}</b><br>
-              Check ADMIN_SECRET env var on admin service and MUSICMIND_ADMIN_SECRET on backend.
-              <br><small>Backend URL: ${window.location.origin}/api/admin/status</small>
-            </div>`;
-          return;
+        // DB Capacity
+        if (capacityResp.ok) {
+          const c = await capacityResp.json();
+          const el = document.getElementById('dbCapacity');
+          if (c.databases && c.databases.length > 0) {
+            // Railway free: 1GB, pro: 5GB — use 5GB as default max
+            const maxGb = 5;
+            el.innerHTML = c.databases.map(db => {
+              const pct = Math.min(100, Math.round(db.size_gb / maxGb * 100));
+              const cls = pct >= 80 ? 'danger' : pct >= 50 ? 'warn' : 'ok';
+              return `<div class="cap-item">
+                <span class="cap-name">${db.name}</span>
+                <div class="cap-bar"><div class="cap-fill ${cls}" style="width:${pct}%"></div></div>
+                <span class="cap-pct">${db.size_mb} MB</span>
+                <span style="color:var(--text-muted)">(${pct}%)</span>
+              </div>`;
+            }).join('');
+          }
         }
 
       } catch (err) {
@@ -575,6 +853,75 @@
             <b>Connection Error</b><br>${err.message}
           </div>`;
       }
+    }
+
+    // ── Time Ago helper ────────────────────────────────
+    function timeAgo(date) {
+      const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+      if (seconds < 60) return `${seconds}s ago`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      return `${Math.floor(hours / 24)}d ago`;
+    }
+
+    // ── Live Log SSE Stream ───────────────────────────
+    function connectLogStream() {
+      const feed = document.getElementById('logFeed');
+      const badge = document.getElementById('logBadge');
+      const maxLines = 200;
+
+      const evtSource = new EventSource('/api/admin/logs/stream');
+
+      evtSource.onopen = () => {
+        badge.textContent = 'live';
+        badge.className = 'section-badge badge-green';
+        feed.innerHTML = '';
+      };
+
+      evtSource.onmessage = (event) => {
+        try {
+          const entry = JSON.parse(event.data);
+          const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '';
+          const level = entry.level || 'INFO';
+          const logger = entry.logger || '';
+          const shortLogger = logger.split('.').slice(-2).join('.');
+
+          const line = document.createElement('div');
+          line.className = 'log-line';
+          line.innerHTML = `<span class="ll-time">${time}</span> <span class="ll-level ${level}">${level.padEnd(7)}</span> <span class="ll-logger">${shortLogger}</span> <span class="ll-msg">${escapeHtml(entry.message || '')}</span>`;
+
+          feed.appendChild(line);
+
+          // Trim old lines
+          while (feed.children.length > maxLines) {
+            feed.removeChild(feed.firstChild);
+          }
+
+          // Auto-scroll if near bottom
+          const isNearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+          if (isNearBottom) {
+            feed.scrollTop = feed.scrollHeight;
+          }
+        } catch (e) {
+          console.warn('Failed to parse log entry:', e);
+        }
+      };
+
+      evtSource.onerror = () => {
+        badge.textContent = 'disconnected';
+        badge.className = 'section-badge badge-red';
+        evtSource.close();
+        // Reconnect after 5s
+        setTimeout(connectLogStream, 5000);
+      };
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
     }
 
     // ── Logout ──────────────────────────────────────
@@ -587,6 +934,7 @@
     (async () => {
       await fetchData();
       setInterval(fetchData, 30000);
+      connectLogStream();
     })();
   </script>
 </body>

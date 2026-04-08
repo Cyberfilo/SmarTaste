@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from starlette.responses import StreamingResponse
 
 from musicmind.api.admin.log_stream import get_recent_logs, subscribe, unsubscribe
-from musicmind.api.admin.progress import get_enrichment_progress
+from musicmind.api.admin.progress import get_enrichment_breakdown, get_enrichment_progress
 from musicmind.db.schema import users
 
 logger = logging.getLogger(__name__)
@@ -336,3 +336,144 @@ async def get_recent_songs(
         })
 
     return {"songs": items}
+
+
+@router.get("/enrichment-breakdown")
+async def get_enrichment_breakdown_endpoint(
+    request: Request,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Get enrichment pipeline breakdown: unenriched / partial / fully enriched."""
+    breakdown = await get_enrichment_breakdown(request.app.state.engine)
+    return breakdown
+
+
+@router.get("/db-capacity")
+async def get_db_capacity(
+    request: Request,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Get database size and capacity usage for main and logs DBs."""
+    databases: list[dict] = []
+
+    # Main database
+    engine = request.app.state.engine
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(sa.text("SELECT pg_database_size(current_database())"))
+            size_bytes = result.scalar() or 0
+        databases.append({
+            "name": "Main DB",
+            "size_bytes": size_bytes,
+            "size_mb": round(size_bytes / (1024 * 1024), 1),
+            "size_gb": round(size_bytes / (1024 * 1024 * 1024), 2),
+        })
+    except Exception:
+        logger.warning("Failed to get main DB size")
+
+    # Logs database
+    logs_engine = getattr(request.app.state, "logs_engine", None)
+    if logs_engine:
+        try:
+            async with logs_engine.begin() as conn:
+                result = await conn.execute(
+                    sa.text("SELECT pg_database_size(current_database())")
+                )
+                size_bytes = result.scalar() or 0
+            databases.append({
+                "name": "Logs DB",
+                "size_bytes": size_bytes,
+                "size_mb": round(size_bytes / (1024 * 1024), 1),
+                "size_gb": round(size_bytes / (1024 * 1024 * 1024), 2),
+            })
+        except Exception:
+            logger.warning("Failed to get logs DB size")
+
+    return {"databases": databases}
+
+
+@router.get("/worker-status")
+async def get_worker_status(
+    request: Request,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Get worker status from enrichment_logs in logs DB."""
+    logs_engine = getattr(request.app.state, "logs_engine", None)
+    if not logs_engine:
+        return {"available": False, "reason": "logs DB not connected"}
+
+    try:
+        from musicmind.db.logs import enrichment_logs
+
+        async with logs_engine.begin() as conn:
+            # Last enrichment timestamp
+            last_q = await conn.execute(
+                sa.select(enrichment_logs.c.timestamp)
+                .order_by(enrichment_logs.c.timestamp.desc())
+                .limit(1)
+            )
+            last_row = last_q.first()
+            last_activity = last_row.timestamp.isoformat() if last_row else None
+
+            # Total enriched today
+            today_q = await conn.execute(
+                sa.select(sa.func.count()).select_from(enrichment_logs).where(
+                    sa.and_(
+                        enrichment_logs.c.timestamp >= sa.func.current_date(),
+                        enrichment_logs.c.result == "success",
+                    )
+                )
+            )
+            enriched_today = today_q.scalar() or 0
+
+            # Failures today
+            fail_q = await conn.execute(
+                sa.select(sa.func.count()).select_from(enrichment_logs).where(
+                    sa.and_(
+                        enrichment_logs.c.timestamp >= sa.func.current_date(),
+                        enrichment_logs.c.result != "success",
+                    )
+                )
+            )
+            failures_today = fail_q.scalar() or 0
+
+            # Recent enrichment entries (last 10)
+            recent_q = await conn.execute(
+                sa.select(enrichment_logs)
+                .order_by(enrichment_logs.c.timestamp.desc())
+                .limit(10)
+            )
+            recent = [
+                {
+                    "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                    "user_id": row.user_id[:8] if row.user_id else None,
+                    "catalog_id": row.catalog_id,
+                    "stage": row.stage,
+                    "result": row.result,
+                    "duration_ms": row.duration_ms,
+                }
+                for row in recent_q
+            ]
+
+            # Stages breakdown today
+            stages_q = await conn.execute(
+                sa.select(
+                    enrichment_logs.c.stage,
+                    sa.func.count().label("count"),
+                ).where(
+                    enrichment_logs.c.timestamp >= sa.func.current_date()
+                ).group_by(enrichment_logs.c.stage)
+            )
+            stages = {row.stage: row.count for row in stages_q}
+
+        return {
+            "available": True,
+            "last_activity": last_activity,
+            "enriched_today": enriched_today,
+            "failures_today": failures_today,
+            "stages_today": stages,
+            "recent": recent,
+        }
+    except Exception:
+        logger.warning("Failed to get worker status", exc_info=True)
+        return {"available": False, "reason": "query failed"}

@@ -17,6 +17,7 @@ import secrets
 import httpx
 from fastapi import Cookie, FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 BACKEND_URL = os.environ.get(
@@ -92,6 +93,39 @@ async def logout(admin_token: str | None = Cookie(default=None)):
     response = JSONResponse({"ok": True})
     response.delete_cookie("admin_token")
     return response
+
+
+@app.get("/api/admin/logs/stream")
+async def proxy_log_stream(
+    request: Request,
+    admin_token: str | None = Cookie(default=None),
+):
+    """Proxy SSE log stream from backend. Requires admin session."""
+    if not _check_admin_session(admin_token):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    url = f"{BACKEND_URL}/api/admin/logs/stream"
+    headers = {}
+    if ADMIN_SECRET:
+        headers["x-admin-secret"] = ADMIN_SECRET
+
+    async def stream_generator():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", url, headers=headers) as resp:
+                async for line in resp.aiter_lines():
+                    if await request.is_disconnected():
+                        break
+                    yield line + "\n"
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
