@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 
+from musicmind.api.rate_limit import TASTE_LIMIT, limiter
 from musicmind.api.taste.schemas import (
     ArtistEntry,
     AudioTraitsResponse,
@@ -27,6 +28,7 @@ _rebuild_status: dict[str, str] = {}
 
 
 @router.get("/profile")
+@limiter.limit(TASTE_LIMIT)
 async def get_profile(
     request: Request,
     service: str | None = Query(default=None),
@@ -86,6 +88,7 @@ async def get_profile(
 
 
 @router.post("/profile/refresh", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("5/minute")
 async def refresh_profile(
     request: Request,
     background_tasks: BackgroundTasks,

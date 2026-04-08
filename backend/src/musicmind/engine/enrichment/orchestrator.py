@@ -23,7 +23,6 @@ import sqlalchemy as sa
 from musicmind.db.schema import audio_features_cache
 from musicmind.engine.enrichment.deezer import fetch_deezer_features
 from musicmind.engine.enrichment.musicbrainz import resolve_spotify_id
-from musicmind.engine.enrichment.reccobeats import analyze_audio_features
 from musicmind.engine.enrichment.soundstat import fetch_soundstat_features
 
 logger = logging.getLogger(__name__)
@@ -144,11 +143,6 @@ async def enrich_candidates(
         return_exceptions=True,
     )
 
-    # Reload features for successfully enriched tracks
-    enriched_ids = [
-        cid for cid, res in results
-        if isinstance(res, str) is False  # handle tuple
-    ]
     # Extract from tuples
     for item in results:
         if isinstance(item, Exception):
@@ -204,7 +198,7 @@ async def _enrich_single_track(
                 if _merge_features(features, feature_source, deezer_result, "deezer"):
                     enriched_by = "deezer"
         except Exception:
-            pass
+            logger.debug("Deezer enrichment failed for %s - %s", artist_name, name)
 
     # Stage 2: ReccoBeats (upload preview)
     if preview_url:
@@ -217,7 +211,7 @@ async def _enrich_single_track(
                     if _merge_features(features, feature_source, recco_result, "reccobeats"):
                         enriched_by = "reccobeats"
         except Exception:
-            pass
+            logger.debug("ReccoBeats enrichment failed for %s", catalog_id)
 
     # Stage 3: SoundStat (paid, gap-fill)
     if _missing_fields(features) and soundstat_api_key:
@@ -231,7 +225,7 @@ async def _enrich_single_track(
                     if _merge_features(features, feature_source, ss_result, "soundstat"):
                         enriched_by = "soundstat"
         except Exception:
-            pass
+            logger.debug("SoundStat enrichment failed for %s", catalog_id)
 
     if feature_source:
         await _store_features(engine, catalog_id, user_id, features, feature_source)

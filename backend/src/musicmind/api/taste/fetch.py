@@ -80,7 +80,7 @@ async def fetch_spotify_top_tracks(
     headers = {"Authorization": f"Bearer {access_token}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             while offset < max_total:
                 resp = await client.get(
                     f"{SPOTIFY_API_BASE}/me/top/tracks",
@@ -141,7 +141,7 @@ async def fetch_spotify_top_artists(
     headers = {"Authorization": f"Bearer {access_token}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             while offset < max_total:
                 resp = await client.get(
                     f"{SPOTIFY_API_BASE}/me/top/artists",
@@ -206,7 +206,7 @@ async def fetch_spotify_saved_tracks(
     headers = {"Authorization": f"Bearer {access_token}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             while pages_fetched < max_pages:
                 resp = await client.get(
                     f"{SPOTIFY_API_BASE}/me/tracks",
@@ -259,7 +259,7 @@ async def fetch_spotify_recently_played(
     headers = {"Authorization": f"Bearer {access_token}"}
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 f"{SPOTIFY_API_BASE}/me/player/recently-played",
                 headers=headers,
@@ -360,7 +360,7 @@ async def fetch_apple_music_library(
     }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             while pages_fetched < max_pages:
                 resp = await client.get(
                     f"{APPLE_MUSIC_API_BASE}/me/library/songs",
@@ -448,7 +448,7 @@ async def fetch_apple_music_recently_played(
     }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             while pages_fetched < max_pages:
                 resp = await client.get(
                     f"{APPLE_MUSIC_API_BASE}/me/recent/played/tracks",

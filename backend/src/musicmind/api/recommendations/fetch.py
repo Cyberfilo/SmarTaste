@@ -7,6 +7,7 @@ returns song_metadata_cache-compatible dicts for scoring.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -16,6 +17,40 @@ logger = logging.getLogger(__name__)
 
 SPOTIFY_API_BASE = "https://api.spotify.com/v1"
 APPLE_MUSIC_API_BASE = "https://api.music.apple.com/v1"
+
+MAX_RETRIES = 3
+BACKOFF_BASE = 1.0
+
+
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """HTTP request with exponential backoff on 429/5xx."""
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = await client.request(method, url, **kwargs)
+            if resp.status_code == 429:
+                retry_after = float(resp.headers.get("Retry-After", BACKOFF_BASE * (2 ** attempt)))
+                wait = min(retry_after, 30.0)
+                logger.warning("429 from %s, retry in %.1fs (attempt %d)", url[:80], wait, attempt)
+                await asyncio.sleep(wait)
+                continue
+            if resp.status_code >= 500 and attempt < MAX_RETRIES:
+                wait = BACKOFF_BASE * (2 ** attempt)
+                logger.warning("%d from %s, retry in %.1fs", resp.status_code, url[:80], wait)
+                await asyncio.sleep(wait)
+                continue
+            return resp
+        except httpx.TimeoutException:
+            if attempt < MAX_RETRIES:
+                logger.warning("Timeout from %s, retry %d", url[:80], attempt)
+                await asyncio.sleep(BACKOFF_BASE * (2 ** attempt))
+                continue
+            raise
+    return resp  # Last attempt's response
 
 
 # ── Shared Helpers ──────────────────────────────────────────────────────────
@@ -98,7 +133,7 @@ async def _search_artist_id(
     Returns None if no matching artist is found or on error.
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             if service == "spotify":
                 resp = await client.get(
                     f"{SPOTIFY_API_BASE}/search",
@@ -179,7 +214,7 @@ async def discover_similar_artists(
     current_layer = list(seed_ids)
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for _ in range(depth):
                 next_layer: list[str] = []
                 for artist_id in current_layer[:10]:
@@ -244,7 +279,7 @@ async def discover_genre_adjacent(
     candidates: list[dict[str, Any]] = []
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for genre in top_genres[:3]:
                 try:
                     if service == "spotify":
@@ -329,7 +364,7 @@ async def discover_editorial(
     candidates: list[dict[str, Any]] = []
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for genre in top_genres[:3]:
                 try:
                     query = f"best new {genre}"
@@ -417,7 +452,7 @@ async def discover_chart_filter(
     top5 = set(g.lower() for g in profile_genres[:5])
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             if service == "spotify":
                 resp = await client.get(
                     f"{SPOTIFY_API_BASE}/browse/new-releases",

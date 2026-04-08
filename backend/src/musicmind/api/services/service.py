@@ -150,7 +150,7 @@ async def exchange_spotify_code(
         "code_verifier": code_verifier,
     }
     logger.info("Exchanging Spotify authorization code for tokens")
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(SPOTIFY_TOKEN_URL, data=form_data)
         resp.raise_for_status()
         return resp.json()
@@ -177,7 +177,7 @@ async def refresh_spotify_token(
         "client_id": client_id,
     }
     logger.info("Refreshing Spotify access token")
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(SPOTIFY_TOKEN_URL, data=form_data)
         if resp.is_success:
             return resp.json()
@@ -194,7 +194,7 @@ async def fetch_spotify_user_profile(access_token: str) -> dict:
     Returns:
         User profile dict with id, email, display_name fields.
     """
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(
             SPOTIFY_ME_URL,
             headers={"Authorization": f"Bearer {access_token}"},
@@ -221,7 +221,7 @@ async def check_apple_music_token(
     """
     logger.info("Checking Apple Music token health")
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 APPLE_MUSIC_STOREFRONT_URL,
                 headers={
@@ -254,7 +254,7 @@ async def detect_apple_music_storefront(
         Two-letter storefront code (e.g. "it", "us", "gb").
     """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 APPLE_MUSIC_STOREFRONT_URL,
                 headers={
