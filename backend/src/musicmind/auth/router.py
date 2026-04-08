@@ -10,6 +10,7 @@ import jwt
 import sqlalchemy as sa
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 
+from musicmind.api.rate_limit import AUTH_LIMIT, limiter
 from musicmind.auth.dependencies import get_current_user
 from musicmind.auth.schemas import LoginRequest, SignupRequest
 from musicmind.auth.service import (
@@ -20,7 +21,6 @@ from musicmind.auth.service import (
     set_auth_cookies,
     verify_password,
 )
-from musicmind.api.rate_limit import AUTH_LIMIT, limiter
 from musicmind.db.schema import refresh_tokens, users
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -275,12 +275,12 @@ async def me(
             detail="User not found",
         )
 
-    # Queue background library sync + enrichment (non-blocking)
+    # Trigger indexing if user's library isn't fully enriched
     settings = getattr(request.app.state, "settings", None)
     encryption = getattr(request.app.state, "encryption", None)
     if settings and encryption:
         background_tasks.add_task(
-            _background_sync_library,
+            _background_indexing,
             engine=engine,
             settings=settings,
             encryption=encryption,
@@ -295,122 +295,104 @@ async def me(
     }
 
 
-# In-memory lock: prevent concurrent enrichment runs per user
-_enrichment_locks: dict[str, bool] = {}
+# In-memory lock: prevent concurrent indexing runs per user
+_indexing_locks: dict[str, bool] = {}
 
 
-async def _background_sync_library(
+async def _background_indexing(
     *,
     engine,
     settings,
     encryption,
     user_id: str,
 ) -> None:
-    """Check for un-enriched songs and run enrichment if needed.
+    """Trigger per-user indexing if the library isn't fully enriched.
 
     Uses an in-memory lock to prevent concurrent runs for the same user.
-    Skips tracks that have already been attempted (stored with empty features).
+    Checks indexing status — skips if already complete or in progress.
     """
-    # Prevent concurrent enrichment for the same user
-    if _enrichment_locks.get(user_id):
+    if _indexing_locks.get(user_id):
         return
-    _enrichment_locks[user_id] = True
+    _indexing_locks[user_id] = True
 
     try:
         from musicmind.api.services.service import get_user_connections
-        from musicmind.db.schema import audio_features_cache, song_metadata_cache
+        from musicmind.db.schema import (
+            audio_features_cache,
+            song_metadata_cache,
+            user_indexing_status,
+        )
 
         # Check if user has connected services
         connections = await get_user_connections(engine, user_id=user_id)
         if not connections:
             return
 
-        # Count songs vs enriched songs
+        # Check if indexing already completed
         async with engine.begin() as conn:
-            song_count_result = await conn.execute(
-                sa.select(sa.func.count()).select_from(song_metadata_cache).where(
-                    song_metadata_cache.c.user_id == user_id
+            idx_row = (await conn.execute(
+                sa.select(user_indexing_status.c.step_name).where(
+                    user_indexing_status.c.user_id == user_id
                 )
-            )
-            total_songs = song_count_result.scalar() or 0
+            )).first()
+            if idx_row and idx_row.step_name == "complete":
+                # Already fully indexed — just check for stragglers
+                song_count = (await conn.execute(
+                    sa.select(sa.func.count())
+                    .select_from(song_metadata_cache)
+                    .where(song_metadata_cache.c.user_id == user_id)
+                )).scalar() or 0
+                enriched_count = (await conn.execute(
+                    sa.select(sa.func.count())
+                    .select_from(audio_features_cache)
+                    .where(
+                        sa.and_(
+                            audio_features_cache.c.user_id == user_id,
+                            audio_features_cache.c.energy.isnot(None),
+                        )
+                    )
+                )).scalar() or 0
+                if enriched_count >= song_count:
+                    return
 
-            enriched_count_result = await conn.execute(
-                sa.select(sa.func.count()).select_from(audio_features_cache).where(
-                    audio_features_cache.c.user_id == user_id
-                )
-            )
-            enriched_songs = enriched_count_result.scalar() or 0
+        if not connections:
+            return
 
-        if total_songs == 0:
-            # No songs cached yet — trigger a profile build which fetches + enriches
+        # No songs yet? Build profile first (which fetches library)
+        async with engine.begin() as conn:
+            total = (await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(song_metadata_cache)
+                .where(song_metadata_cache.c.user_id == user_id)
+            )).scalar() or 0
+
+        if total == 0:
             from musicmind.api.taste.service import TasteService
-
-            taste_svc = TasteService()
             try:
-                await taste_svc.get_profile(
+                await TasteService().get_profile(
                     engine, encryption, settings,
                     user_id=user_id, force_refresh=True,
                 )
             except Exception:
-                logger.warning("Background profile build failed for %s", user_id, exc_info=True)
+                logger.warning(
+                    "Background profile build failed for %s",
+                    user_id, exc_info=True,
+                )
             return
 
-        # If >10% of songs lack enrichment, run enrichment on un-enriched ones
-        gap = total_songs - enriched_songs
-        if gap <= 0:
-            return
+        # Run the full indexing pipeline
+        logger.info("Starting indexing pipeline for user %s", user_id)
+        from musicmind.indexer import run_indexing
 
-        logger.info(
-            "Background sync: %d/%d songs need enrichment for user %s",
-            gap, total_songs, user_id,
-        )
-
-        # Fetch un-enriched songs from cache
-        async with engine.begin() as conn:
-            # Get songs that don't have audio features yet
-            enriched_ids_q = sa.select(audio_features_cache.c.catalog_id).where(
-                audio_features_cache.c.user_id == user_id
-            )
-            result = await conn.execute(
-                sa.select(song_metadata_cache).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == user_id,
-                        song_metadata_cache.c.catalog_id.notin_(enriched_ids_q),
-                    )
-                ).limit(50)  # Process up to 50 un-enriched songs per page load
-            )
-            rows = result.fetchall()
-
-        if not rows:
-            return
-
-        import json as _json
-
-        tracks = []
-        for row in rows:
-            genres = row.genre_names
-            if isinstance(genres, str):
-                try:
-                    genres = _json.loads(genres)
-                except (ValueError, TypeError):
-                    genres = []
-            tracks.append({
-                "catalog_id": row.catalog_id,
-                "name": row.name or "",
-                "artist_name": row.artist_name or "",
-                "isrc": row.isrc or "",
-                "service_source": getattr(row, "service_source", ""),
-                "genre_names": genres,
-            })
-
-        from musicmind.engine.enrichment.orchestrator import enrich_tracks
-
-        await enrich_tracks(
-            engine, tracks, user_id=user_id,
-            soundstat_api_key=settings.soundstat_api_key,
+        await run_indexing(
+            engine, encryption, settings,
+            user_id=user_id,
         )
 
     except Exception:
-        logger.warning("Background library sync failed for user %s", user_id, exc_info=True)
+        logger.warning(
+            "Background indexing failed for user %s",
+            user_id, exc_info=True,
+        )
     finally:
-        _enrichment_locks.pop(user_id, None)
+        _indexing_locks.pop(user_id, None)
