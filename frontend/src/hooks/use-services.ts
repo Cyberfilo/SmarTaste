@@ -30,6 +30,7 @@ export function useServices() {
   return useQuery<ServicesResponse>({
     queryKey: ["services"],
     queryFn: () => apiFetch<ServicesResponse>("/api/services"),
+    staleTime: 5 * 60 * 1000,
   });
 }
 

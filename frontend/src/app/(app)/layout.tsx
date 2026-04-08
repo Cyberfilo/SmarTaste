@@ -31,7 +31,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     useAuthStore();
   const isChat = pathname === "/chat";
 
-  // Poll enrichment progress — only when authenticated, slow interval
+  // Poll enrichment progress — only show for active indexing (calibration)
   const { data: enrichmentData } = useQuery<{
     total_songs: number;
     enriched_songs: number;
@@ -42,13 +42,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     queryKey: ["enrichment-status"],
     queryFn: () => apiFetch("/api/taste/enrichment-status"),
     enabled: isAuthenticated,
-    refetchInterval: 15_000, // 15s, not 3s
-    staleTime: 10_000,
+    refetchInterval: 30_000, // 30s — only for showing indexing bar
+    staleTime: 25_000,
   });
 
-  const enrichmentActive = enrichmentData
-    ? (!enrichmentData.complete || enrichmentData.indexing) && enrichmentData.total_songs > 0
-    : false;
+  // Only show enrichment bar when actively indexing (calibration top artist enrichment)
+  // Worker enrichment is invisible to the user
+  const enrichmentActive = enrichmentData?.indexing ?? false;
 
   // Redirect to onboarding if user has a service connected but hasn't calibrated
   const { data: calibrationStatus } = useCalibrationStatus();
