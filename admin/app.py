@@ -3,7 +3,7 @@
 Lightweight FastAPI app that:
 1. Serves the admin dashboard HTML
 2. Proxies API requests to the main SmarTaste backend
-3. Uses its own simple password auth (ADMIN_PASSWORD env var)
+3. Uses cookie-based password auth (survives restarts)
 
 Deployed on Railway at admin.music.menghi.dev.
 """
@@ -11,8 +11,8 @@ Deployed on Railway at admin.music.menghi.dev.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
-import secrets
 
 import httpx
 from fastapi import Cookie, FastAPI, Request, Response
@@ -30,8 +30,10 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Simple session token store (in-memory, resets on restart)
-_valid_tokens: set[str] = set()
+# Derive a stable signing key from the password (survives restarts)
+_COOKIE_KEY = hashlib.sha256(
+    f"staste-admin-{ADMIN_PASSWORD}".encode()
+).hexdigest() if ADMIN_PASSWORD else ""
 
 app = FastAPI(title="SmarTaste Admin")
 
@@ -40,9 +42,19 @@ if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+def _sign_token(password: str) -> str:
+    """Create an HMAC signature of the password using the derived key."""
+    return hmac.new(
+        _COOKIE_KEY.encode(), password.encode(), hashlib.sha256,
+    ).hexdigest()
+
+
 def _check_admin_session(admin_token: str | None) -> bool:
-    """Validate admin session token."""
-    return admin_token is not None and admin_token in _valid_tokens
+    """Validate admin session — compare cookie against expected HMAC."""
+    if not admin_token or not ADMIN_PASSWORD or not _COOKIE_KEY:
+        return False
+    expected = _sign_token(ADMIN_PASSWORD)
+    return hmac.compare_digest(admin_token, expected)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -55,7 +67,10 @@ async def index(admin_token: str | None = Cookie(default=None)):
 
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page():
+async def login_page(admin_token: str | None = Cookie(default=None)):
+    # If already logged in, redirect to dashboard
+    if _check_admin_session(admin_token):
+        return RedirectResponse(url="/")
     html_path = os.path.join(os.path.dirname(__file__), "templates", "login.html")
     with open(html_path) as f:
         return HTMLResponse(content=f.read())
@@ -75,21 +90,18 @@ async def login(request: Request):
     if password != ADMIN_PASSWORD:
         return JSONResponse({"error": "Wrong password"}, status_code=401)
 
-    token = secrets.token_urlsafe(32)
-    _valid_tokens.add(token)
+    token = _sign_token(password)
 
     response = JSONResponse({"ok": True})
     response.set_cookie(
         "admin_token", token,
-        httponly=True, samesite="lax", secure=True, max_age=86400,
+        httponly=True, samesite="lax", secure=True, max_age=86400 * 30,
     )
     return response
 
 
 @app.post("/auth/logout")
-async def logout(admin_token: str | None = Cookie(default=None)):
-    if admin_token:
-        _valid_tokens.discard(admin_token)
+async def logout():
     response = JSONResponse({"ok": True})
     response.delete_cookie("admin_token")
     return response
@@ -143,7 +155,6 @@ async def proxy_api(
         k: v for k, v in request.headers.items()
         if k.lower() not in ("host", "cookie")
     }
-    # Authenticate with backend via shared secret
     if ADMIN_SECRET:
         headers["x-admin-secret"] = ADMIN_SECRET
 

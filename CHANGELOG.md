@@ -7,6 +7,16 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 4.140 — 2026-04-08
+
+### Changed — Admin Dashboard
+- **Cookie login persistence**: Login survives admin service restarts — uses HMAC-signed cookie derived from ADMIN_PASSWORD instead of in-memory session tokens. Cookie valid for 30 days.
+- **Live logs enhanced**: Worker activity highlighted with colored left border (blue for enrichment, yellow for scans). Song list entries indented. Message counter shows total received. Log buffer increased to 500 lines. Log feed height increased to 400px.
+- **Auto-refresh on worker events**: Dashboard data auto-refreshes 2s after detecting worker cycle completion or backfill in the live log stream (no more waiting for the 10s poll).
+- **Polling reduced**: 30s → 10s for KPI/progress data.
+
+---
+
 ## V 4.130 — 2026-04-08
 
 ### Changed
