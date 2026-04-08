@@ -212,27 +212,70 @@ export function ServiceConnections() {
     setAppleMusicLoading(true);
     try {
       // 1. Get developer token from backend
-      const tokenRes = await new Promise<{ developer_token: string }>(
-        (resolve, reject) => {
-          appleMusicToken.mutate(undefined, {
-            onSuccess: resolve,
-            onError: reject,
-          });
-        }
-      );
+      let tokenRes: { developer_token: string };
+      try {
+        tokenRes = await new Promise<{ developer_token: string }>(
+          (resolve, reject) => {
+            appleMusicToken.mutate(undefined, {
+              onSuccess: resolve,
+              onError: reject,
+            });
+          }
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        toast.error("Failed to get Apple Music developer token", {
+          description: msg.includes("401") || msg.includes("Session")
+            ? "Your session may have expired. Try refreshing the page."
+            : msg,
+        });
+        return;
+      }
+
+      if (!tokenRes?.developer_token) {
+        toast.error("Apple Music not configured on this server");
+        return;
+      }
 
       // 2. Load MusicKit JS
       toast.info("Loading Apple Music...");
-      await loadMusicKitJS();
+      try {
+        await loadMusicKitJS();
+      } catch (err) {
+        toast.error("Failed to load Apple Music SDK", {
+          description: "Check your internet connection or try a different browser.",
+        });
+        return;
+      }
 
-      // 3. Configure MusicKit with our developer token (v3 returns a promise)
-      const music = await window.MusicKit.configure({
-        developerToken: tokenRes.developer_token,
-        app: { name: "SmarTaste", build: "1.0.0" },
-      });
+      // 3. Configure MusicKit with our developer token
+      let music: MusicKitInstance;
+      try {
+        music = await window.MusicKit.configure({
+          developerToken: tokenRes.developer_token,
+          app: { name: "SmarTaste", build: "1.0.0" },
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Configuration failed";
+        toast.error("Apple Music configuration failed", {
+          description: msg,
+        });
+        return;
+      }
 
       // 4. Authorize — opens Apple's sign-in popup
-      const musicUserToken = await music.authorize();
+      let musicUserToken: string;
+      try {
+        musicUserToken = await music.authorize();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Authorization failed";
+        toast.error("Apple Music authorization failed", {
+          description: msg.includes("popup")
+            ? "Your browser may be blocking popups. Allow popups for this site."
+            : msg,
+        });
+        return;
+      }
 
       if (!musicUserToken) {
         toast.error("Apple Music authorization was cancelled");
@@ -260,7 +303,7 @@ export function ServiceConnections() {
     } finally {
       setAppleMusicLoading(false);
     }
-  }, [appleMusicToken, appleMusicConnect]);
+  }, [appleMusicToken, appleMusicConnect, calibrationStatus, router]);
 
   function handleDisconnect(service: string) {
     disconnectService.mutate(service, {

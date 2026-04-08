@@ -86,10 +86,8 @@ export async function apiFetch<T>(
         credentials: "include",
       });
     } else {
-      // Refresh failed, redirect to login
-      if (typeof window !== "undefined") {
-        window.location.href = "/login";
-      }
+      // Refresh failed — throw error, let caller decide how to handle.
+      // Auth store's checkAuth() handles the redirect to /login.
       throw new Error("Session expired. Please log in again.");
     }
   }
