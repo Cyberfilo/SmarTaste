@@ -118,7 +118,6 @@ interface MeResponse {
   user_id: string;
   email: string;
   display_name: string;
-  is_admin: boolean;
 }
 
 export const authApi = {
