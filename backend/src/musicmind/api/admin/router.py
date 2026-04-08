@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from starlette.responses import StreamingResponse
 
@@ -16,8 +17,6 @@ from musicmind.api.admin.log_stream import get_recent_logs, subscribe, unsubscri
 from musicmind.api.admin.progress import get_enrichment_progress
 from musicmind.auth.dependencies import get_current_user
 from musicmind.db.schema import users
-
-import sqlalchemy as sa
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ async def stream_logs(
                 try:
                     entry = await asyncio.wait_for(queue.get(), timeout=30.0)
                     yield f"data: {json.dumps(entry)}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": keepalive\n\n"
         finally:
             unsubscribe(queue)
@@ -112,6 +111,12 @@ async def get_system_status(
 ) -> dict:
     """Get system health + enrichment summary."""
     from musicmind import __version__
+    from musicmind.db.schema import (
+        audio_features_global,
+        listening_history,
+        service_connections,
+        user_calibration,
+    )
 
     engine = request.app.state.engine
     settings = request.app.state.settings
@@ -121,6 +126,26 @@ async def get_system_status(
             sa.select(sa.func.count()).select_from(users)
         )).scalar() or 0
 
+        # Service connections count
+        connections_count = (await conn.execute(
+            sa.select(sa.func.count()).select_from(service_connections)
+        )).scalar() or 0
+
+        # Global ISRC cache size
+        global_cache_count = (await conn.execute(
+            sa.select(sa.func.count()).select_from(audio_features_global)
+        )).scalar() or 0
+
+        # Listening history entries
+        history_count = (await conn.execute(
+            sa.select(sa.func.count()).select_from(listening_history)
+        )).scalar() or 0
+
+        # Calibrated users
+        calibrated_users = (await conn.execute(
+            sa.select(sa.func.count(sa.distinct(user_calibration.c.user_id)))
+        )).scalar() or 0
+
     progress = await get_enrichment_progress(engine)
     total_songs = sum(u["total_songs"] for u in progress)
     total_enriched = sum(u["enriched_songs"] for u in progress)
@@ -128,10 +153,121 @@ async def get_system_status(
     return {
         "version": __version__,
         "users": user_count,
+        "connections": connections_count,
+        "calibrated_users": calibrated_users,
         "total_songs": total_songs,
         "total_enriched": total_enriched,
         "enrichment_pct": round(
             total_enriched / total_songs * 100, 1
         ) if total_songs > 0 else 0,
+        "global_isrc_cache": global_cache_count,
+        "listening_history_entries": history_count,
         "soundstat_configured": bool(settings.soundstat_api_key),
     }
+
+
+@router.get("/errors")
+async def get_recent_errors(
+    request: Request,
+    limit: int = 50,
+    _admin: dict = Depends(require_admin),
+) -> dict:
+    """Get recent errors from the logging database."""
+    logs_engine = getattr(request.app.state, "logs_engine", None)
+    if not logs_engine:
+        return {"errors": [], "source": "unavailable"}
+
+    try:
+        from musicmind.db.logs import request_logs
+
+        async with logs_engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(request_logs)
+                .where(request_logs.c.status_code >= 500)
+                .order_by(request_logs.c.timestamp.desc())
+                .limit(limit)
+            )
+            rows = result.fetchall()
+
+        errors = [
+            {
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                "method": row.method,
+                "path": row.path,
+                "status_code": row.status_code,
+                "duration_ms": row.duration_ms,
+                "user_id": row.user_id,
+                "error_detail": row.error_detail,
+            }
+            for row in rows
+        ]
+        return {"errors": errors, "source": "logs_db"}
+    except Exception:
+        logger.warning("Failed to fetch errors from logs DB")
+        return {"errors": [], "source": "error"}
+
+
+@router.get("/request-stats")
+async def get_request_stats(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+) -> dict:
+    """Get request statistics from the logging database."""
+    logs_engine = getattr(request.app.state, "logs_engine", None)
+    if not logs_engine:
+        return {"stats": {}, "source": "unavailable"}
+
+    try:
+        from musicmind.db.logs import request_logs
+
+        async with logs_engine.begin() as conn:
+            # Total requests today
+            total_q = await conn.execute(
+                sa.select(sa.func.count()).select_from(request_logs).where(
+                    request_logs.c.timestamp >= sa.func.current_date()
+                )
+            )
+            total_today = total_q.scalar() or 0
+
+            # Errors today
+            errors_q = await conn.execute(
+                sa.select(sa.func.count()).select_from(request_logs).where(
+                    sa.and_(
+                        request_logs.c.timestamp >= sa.func.current_date(),
+                        request_logs.c.status_code >= 500,
+                    )
+                )
+            )
+            errors_today = errors_q.scalar() or 0
+
+            # Avg response time today
+            avg_q = await conn.execute(
+                sa.select(sa.func.avg(request_logs.c.duration_ms)).where(
+                    request_logs.c.timestamp >= sa.func.current_date()
+                )
+            )
+            avg_duration = round(avg_q.scalar() or 0, 1)
+
+            # Slow requests today (>5s)
+            slow_q = await conn.execute(
+                sa.select(sa.func.count()).select_from(request_logs).where(
+                    sa.and_(
+                        request_logs.c.timestamp >= sa.func.current_date(),
+                        request_logs.c.duration_ms > 5000,
+                    )
+                )
+            )
+            slow_today = slow_q.scalar() or 0
+
+        return {
+            "stats": {
+                "total_today": total_today,
+                "errors_today": errors_today,
+                "avg_duration_ms": avg_duration,
+                "slow_requests_today": slow_today,
+            },
+            "source": "logs_db",
+        }
+    except Exception:
+        logger.warning("Failed to fetch request stats from logs DB")
+        return {"stats": {}, "source": "error"}
