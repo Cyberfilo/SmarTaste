@@ -7,6 +7,16 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.110 — 2026-04-08
+
+### Fixed — Tags + Credits Not Completing
+- **Root cause**: Gap detection used O(n) individual queries per song. With 3,100 songs = 3,100+ SELECT queries just to find what's missing. Now uses single batch `IN` query.
+- **Last.fm backfill now concurrent**: 5 simultaneous API calls via `asyncio.Semaphore(5)` instead of sequential. ~5x faster.
+- **Worker backfills ALL songs** (per-user + global) not just 200 global songs per cycle.
+- **MusicBrainz gap detection batched**: single `IN` query for all ISRCs instead of per-song check.
+
+---
+
 ## V 5.100 — 2026-04-08
 
 ### Added
