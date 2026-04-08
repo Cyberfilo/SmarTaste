@@ -15,7 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from starlette.responses import StreamingResponse
 
 from musicmind.api.admin.log_stream import get_recent_logs, subscribe, unsubscribe
-from musicmind.api.admin.progress import get_enrichment_breakdown, get_enrichment_progress
+from musicmind.api.admin.progress import (
+    cleanup_orphaned_features,
+    get_enrichment_breakdown,
+    get_enrichment_progress,
+)
 from musicmind.db.schema import users
 
 logger = logging.getLogger(__name__)
@@ -169,7 +173,7 @@ async def get_system_status(
         "total_songs": total_songs,
         "total_enriched": total_enriched,
         "enrichment_pct": round(
-            total_enriched / total_songs * 100, 1
+            min(total_enriched / total_songs, 1.0) * 100, 1
         ) if total_songs > 0 else 0,
         "global_isrc_cache": global_cache_count,
         "listening_history_entries": history_count,
@@ -477,3 +481,18 @@ async def get_worker_status(
     except Exception:
         logger.warning("Failed to get worker status", exc_info=True)
         return {"available": False, "reason": "query failed"}
+
+
+@router.post("/cleanup-orphans")
+async def cleanup_orphans(
+    request: Request,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Delete orphaned audio_features_cache rows with no matching song.
+
+    These occur when songs are deleted from song_metadata_cache but their
+    audio features rows are left behind. The audio data is already preserved
+    in audio_features_global by ISRC.
+    """
+    result = await cleanup_orphaned_features(request.app.state.engine)
+    return result

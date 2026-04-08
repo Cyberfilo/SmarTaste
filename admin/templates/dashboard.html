@@ -488,7 +488,10 @@
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M10 9a3 3 0 100-6 3 3 0 000 6zM6 8a2 2 0 11-4 0 2 2 0 014 0zM1.49 15.326a.78.78 0 01-.358-.442 3 3 0 014.308-3.516 6.484 6.484 0 00-1.905 3.959c-.023.222-.014.442.025.654a4.97 4.97 0 01-2.07-.655zM16.44 15.98a4.97 4.97 0 002.07-.654.78.78 0 00.357-.442 3 3 0 00-4.308-3.517 6.484 6.484 0 011.907 3.96 2.32 2.32 0 01-.026.654zM18 8a2 2 0 11-4 0 2 2 0 014 0zM5.304 16.19a.844.844 0 01-.277-.71 5 5 0 019.947 0 .843.843 0 01-.277.71A6.975 6.975 0 0110 18a6.974 6.974 0 01-4.696-1.81z"/></svg>
           Per-User Enrichment
         </div>
-        <span class="section-badge badge-blue" id="userCount"></span>
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <button class="btn" id="cleanupBtn" style="display:none;font-size:0.6875rem;padding:0.25rem 0.625rem;color:var(--danger);border-color:var(--danger)" onclick="cleanupOrphans()">Clean orphans</button>
+          <span class="section-badge badge-blue" id="userCount"></span>
+        </div>
       </div>
       <div id="progress">
         <div class="empty-state">Loading enrichment data...</div>
@@ -604,7 +607,8 @@
     }
 
     function progressItem(u) {
-      const pct = u.percentage || 0;
+      const pct = Math.min(100, u.percentage || 0);
+      const orphans = u.orphan_features || 0;
       return `<div class="progress-item">
         <div class="progress-top">
           <span class="progress-name">${u.display_name}</span>
@@ -614,7 +618,8 @@
         <div class="progress-meta">
           <span>${icons.songs.replace('viewBox', 'width="12" height="12" viewBox')} Library: ${u.library_songs}</span>
           <span>Worker: ${u.worker_songs || 0}</span>
-          <span>Artists: ${u.unique_artists || '?'}</span>
+          <span>Artists: ${u.library_artists || 0} library + ${u.discovered_artists || 0} discovered</span>
+          ${orphans > 0 ? `<span style="color:var(--danger)">Orphans: ${orphans}</span>` : ''}
         </div>
       </div>`;
     }
@@ -669,7 +674,7 @@
             kpiCard('Users', s.users, `${s.calibrated_users} calibrated`, 'users', 'blue'),
             kpiCard('Connections', s.connections, '', 'connections', 'purple'),
             kpiCard('Songs', s.total_songs.toLocaleString(), `${s.total_enriched.toLocaleString()} enriched`, 'songs', 'green'),
-            kpiCard('Enrichment', `${s.enrichment_pct}%`, s.soundstat_configured ? 'SoundStat active' : 'Free tier', 'enrichment', 'amber'),
+            kpiCard('Enrichment', `${Math.min(100, s.enrichment_pct)}%`, s.soundstat_configured ? 'SoundStat active' : 'Free tier', 'enrichment', 'amber'),
             kpiCard('ISRC Cache', s.global_isrc_cache.toLocaleString(), 'Global shared', 'cache', 'blue'),
             kpiCard('History', s.listening_history_entries.toLocaleString(), 'Entries', 'history', 'purple'),
           ].join('');
@@ -690,13 +695,21 @@
           const p = await progressResp.json();
           const el = document.getElementById('progress');
           const badge = document.getElementById('userCount');
+          const cleanupBtn = document.getElementById('cleanupBtn');
           if (p.users && p.users.length > 0) {
             el.innerHTML = p.users.map(progressItem).join('');
             badge.textContent = `${p.users.length} user${p.users.length !== 1 ? 's' : ''}`;
             badge.className = 'section-badge badge-blue';
+            // Show cleanup button if any user has orphans
+            const totalOrphans = p.users.reduce((sum, u) => sum + (u.orphan_features || 0), 0);
+            if (cleanupBtn) {
+              cleanupBtn.style.display = totalOrphans > 0 ? 'inline-flex' : 'none';
+              cleanupBtn.textContent = `Clean ${totalOrphans} orphans`;
+            }
           } else {
             el.innerHTML = emptyState('No users with songs yet');
             badge.textContent = '0';
+            if (cleanupBtn) cleanupBtn.style.display = 'none';
           }
         }
 
@@ -744,8 +757,16 @@
           const badge = document.getElementById('workerBadge');
 
           if (!w.available) {
-            el.innerHTML = emptyState(w.reason || 'Worker logs unavailable');
-            badge.textContent = 'offline';
+            el.innerHTML = `<div class="empty-state" style="text-align:left;padding:1rem">
+              <div style="color:var(--danger);font-weight:600;margin-bottom:0.5rem">${w.reason || 'Worker logs unavailable'}</div>
+              <div style="font-size:0.75rem;color:var(--text-secondary);line-height:1.6">
+                Possible causes:<br>
+                &bull; <b>MUSICMIND_LOGS_DATABASE_URL</b> not set on the worker service<br>
+                &bull; Worker service not yet deployed with latest code<br>
+                &bull; Logs DB not reachable from worker
+              </div>
+            </div>`;
+            badge.textContent = 'no logs';
             badge.className = 'section-badge badge-red';
           } else {
             const lastAgo = w.last_activity ? timeAgo(new Date(w.last_activity)) : 'never';
@@ -922,6 +943,29 @@
       const div = document.createElement('div');
       div.textContent = str;
       return div.innerHTML;
+    }
+
+    // ── Orphan Cleanup ──────────────────────────────
+    async function cleanupOrphans() {
+      const btn = document.getElementById('cleanupBtn');
+      btn.textContent = 'Cleaning...';
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/api/admin/cleanup-orphans', { method: 'POST', credentials: 'include' });
+        if (resp.ok) {
+          const r = await resp.json();
+          btn.textContent = `Cleaned ${r.total_deleted}`;
+          btn.style.color = 'var(--success)';
+          btn.style.borderColor = 'var(--success)';
+          setTimeout(() => fetchData(), 1000);
+        } else {
+          btn.textContent = 'Failed';
+        }
+      } catch (e) {
+        btn.textContent = 'Error';
+        console.error('Cleanup failed:', e);
+      }
+      setTimeout(() => { btn.disabled = false; }, 3000);
     }
 
     // ── Logout ──────────────────────────────────────
