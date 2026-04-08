@@ -284,6 +284,30 @@ audio_features_cache = sa.Table(
     sa.PrimaryKeyConstraint("catalog_id", "user_id"),
 )
 
+audio_features_global = sa.Table(
+    "audio_features_global",
+    metadata,
+    sa.Column("isrc", sa.Text, primary_key=True),
+    sa.Column("tempo", sa.Float, nullable=True),
+    sa.Column("energy", sa.Float, nullable=True),
+    sa.Column("brightness", sa.Float, nullable=True),
+    sa.Column("danceability", sa.Float, nullable=True),
+    sa.Column("acousticness", sa.Float, nullable=True),
+    sa.Column("valence_proxy", sa.Float, nullable=True),
+    sa.Column("beat_strength", sa.Float, nullable=True),
+    sa.Column("key", sa.Text, nullable=True),
+    sa.Column("scale", sa.Text, nullable=True),
+    sa.Column("instrumentalness", sa.Float, nullable=True),
+    sa.Column("loudness", sa.Float, nullable=True),
+    sa.Column("feature_source", sa.JSON, server_default="{}"),
+    sa.Column(
+        "analyzed_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 isrc_spotify_mapping = sa.Table(
     "isrc_spotify_mapping",
     metadata,

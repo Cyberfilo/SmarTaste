@@ -20,7 +20,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from musicmind.db.schema import audio_features_cache
+from musicmind.db.schema import audio_features_cache, audio_features_global
 from musicmind.engine.enrichment.deezer import fetch_deezer_features
 from musicmind.engine.enrichment.musicbrainz import resolve_spotify_id
 from musicmind.engine.enrichment.soundstat import fetch_soundstat_features
@@ -176,10 +176,20 @@ async def _enrich_single_track(
     if not catalog_id:
         return "skipped"
 
-    # Skip fully enriched
+    # Skip fully enriched (per-user cache)
     existing = await _get_existing_features(engine, catalog_id, user_id)
     if existing and not _missing_fields(existing):
         return "skipped"
+
+    # Check global ISRC cache — if another user already enriched this song, reuse it
+    if isrc:
+        global_hit = await _get_global_features(engine, isrc)
+        if global_hit and not _missing_fields(global_hit):
+            await _store_features(
+                engine, catalog_id, user_id,
+                dict(global_hit), _get_source_dict(global_hit),
+            )
+            return "skipped"
 
     features = dict(existing) if existing else {}
     feature_source = _get_source_dict(existing)
@@ -228,12 +238,13 @@ async def _enrich_single_track(
             logger.debug("SoundStat enrichment failed for %s", catalog_id)
 
     if feature_source:
-        await _store_features(engine, catalog_id, user_id, features, feature_source)
+        await _store_features(
+            engine, catalog_id, user_id, features, feature_source, isrc=isrc,
+        )
     elif enriched_by == "failed":
-        # Mark as attempted so it's not retried forever
         await _store_features(
             engine, catalog_id, user_id,
-            {}, {"_status": "no_data_available"},
+            {}, {"_status": "no_data_available"}, isrc="",
         )
 
     return enriched_by
@@ -393,11 +404,96 @@ async def _get_existing_features(
     }
 
 
+async def _get_global_features(
+    engine: Any, isrc: str,
+) -> dict[str, Any] | None:
+    """Check the global ISRC-keyed cache for existing enrichment."""
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(audio_features_global).where(
+                audio_features_global.c.isrc == isrc
+            )
+        )
+        row = result.first()
+    if row is None:
+        return None
+    fs = row.feature_source
+    if isinstance(fs, str):
+        try:
+            fs = json.loads(fs)
+        except (json.JSONDecodeError, TypeError):
+            fs = {}
+    return {
+        "tempo": row.tempo, "energy": row.energy,
+        "brightness": row.brightness, "danceability": row.danceability,
+        "acousticness": row.acousticness, "valence_proxy": row.valence_proxy,
+        "beat_strength": row.beat_strength, "key": row.key,
+        "scale": row.scale, "instrumentalness": row.instrumentalness,
+        "loudness": row.loudness, "feature_source": fs or {},
+    }
+
+
+async def _store_global_features(
+    engine: Any, isrc: str,
+    features: dict[str, Any], feature_source: dict[str, str],
+) -> None:
+    """Write enriched features to the global ISRC cache."""
+    if not isrc:
+        return
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await conn.execute(sa.text(
+            "INSERT INTO audio_features_global"
+            " (isrc, tempo, energy, brightness, danceability,"
+            "  acousticness, valence_proxy, beat_strength,"
+            "  key, scale, instrumentalness, loudness,"
+            "  feature_source, analyzed_at)"
+            " VALUES (:isrc, :tempo, :energy, :brightness,"
+            "  :danceability, :acousticness, :valence_proxy, :beat_strength,"
+            "  :key, :scale, :instrumentalness, :loudness,"
+            "  :feature_source, :analyzed_at)"
+            " ON CONFLICT (isrc) DO UPDATE SET"
+            " tempo = COALESCE(EXCLUDED.tempo, audio_features_global.tempo),"
+            " energy = COALESCE(EXCLUDED.energy, audio_features_global.energy),"
+            " brightness = COALESCE(EXCLUDED.brightness,"
+            "   audio_features_global.brightness),"
+            " danceability = COALESCE(EXCLUDED.danceability,"
+            "   audio_features_global.danceability),"
+            " acousticness = COALESCE(EXCLUDED.acousticness,"
+            "   audio_features_global.acousticness),"
+            " valence_proxy = COALESCE(EXCLUDED.valence_proxy,"
+            "   audio_features_global.valence_proxy),"
+            " beat_strength = COALESCE(EXCLUDED.beat_strength,"
+            "   audio_features_global.beat_strength),"
+            " feature_source = :feature_source,"
+            " analyzed_at = :analyzed_at"
+        ), {
+            "isrc": isrc,
+            "tempo": features.get("tempo"),
+            "energy": features.get("energy"),
+            "brightness": features.get("brightness"),
+            "danceability": features.get("danceability"),
+            "acousticness": features.get("acousticness"),
+            "valence_proxy": features.get("valence_proxy"),
+            "beat_strength": features.get("beat_strength"),
+            "key": features.get("key"),
+            "scale": features.get("scale"),
+            "instrumentalness": features.get("instrumentalness"),
+            "loudness": features.get("loudness"),
+            "feature_source": json.dumps(feature_source),
+            "analyzed_at": now,
+        })
+
+
 async def _store_features(
     engine: Any, catalog_id: str, user_id: str,
     features: dict[str, Any], feature_source: dict[str, str],
+    isrc: str = "",
 ) -> None:
     now = datetime.now(UTC)
+    # Write to global ISRC cache first
+    if isrc:
+        await _store_global_features(engine, isrc, features, feature_source)
     async with engine.begin() as conn:
         stmt = sa.text(
             "INSERT INTO audio_features_cache"
