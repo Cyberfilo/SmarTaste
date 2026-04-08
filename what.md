@@ -1,6 +1,6 @@
 # SmarTaste — Complete Project Documentation
 
-> Last updated: 2026-03-31 | Version: 0.1.0 | Status: Production (alpha)
+> Last updated: 2026-04-08 | Version: 0.2.0 | Status: Production (beta)
 
 ## What Is SmarTaste?
 
@@ -557,8 +557,30 @@ Run: `cd backend && uv run python -m pytest tests/ -v`
 
 ---
 
+## Infrastructure (Railway)
+
+| Service | Image/Source | Purpose |
+|---------|-------------|---------|
+| **MusicMind** | GitHub (backend/) | FastAPI backend |
+| **Postgres** | PostgreSQL 16 | Main database (23 tables, user-scoped) |
+| **smartaste-logs** | PostgreSQL 16 | Logging database (request_logs, enrichment_logs, error_logs) |
+| **NocoDB** | `nocodb/nocodb` Docker | Admin spreadsheet UI for browsing/querying databases |
+
+### NocoDB Setup
+1. Set env vars: `NC_DB` (internal Postgres URL), `NC_AUTH_JWT_SECRET`, `NC_PUBLIC_URL`
+2. Generate public domain in Railway Settings → Networking
+3. Connect external databases: smartaste-logs for logs, main Postgres for user data
+4. Create views: slow requests, errors, active users, enrichment failures
+
+### Logging Database
+- `MUSICMIND_LOGS_DATABASE_URL` env var on MusicMind service
+- Schema auto-created on startup (3 tables)
+- Batched writer flushes every 5 seconds (no per-request DB writes)
+- Graceful degradation if logs DB is unavailable
+
 ## Version History
 
 | Version | Date | Notes |
 |---------|------|-------|
+| 0.2.0 | 2026-04-08 | Calibration wizard, adaptive weights, logging DB, NocoDB, production hardening |
 | 0.1.0 | 2026-03-30 | Initial alpha — core features working, deployed to music.menghi.dev |

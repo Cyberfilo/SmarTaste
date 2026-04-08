@@ -8,6 +8,36 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Onboarding taste calibration wizard** — 3-step flow after service connection: pick playlists (5x weight), drag-to-reorder artists (top 3 get discography enrichment), pick favorite songs (3x weight). Calibration section in settings for viewing/editing. Dashboard summary card.
+- **Context-adaptive scoring weights** — weights shift per-user based on profile: regional listeners get higher language weight (up to 35%), global listeners drop to 5%. Mood active → audio at 40%. Calibration present → artist +5%. Blends 60/40 with feedback-learned weights.
+- **Play count proxy** — Apple Music has no play counts. `play_count_proxy` table now populated from recently-played polling. Songs with high `seen_count` get proportional weight in profile (capped at 10x). 7-day recency boost (2x).
+- **Calibration boost in scorer** — continuous `min(0.20, weight * 0.03)`, zeroed if `genre_score < 0.15` (artist-in-wrong-genre penalty).
+- **Request logging middleware** — every request logged with method, path, status, duration_ms, user_id. Slow requests (>5s) flagged.
+- **Separate logging PostgreSQL** — `request_logs`, `enrichment_logs`, `error_logs` with batched async writer (5s flush). `MUSICMIND_LOGS_DATABASE_URL` env var. Graceful degradation if logs DB down.
+- **NocoDB admin UI** — `nocodb/nocodb` Docker image on Railway for spreadsheet-style browsing/querying of both databases.
+- **Frontend error boundary** — `error.tsx` with retry button. Global mutation error toast via `MutationCache.onError`.
+- **429 retry with backoff** — `_request_with_retry()` helper in discovery fetch: exponential backoff on 429/5xx, respects Retry-After header, max 3 retries.
+- **Rate limits** — taste 20/min, calibration 10/min, profile refresh 5/min (previously unlimited).
+- **Spotify genre backfill** — discovery strategies now attach artist genres to Spotify tracks (were always empty, scoring 0 on genre/language).
+
+### Fixed
+- **Apple Music OAuth popup blocked** — pre-load MusicKit JS + developer token on mount; authorize() now within browser's user activation window.
+- **Apple Music OAuth silent failure** — removed `window.location.href="/login"` from apiFetch 401 handler; per-step error toasts.
+- **Deezer call signature crash** — `fetch_deezer_features(isrc)` → `fetch_deezer_features(name=, artist_name=, isrc=)`.
+- **Calibration save timeout** — profile rebuild moved to background task (was blocking 30s+).
+- **Calibration duplicate key** — dedup by `(calibration_type, item_id)` before insert.
+- **Calibration redirect race** — `setQueryData` instead of `invalidateQueries` for immediate cache update.
+- **18 missing httpx timeouts** — all `AsyncClient()` calls now have 30s timeout (was infinite hang risk).
+- **Silent enrichment failures** — replaced 3 bare `except: pass` with debug logging.
+
+### Changed
+- **Scoring weights rebalanced** — genre 35%, audio 25%, artist 20%, language 20% (was 45/32/13/10).
+- **Language match neutral** — non-regional songs score 0.5 (was 0.2 penalty).
+- **Enrichment polling 3s → 15s**, /me calls 30s → 60s.
+- **Layout renders immediately** — skeleton UI instead of blocking auth spinner.
+
+---
+
 - **Synesthesia visual identity** — new color palette (deep purple backgrounds, electric violet primary, magenta energy, coral warmth, mint freshness), Sora Bold headings + DM Sans body typography, logo integration in sidebar/header/auth. Replaces the emerald theme entirely.
 - **Audio enrichment pipeline** — progressive background enrichment from free external APIs:
   - Deezer (ISRC-native, free) for BPM/tempo
