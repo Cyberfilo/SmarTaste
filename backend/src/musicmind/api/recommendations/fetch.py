@@ -219,13 +219,13 @@ async def discover_similar_artists(
                 next_layer: list[str] = []
                 for artist_id in current_layer[:10]:
                     try:
-                        related_ids = await _fetch_related_artists(
+                        related = await _fetch_related_artists(
                             client, service, access_token, artist_id,
                             developer_token=developer_token,
                             storefront=storefront,
                             limit=5,
                         )
-                        for rid in related_ids:
+                        for rid, artist_genres in related:
                             if rid in visited:
                                 continue
                             visited.add(rid)
@@ -237,6 +237,11 @@ async def discover_similar_artists(
                                 storefront=storefront,
                                 limit=songs_per_artist,
                             )
+                            # Backfill Spotify genres from artist data
+                            if service == "spotify" and artist_genres:
+                                for t in tracks:
+                                    if not t.get("genre_names"):
+                                        t["genre_names"] = artist_genres
                             candidates.extend(tracks)
                     except (httpx.HTTPStatusError, httpx.HTTPError):
                         logger.warning(
@@ -294,9 +299,12 @@ async def discover_genre_adjacent(
                         )
                         resp.raise_for_status()
                         items = resp.json().get("tracks", {}).get("items", [])
-                        candidates.extend(
-                            _spotify_track_to_cache_dict(t) for t in items
-                        )
+                        for t in items:
+                            track = _spotify_track_to_cache_dict(t)
+                            # Backfill genre from search query
+                            if not track["genre_names"]:
+                                track["genre_names"] = [genre]
+                            candidates.append(track)
 
                     elif service == "apple_music":
                         headers = {
@@ -381,9 +389,11 @@ async def discover_editorial(
                         )
                         resp.raise_for_status()
                         items = resp.json().get("tracks", {}).get("items", [])
-                        candidates.extend(
-                            _spotify_track_to_cache_dict(t) for t in items
-                        )
+                        for t in items:
+                            track = _spotify_track_to_cache_dict(t)
+                            if not track["genre_names"]:
+                                track["genre_names"] = [genre]
+                            candidates.append(track)
 
                     elif service == "apple_music":
                         headers = {
@@ -528,8 +538,12 @@ async def _fetch_related_artists(
     developer_token: str | None = None,
     storefront: str = "us",
     limit: int = 5,
-) -> list[str]:
-    """Fetch IDs of artists related to the given artist."""
+) -> list[tuple[str, list[str]]]:
+    """Fetch (id, genres) tuples for artists related to the given artist.
+
+    Returns genres alongside IDs so Spotify tracks can be genre-backfilled
+    (Spotify tracks don't carry genres — only artist objects do).
+    """
     if service == "spotify":
         resp = await client.get(
             f"{SPOTIFY_API_BASE}/artists/{artist_id}/related-artists",
@@ -537,7 +551,10 @@ async def _fetch_related_artists(
         )
         resp.raise_for_status()
         artists = resp.json().get("artists", [])
-        return [a.get("id", "") for a in artists[:limit] if a.get("id")]
+        return [
+            (a.get("id", ""), a.get("genres", []))
+            for a in artists[:limit] if a.get("id")
+        ]
 
     elif service == "apple_music":
         headers = {"Authorization": f"Bearer {developer_token or access_token}"}
@@ -549,7 +566,10 @@ async def _fetch_related_artists(
         resp.raise_for_status()
         views = resp.json().get("data", [{}])[0].get("views", {})
         similar = views.get("similar-artists", {}).get("data", [])
-        return [a.get("id", "") for a in similar[:limit] if a.get("id")]
+        return [
+            (a.get("id", ""), a.get("attributes", {}).get("genreNames", []))
+            for a in similar[:limit] if a.get("id")
+        ]
 
     return []
 

@@ -121,11 +121,16 @@ async def analyze_seeds(
         # Try to get a preview URL
         preview_url = track.get("preview_url") or ""
 
-        # Fallback: get preview from Deezer via ISRC
-        if not preview_url and isrc:
-            deezer_data = await fetch_deezer_features(isrc)
-            if deezer_data:
-                preview_url = deezer_data.get("preview_url", "")
+        # Fallback: get preview from Deezer via search
+        if not preview_url:
+            name = track.get("name", "")
+            artist_name = track.get("artist_name", "")
+            if name and artist_name:
+                deezer_data = await fetch_deezer_features(
+                    name=name, artist_name=artist_name, isrc=isrc,
+                )
+                if deezer_data:
+                    preview_url = deezer_data.get("preview_url", "")
 
         if not preview_url:
             results.append({
