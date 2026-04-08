@@ -7,6 +7,23 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 4.120 — 2026-04-08
+
+### Fixed — Data Integrity
+- **Enrichment count mismatch (407% bug)**: `audio_features_cache` had orphaned rows from the 148K song cleanup — songs were deleted from `song_metadata_cache` but their audio feature rows remained. Enriched counts now only count songs that still exist (JOIN with song_metadata_cache). Root cause: the cleanup SQL only targeted one table.
+- **Enrichment percentage capped at 100%**: Both backend and frontend now cap at 100% instead of showing impossible values like 407%.
+- **Negative unenriched count**: `unenriched` now uses `max(0, ...)` to prevent negative display values.
+
+### Added
+- **Orphan cleanup**: Worker runs `cleanup_orphaned_features()` on startup — deletes `audio_features_cache` rows with no matching song. Audio data is already preserved in `audio_features_global` (by ISRC). Also available as `POST /api/admin/cleanup-orphans` with button in admin dashboard.
+- **Library vs discovered artists**: Per-user progress now shows "Artists: X library + Y discovered" instead of a single total count.
+- **Orphan count display**: Per-user progress shows orphan count in red when > 0.
+- **Worker logging**: `_startup_scan` and `_backfill_new_signals` now write to `enrichment_logs` (previously only `_process_user` logged). Every cycle logs even when idle. Worker status should now always show activity.
+- **Worker status diagnostics**: When worker status shows "no logs", the dashboard lists possible causes (missing env vars, deployment, connectivity).
+- **Cleanup button**: "Clean N orphans" button appears in per-user enrichment section when orphaned rows exist.
+
+---
+
 ## V 4.110 — 2026-04-08
 
 ### Added — Admin Dashboard Overhaul

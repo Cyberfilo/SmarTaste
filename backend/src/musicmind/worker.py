@@ -83,6 +83,29 @@ async def main() -> None:
         CONCURRENCY, BATCH_SIZE, POLL_INTERVAL, ARTIST_DEPTH,
     )
 
+    # ── Phase 0: Clean orphaned audio_features_cache rows ──────────
+    logger.info("=== ORPHAN CLEANUP: removing stale audio_features_cache rows ===")
+    try:
+        from musicmind.api.admin.progress import cleanup_orphaned_features
+
+        cleanup_result = await cleanup_orphaned_features(engine)
+        if cleanup_result["total_deleted"] > 0:
+            logger.info(
+                "Orphan cleanup: deleted %d stale audio_features_cache rows",
+                cleanup_result["total_deleted"],
+            )
+        else:
+            logger.info("Orphan cleanup: no orphaned rows found")
+        if log_writer:
+            log_writer.log_enrichment(
+                user_id="system",
+                catalog_id="cleanup",
+                stage="orphan_cleanup",
+                result=f"deleted_{cleanup_result['total_deleted']}",
+            )
+    except Exception:
+        logger.exception("Orphan cleanup failed, continuing")
+
     # ── Phase 1: Startup scan — enrich all unenriched tracks ──────────
     logger.info("=== STARTUP SCAN: checking all users for unenriched tracks ===")
     try:
@@ -92,6 +115,13 @@ async def main() -> None:
             startup_stats["unenriched_found"],
             startup_stats["enriched"],
         )
+        if log_writer:
+            log_writer.log_enrichment(
+                user_id="system",
+                catalog_id=f"batch_{startup_stats['unenriched_found']}",
+                stage="startup_scan",
+                result=f"enriched_{startup_stats['enriched']}",
+            )
     except Exception:
         logger.exception("Startup scan failed, continuing to poll loop")
 
@@ -99,12 +129,20 @@ async def main() -> None:
     logger.info("=== BACKFILL: checking for songs missing new enrichment signals ===")
     try:
         backfill_stats = await _backfill_new_signals(engine, settings)
+        tags = backfill_stats.get("tags", 0)
+        credits = backfill_stats.get("credits", 0)
+        lyrics = backfill_stats.get("lyrics", 0)
         logger.info(
             "Backfill complete: %d tags added, %d credits fetched, %d lyrics embedded",
-            backfill_stats.get("tags", 0),
-            backfill_stats.get("credits", 0),
-            backfill_stats.get("lyrics", 0),
+            tags, credits, lyrics,
         )
+        if log_writer:
+            log_writer.log_enrichment(
+                user_id="system",
+                catalog_id=f"backfill_{tags + credits + lyrics}",
+                stage="backfill",
+                result=f"tags_{tags}_credits_{credits}_lyrics_{lyrics}",
+            )
     except Exception:
         logger.exception("Backfill failed, continuing to poll loop")
 
@@ -128,6 +166,18 @@ async def main() -> None:
                 stats["tracks_enriched"],
                 stats["tracks_skipped"],
             )
+            if log_writer:
+                log_writer.log_enrichment(
+                    user_id="system",
+                    catalog_id=f"cycle_{cycle}",
+                    stage="worker_cycle",
+                    result=(
+                        f"enriched_{stats['tracks_enriched']}"
+                        if stats["tracks_enriched"] > 0
+                        else "idle"
+                    ),
+                    duration_ms=int(duration * 1000),
+                )
         except Exception:
             logger.exception("Cycle %d failed", cycle)
 
