@@ -1,11 +1,13 @@
 """Standalone enrichment worker — runs independently of the web server.
 
-Continuously polls the database for all users' top artists, fetches their
-full discographies from connected services, caches song metadata, and
-enriches tracks via the Deezer → ReccoBeats pipeline.
+On startup: full scan of all users → all artists → check enrichment → enrich gaps.
+Then polls continuously for new unenriched tracks.
 
-Designed to run as a separate Railway service with its own rate budget
-so it doesn't compete with user-facing API requests.
+Key behaviors:
+- Processes ALL artists from every user's library (not just top 20)
+- Parses featuring artists ("Drake feat. Future" → searches "Drake" and "Future" separately)
+- Checks global ISRC cache before calling external APIs
+- Logs progress to the logging database
 
 Usage:
     python -m musicmind.worker
@@ -52,7 +54,7 @@ ARTIST_DEPTH = int(os.environ.get("WORKER_ARTIST_DEPTH", "25"))
 
 
 async def main() -> None:
-    """Main worker loop: discover → fetch → cache → enrich → sleep → repeat."""
+    """Startup scan → continuous enrichment loop."""
     from musicmind.config import Settings
     from musicmind.db.engine import create_engine
     from musicmind.security.encryption import EncryptionService
@@ -81,6 +83,19 @@ async def main() -> None:
         CONCURRENCY, BATCH_SIZE, POLL_INTERVAL, ARTIST_DEPTH,
     )
 
+    # ── Phase 1: Startup scan — enrich all unenriched tracks ──────────
+    logger.info("=== STARTUP SCAN: checking all users for unenriched tracks ===")
+    try:
+        startup_stats = await _startup_scan(engine, log_writer=log_writer)
+        logger.info(
+            "Startup scan complete: %d unenriched tracks found, %d enriched",
+            startup_stats["unenriched_found"],
+            startup_stats["enriched"],
+        )
+    except Exception:
+        logger.exception("Startup scan failed, continuing to poll loop")
+
+    # ── Phase 2: Continuous loop — discover new artists + enrich ──────
     cycle = 0
     while True:
         cycle += 1
@@ -93,7 +108,7 @@ async def main() -> None:
             duration = round(time.monotonic() - start, 1)
             logger.info(
                 "Cycle %d complete in %.1fs: %d artists, %d tracks fetched, "
-                "%d enriched, %d skipped (already enriched)",
+                "%d enriched, %d skipped",
                 cycle, duration,
                 stats["artists_processed"],
                 stats["tracks_fetched"],
@@ -104,6 +119,93 @@ async def main() -> None:
             logger.exception("Cycle %d failed", cycle)
 
         await asyncio.sleep(POLL_INTERVAL)
+
+
+# ── Startup Scan ──────────────────────────────────────────────────────────
+
+
+async def _startup_scan(
+    engine,
+    *,
+    log_writer=None,
+) -> dict[str, int]:
+    """Scan ALL users → ALL their songs → find unenriched → enrich them.
+
+    This runs once on startup to catch up on any songs that were cached
+    but never enriched (e.g. from library imports, calibration, etc.).
+    """
+    from musicmind.db.schema import audio_features_cache, song_metadata_cache, users
+    from musicmind.engine.enrichment.orchestrator import enrich_tracks
+
+    stats = {"unenriched_found": 0, "enriched": 0}
+
+    # Get all users
+    async with engine.begin() as conn:
+        result = await conn.execute(sa.select(users.c.id))
+        user_ids = [row.id for row in result]
+
+    for user_id in user_ids:
+        try:
+            # Find songs that have no audio features (or only empty marker rows)
+            async with engine.begin() as conn:
+                enriched_ids_q = sa.select(audio_features_cache.c.catalog_id).where(
+                    sa.and_(
+                        audio_features_cache.c.user_id == user_id,
+                        audio_features_cache.c.energy.isnot(None),
+                    )
+                )
+                result = await conn.execute(
+                    sa.select(song_metadata_cache).where(
+                        sa.and_(
+                            song_metadata_cache.c.user_id == user_id,
+                            song_metadata_cache.c.catalog_id.notin_(enriched_ids_q),
+                        )
+                    ).limit(BATCH_SIZE * 4)  # Cap per user on startup
+                )
+                rows = result.fetchall()
+
+            if not rows:
+                continue
+
+            tracks = []
+            for row in rows:
+                genres = row.genre_names
+                if isinstance(genres, str):
+                    try:
+                        genres = json.loads(genres)
+                    except (json.JSONDecodeError, TypeError):
+                        genres = []
+                tracks.append({
+                    "catalog_id": row.catalog_id,
+                    "name": row.name or "",
+                    "artist_name": row.artist_name or "",
+                    "isrc": row.isrc or "",
+                    "service_source": getattr(row, "service_source", ""),
+                    "genre_names": genres,
+                })
+
+            stats["unenriched_found"] += len(tracks)
+            logger.info(
+                "User %s: %d unenriched tracks found in startup scan",
+                user_id[:8], len(tracks),
+            )
+
+            enrich_result = await enrich_tracks(
+                engine, tracks, user_id=user_id,
+            )
+            enriched = (
+                enrich_result.get("deezer", 0)
+                + enrich_result.get("reccobeats", 0)
+                + enrich_result.get("soundstat", 0)
+            )
+            stats["enriched"] += enriched
+
+        except Exception:
+            logger.warning(
+                "Startup scan failed for user %s", user_id[:8], exc_info=True,
+            )
+
+    return stats
 
 
 # ── Cycle Logic ───────────────────────────────────────────────────────────
@@ -117,9 +219,7 @@ async def _run_cycle(
     log_writer=None,
 ) -> dict[str, int]:
     """One enrichment cycle across all users."""
-    from musicmind.db.schema import (
-        users,
-    )
+    from musicmind.db.schema import users
 
     stats = {
         "artists_processed": 0,
@@ -128,13 +228,11 @@ async def _run_cycle(
         "tracks_skipped": 0,
     }
 
-    # Get all users
     async with engine.begin() as conn:
         result = await conn.execute(sa.select(users.c.id))
         user_ids = [row.id for row in result]
 
     if not user_ids:
-        logger.info("No users found, sleeping")
         return stats
 
     for user_id in user_ids:
@@ -147,7 +245,7 @@ async def _run_cycle(
             for k, v in user_stats.items():
                 stats[k] = stats.get(k, 0) + v
         except Exception:
-            logger.warning("Failed to process user %s", user_id, exc_info=True)
+            logger.warning("Failed to process user %s", user_id[:8], exc_info=True)
 
     return stats
 
@@ -160,7 +258,7 @@ async def _process_user(
     user_id: str,
     log_writer=None,
 ) -> dict[str, int]:
-    """Process one user: get top artists, fetch discographies, enrich."""
+    """Process one user: get ALL artists from library, fetch discographies, enrich."""
     from musicmind.api.recommendations.fetch import (
         _fetch_artist_top_tracks,
         _search_artist_id,
@@ -176,6 +274,7 @@ async def _process_user(
         song_metadata_cache,
     )
     from musicmind.engine.enrichment.orchestrator import enrich_tracks
+    from musicmind.engine.profile import parse_artists
 
     stats = {
         "artists_processed": 0,
@@ -221,55 +320,40 @@ async def _process_user(
             access_token, developer_token,
         )
 
-    # Get top artists from profile
+    # ── Get ALL distinct artists from user's library ──────────────────
     async with engine.begin() as conn:
-        from musicmind.db.schema import taste_profile_snapshots
-
         result = await conn.execute(
-            sa.select(taste_profile_snapshots)
-            .where(taste_profile_snapshots.c.user_id == user_id)
-            .order_by(taste_profile_snapshots.c.computed_at.desc())
-            .limit(1)
+            sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
+                song_metadata_cache.c.user_id == user_id,
+            )
         )
-        profile_row = result.first()
+        raw_artist_names = [row[0] for row in result if row[0]]
 
-    if not profile_row:
+    if not raw_artist_names:
         return stats
 
-    top_artists_raw = profile_row.top_artists
-    if isinstance(top_artists_raw, str):
-        try:
-            top_artists_raw = json.loads(top_artists_raw)
-        except (json.JSONDecodeError, TypeError):
-            top_artists_raw = []
+    # Parse featuring artists: "Drake feat. Future" → ["Drake", "Future"]
+    # Deduplicate by lowercase to avoid searching "drake" twice
+    seen_artists: set[str] = set()
+    artist_names: list[str] = []
+    for raw_name in raw_artist_names:
+        parsed = parse_artists(raw_name)
+        for name, _weight in parsed:
+            key = name.strip().lower()
+            if key and key not in seen_artists and len(key) > 1:
+                seen_artists.add(key)
+                artist_names.append(name.strip())
 
-    artist_names = [
-        a["name"] for a in top_artists_raw[:20]
-        if isinstance(a, dict) and a.get("name")
-    ]
+    logger.info(
+        "User %s: %d raw artist names → %d unique artists (after featuring parse)",
+        user_id[:8], len(raw_artist_names), len(artist_names),
+    )
 
-    if not artist_names:
-        return stats
-
-    # For each artist: search → fetch top tracks → cache → enrich
+    # ── For each artist: search → fetch top tracks → cache → enrich ───
     all_tracks: list[dict[str, Any]] = []
 
     for artist_name in artist_names:
         try:
-            # Check what we already have cached for this artist
-            async with engine.begin() as conn:
-                existing = await conn.execute(
-                    sa.select(song_metadata_cache.c.catalog_id).where(
-                        sa.and_(
-                            song_metadata_cache.c.user_id == user_id,
-                            sa.func.lower(song_metadata_cache.c.artist_name)
-                            == artist_name.lower(),
-                        )
-                    )
-                )
-                cached_ids = {r.catalog_id for r in existing}
-
-            # Search artist and fetch top tracks
             artist_id = await _search_artist_id(
                 service, access_token, artist_name,
                 developer_token=developer_token,
@@ -289,56 +373,64 @@ async def _process_user(
             stats["artists_processed"] += 1
 
             # Cache new tracks into song_metadata_cache
-            new_tracks = [t for t in tracks if t.get("catalog_id") not in cached_ids]
-            if new_tracks:
-                async with engine.begin() as conn:
-                    for track in new_tracks:
-                        cid = track.get("catalog_id", "")
-                        if not cid:
-                            continue
-                        exists = await conn.execute(
-                            sa.select(song_metadata_cache.c.catalog_id).where(
-                                sa.and_(
-                                    song_metadata_cache.c.catalog_id == cid,
-                                    song_metadata_cache.c.user_id == user_id,
-                                )
+            async with engine.begin() as conn:
+                for track in tracks:
+                    cid = track.get("catalog_id", "")
+                    if not cid:
+                        continue
+                    exists = await conn.execute(
+                        sa.select(song_metadata_cache.c.catalog_id).where(
+                            sa.and_(
+                                song_metadata_cache.c.catalog_id == cid,
+                                song_metadata_cache.c.user_id == user_id,
                             )
                         )
-                        if exists.first():
-                            continue
-                        await conn.execute(
-                            song_metadata_cache.insert().values(
-                                catalog_id=cid,
-                                user_id=user_id,
-                                name=track.get("name", ""),
-                                artist_name=track.get("artist_name", ""),
-                                album_name=track.get("album_name", ""),
-                                genre_names=json.dumps(
-                                    track.get("genre_names", [])
-                                ),
-                                duration_ms=track.get("duration_ms"),
-                                release_date=track.get("release_date"),
-                                isrc=track.get("isrc"),
-                                preview_url=track.get("preview_url", ""),
-                                service_source=service,
-                            )
+                    )
+                    if exists.first():
+                        continue
+                    await conn.execute(
+                        song_metadata_cache.insert().values(
+                            catalog_id=cid,
+                            user_id=user_id,
+                            name=track.get("name", ""),
+                            artist_name=track.get("artist_name", ""),
+                            album_name=track.get("album_name", ""),
+                            genre_names=json.dumps(track.get("genre_names", [])),
+                            duration_ms=track.get("duration_ms"),
+                            release_date=track.get("release_date"),
+                            isrc=track.get("isrc"),
+                            preview_url=track.get("preview_url", ""),
+                            service_source=service,
                         )
-                        stats["tracks_fetched"] += 1
+                    )
+                    stats["tracks_fetched"] += 1
 
             all_tracks.extend(tracks)
 
+            # Log progress every 10 artists
+            if stats["artists_processed"] % 10 == 0:
+                logger.info(
+                    "User %s: processed %d/%d artists, %d tracks so far",
+                    user_id[:8], stats["artists_processed"],
+                    len(artist_names), len(all_tracks),
+                )
+
         except Exception:
-            logger.debug("Failed to process artist %s for user %s", artist_name, user_id)
+            logger.debug(
+                "Failed to process artist '%s' for user %s",
+                artist_name, user_id[:8],
+            )
 
     if not all_tracks:
         return stats
 
-    # Check which tracks already have enrichment (per-user or global)
+    # ── Check which tracks need enrichment ────────────────────────────
     tracks_to_enrich: list[dict[str, Any]] = []
     async with engine.begin() as conn:
-        catalog_ids = [t.get("catalog_id", "") for t in all_tracks if t.get("catalog_id")]
+        catalog_ids = [
+            t.get("catalog_id", "") for t in all_tracks if t.get("catalog_id")
+        ]
         if catalog_ids:
-            # Check per-user cache
             enriched_result = await conn.execute(
                 sa.select(audio_features_cache.c.catalog_id).where(
                     sa.and_(
@@ -352,34 +444,40 @@ async def _process_user(
         else:
             enriched_ids = set()
 
+    # Deduplicate tracks by catalog_id before enrichment
+    seen_cids: set[str] = set()
     for t in all_tracks:
         cid = t.get("catalog_id", "")
-        if cid and cid not in enriched_ids:
+        if cid and cid not in enriched_ids and cid not in seen_cids:
+            seen_cids.add(cid)
             tracks_to_enrich.append(t)
         else:
             stats["tracks_skipped"] += 1
 
     if tracks_to_enrich:
         logger.info(
-            "User %s: enriching %d tracks (%d skipped)",
+            "User %s: enriching %d tracks (%d already enriched)",
             user_id[:8], len(tracks_to_enrich), stats["tracks_skipped"],
         )
-        result = await enrich_tracks(
+        enrich_result = await enrich_tracks(
             engine, tracks_to_enrich, user_id=user_id,
             soundstat_api_key=settings.soundstat_api_key,
         )
-        stats["tracks_enriched"] = result.get("deezer", 0) + result.get(
-            "reccobeats", 0
-        ) + result.get("soundstat", 0)
+        stats["tracks_enriched"] = (
+            enrich_result.get("deezer", 0)
+            + enrich_result.get("reccobeats", 0)
+            + enrich_result.get("soundstat", 0)
+        )
 
         if log_writer:
-            for t in tracks_to_enrich:
-                log_writer.log_enrichment(
-                    user_id=user_id,
-                    catalog_id=t.get("catalog_id", ""),
-                    stage="worker",
-                    result="enriched",
-                )
+            log_writer.log_enrichment(
+                user_id=user_id,
+                catalog_id=f"batch_{len(tracks_to_enrich)}",
+                stage="worker_cycle",
+                result=f"enriched_{stats['tracks_enriched']}",
+            )
+    else:
+        logger.info("User %s: all tracks already enriched", user_id[:8])
 
     return stats
 
