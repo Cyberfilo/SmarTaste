@@ -758,48 +758,73 @@
           const w = await workerResp.json();
           const el = document.getElementById('workerStatus');
           const badge = document.getElementById('workerBadge');
+          const hb = w.heartbeat;
 
-          if (!w.available) {
+          // Heartbeat status bar (always show if available)
+          let heartbeatHtml = '';
+          if (hb) {
+            const phaseColors = { idle: '#94A3B8', cleanup: '#FBBF24', startup_scan: '#F97316', backfill: '#38BDF8', discovering: '#8B5CF6' };
+            const phaseLabels = { idle: 'Idle', cleanup: 'Cleanup', startup_scan: 'Startup Scan', backfill: 'Backfill (Tags + Credits)', discovering: 'Discovering Artists' };
+            const color = phaseColors[hb.phase] || '#94A3B8';
+            const label = phaseLabels[hb.phase] || hb.phase;
+            const updatedAgo = hb.updated_at ? timeAgo(new Date(hb.updated_at)) : '';
+            const isActive = hb.phase !== 'idle';
+            const pct = hb.progress_total > 0 ? Math.round(hb.progress_current / hb.progress_total * 100) : 0;
+
+            heartbeatHtml = `<div style="background:${isActive ? '#F0F9FF' : 'var(--border-light)'};border:1px solid ${isActive ? color + '40' : 'var(--border)'};border-radius:var(--radius-sm);padding:0.75rem;margin-bottom:0.75rem">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:${isActive ? '0.5rem' : '0'}">
+                <div style="display:flex;align-items:center;gap:0.5rem">
+                  <div style="width:8px;height:8px;border-radius:50%;background:${color};${isActive ? 'animation:pulse 1.5s ease-in-out infinite;' : ''}"></div>
+                  <span style="font-size:0.8125rem;font-weight:600;color:var(--text)">${label}</span>
+                  ${hb.cycle > 0 ? `<span style="font-size:0.6875rem;color:var(--text-muted)">Cycle ${hb.cycle}</span>` : ''}
+                </div>
+                <span style="font-size:0.6875rem;color:var(--text-muted)">${updatedAgo}</span>
+              </div>
+              ${hb.detail ? `<div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:${pct > 0 ? '0.375rem' : '0'}">${escapeHtml(hb.detail)}</div>` : ''}
+              ${pct > 0 ? `<div class="progress-bar-track" style="height:4px"><div class="progress-bar-fill ${pct >= 100 ? 'full' : pct >= 50 ? 'high' : 'mid'}" style="width:${pct}%"></div></div>
+              <div style="font-size:0.6875rem;color:var(--text-muted);margin-top:0.25rem;text-align:right">${hb.progress_current}/${hb.progress_total} (${pct}%)</div>` : ''}
+            </div>`;
+
+            badge.textContent = isActive ? label.toLowerCase() : 'idle';
+            badge.className = isActive ? 'section-badge badge-blue' : 'section-badge badge-green';
+          }
+
+          if (!w.available && !hb) {
             el.innerHTML = `<div class="empty-state" style="text-align:left;padding:1rem">
-              <div style="color:var(--danger);font-weight:600;margin-bottom:0.5rem">${w.reason || 'Worker logs unavailable'}</div>
+              <div style="color:var(--danger);font-weight:600;margin-bottom:0.5rem">${w.reason || 'Worker not connected'}</div>
               <div style="font-size:0.75rem;color:var(--text-secondary);line-height:1.6">
-                Possible causes:<br>
-                &bull; <b>MUSICMIND_LOGS_DATABASE_URL</b> not set on the worker service<br>
-                &bull; Worker service not yet deployed with latest code<br>
-                &bull; Logs DB not reachable from worker
+                Deploy the worker with the latest code and set <b>DATABASE_URL</b> to the same main database.
               </div>
             </div>`;
-            badge.textContent = 'no logs';
+            badge.textContent = 'offline';
             badge.className = 'section-badge badge-red';
           } else {
-            const lastAgo = w.last_activity ? timeAgo(new Date(w.last_activity)) : 'never';
-            badge.textContent = lastAgo === 'never' ? 'idle' : 'active';
-            badge.className = 'section-badge badge-green';
+            const lastAgo = w.last_activity ? timeAgo(new Date(w.last_activity)) : null;
 
-            let html = `<div class="worker-grid">
+            let html = heartbeatHtml;
+            html += `<div class="worker-grid">
               <div class="worker-stat">
-                <div class="ws-label">Last Activity</div>
-                <div class="ws-value">${lastAgo}</div>
+                <div class="ws-label">Last Log</div>
+                <div class="ws-value">${lastAgo || 'no logs'}</div>
               </div>
               <div class="worker-stat">
                 <div class="ws-label">Enriched Today</div>
-                <div class="ws-value" style="color:var(--success)">${w.enriched_today}</div>
+                <div class="ws-value" style="color:var(--success)">${w.enriched_today || 0}</div>
               </div>
               <div class="worker-stat">
                 <div class="ws-label">Failures Today</div>
-                <div class="ws-value" style="color:${w.failures_today > 0 ? 'var(--danger)' : 'var(--text)'}">${w.failures_today}</div>
+                <div class="ws-value" style="color:${(w.failures_today || 0) > 0 ? 'var(--danger)' : 'var(--text)'}">${w.failures_today || 0}</div>
               </div>
             </div>`;
 
             if (w.recent && w.recent.length > 0) {
               html += '<div class="worker-recent">' + w.recent.map(r => {
                 const t = r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '';
-                const ok = r.result === 'success';
                 return `<div class="worker-entry">
                   <span style="color:var(--text-muted);font-size:0.6875rem;min-width:60px">${t}</span>
                   <span class="we-stage">${r.stage || '?'}</span>
                   <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.75rem;color:var(--text-secondary)">${r.catalog_id || ''}</span>
-                  <span class="we-result ${ok ? 'success' : 'fail'}">${r.result}</span>
+                  <span class="we-result ${r.result === 'success' ? 'success' : 'fail'}">${r.result}</span>
                   ${r.duration_ms ? `<span style="font-size:0.6875rem;color:var(--text-muted)">${r.duration_ms}ms</span>` : ''}
                 </div>`;
               }).join('') + '</div>';
