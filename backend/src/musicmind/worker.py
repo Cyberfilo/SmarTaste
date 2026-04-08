@@ -125,28 +125,27 @@ async def main() -> None:
     except Exception:
         logger.exception("Startup scan failed, continuing to poll loop")
 
-    # ── Phase 1b: Backfill new signals on already-enriched songs ──────
-    logger.info("=== BACKFILL: checking for songs missing new enrichment signals ===")
+    # ── Phase 1b: Backfill Last.fm tags + MusicBrainz credits on enriched songs ─
+    logger.info("=== BACKFILL: completing partial enrichment (tags + credits) ===")
     try:
         backfill_stats = await _backfill_new_signals(engine, settings)
         tags = backfill_stats.get("tags", 0)
         credits = backfill_stats.get("credits", 0)
-        lyrics = backfill_stats.get("lyrics", 0)
         logger.info(
-            "Backfill complete: %d tags added, %d credits fetched, %d lyrics embedded",
-            tags, credits, lyrics,
+            "Backfill complete: %d tags added, %d credits fetched",
+            tags, credits,
         )
         if log_writer:
             log_writer.log_enrichment(
                 user_id="system",
-                catalog_id=f"backfill_{tags + credits + lyrics}",
+                catalog_id=f"backfill_{tags + credits}",
                 stage="backfill",
-                result=f"tags_{tags}_credits_{credits}_lyrics_{lyrics}",
+                result=f"tags_{tags}_credits_{credits}",
             )
     except Exception:
         logger.exception("Backfill failed, continuing to poll loop")
 
-    # ── Phase 2: Continuous loop — discover new artists + enrich ──────
+    # ── Phase 2: Continuous loop — discover + enrich + backfill ─────
     cycle = 0
     while True:
         cycle += 1
@@ -180,6 +179,25 @@ async def main() -> None:
                 )
         except Exception:
             logger.exception("Cycle %d failed", cycle)
+
+        # Run backfill every cycle to complete partial enrichment
+        try:
+            bf = await _backfill_new_signals(engine, settings)
+            bf_total = bf.get("tags", 0) + bf.get("credits", 0)
+            if bf_total > 0:
+                logger.info(
+                    "Cycle %d backfill: %d tags, %d credits",
+                    cycle, bf.get("tags", 0), bf.get("credits", 0),
+                )
+                if log_writer:
+                    log_writer.log_enrichment(
+                        user_id="system",
+                        catalog_id=f"backfill_cycle_{cycle}",
+                        stage="backfill",
+                        result=f"tags_{bf.get('tags', 0)}_credits_{bf.get('credits', 0)}",
+                    )
+        except Exception:
+            logger.debug("Cycle %d backfill failed", cycle, exc_info=True)
 
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -568,9 +586,6 @@ async def _process_user(
         # MusicBrainz credits: producers, songwriters (knowledge graph)
         await _enrich_musicbrainz_credits(engine, tracks_to_enrich)
 
-        # Genius lyrics: scrape + embed for semantic similarity
-        await _enrich_lyrics(engine, tracks_to_enrich, user_id=user_id)
-
         # Last.fm enrichment: tags + similar tracks (collaborative filtering)
         if settings.lastfm_api_key:
             await _enrich_lastfm(
@@ -604,13 +619,12 @@ async def _backfill_new_signals(
     were added. Checks each signal independently — only runs what's missing.
     """
     from musicmind.db.schema import (
-        audio_embeddings,
         lastfm_tags_cache,
         song_metadata_cache,
         users,
     )
 
-    stats = {"tags": 0, "credits": 0, "lyrics": 0}
+    stats = {"tags": 0, "credits": 0}
 
     async with engine.begin() as conn:
         result = await conn.execute(sa.select(users.c.id))
@@ -691,37 +705,6 @@ async def _backfill_new_signals(
             )
             await _enrich_musicbrainz_credits(engine, songs_without_credits)
             stats["credits"] += len(songs_without_credits)
-
-        # ── Lyrics embeddings backfill ────────────────────────
-        songs_without_lyrics: list[dict[str, Any]] = []
-        async with engine.begin() as conn:
-            for song in songs:
-                if not song.artist_name or not song.name:
-                    continue
-                existing = await conn.execute(
-                    sa.select(audio_embeddings.c.catalog_id).where(
-                        sa.and_(
-                            audio_embeddings.c.catalog_id == song.catalog_id,
-                            audio_embeddings.c.user_id == user_id,
-                            audio_embeddings.c.model_version == "lyrics-minilm-v2",
-                        )
-                    )
-                )
-                if not existing.first():
-                    songs_without_lyrics.append({
-                        "artist_name": song.artist_name,
-                        "name": song.name,
-                        "catalog_id": song.catalog_id,
-                        "isrc": song.isrc or "",
-                    })
-
-        if songs_without_lyrics:
-            logger.info(
-                "User %s: %d songs missing lyrics embeddings, backfilling...",
-                user_id[:8], len(songs_without_lyrics),
-            )
-            await _enrich_lyrics(engine, songs_without_lyrics, user_id=user_id)
-            stats["lyrics"] += len(songs_without_lyrics)
 
     return stats
 

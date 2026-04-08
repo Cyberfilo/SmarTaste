@@ -16,7 +16,6 @@ from typing import Any
 import sqlalchemy as sa
 
 from musicmind.db.schema import (
-    audio_embeddings,
     audio_features_cache,
     kg_relationships,
     lastfm_tags_cache,
@@ -146,14 +145,13 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
 async def get_enrichment_breakdown(engine) -> dict[str, Any]:
     """Get pipeline-level enrichment breakdown across all songs.
 
-    Enrichment pipeline stages:
+    Enrichment pipeline stages (3 active):
     1. Audio features (audio_features_cache with energy IS NOT NULL)
     2. Last.fm tags (lastfm_tags_cache with entity_type='track')
     3. MusicBrainz credits (kg_relationships with source_mbid LIKE 'isrc:%')
-    4. Lyrics embeddings (audio_embeddings with model_version='lyrics-minilm-v2')
 
-    All counts are restricted to songs that exist in song_metadata_cache
-    to avoid orphaned rows inflating numbers.
+    Fully enriched = has all 3 stages complete.
+    All counts restricted to songs that exist in song_metadata_cache.
     """
     async with engine.begin() as conn:
         # Total songs across all users
@@ -204,18 +202,10 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         )
         has_credits = credits_q.scalar() or 0
 
-        # Songs with lyrics embeddings
-        lyrics_q = await conn.execute(
-            sa.select(
-                sa.func.count(sa.distinct(audio_embeddings.c.catalog_id))
-            ).where(audio_embeddings.c.model_version == "lyrics-minilm-v2")
-        )
-        has_lyrics = lyrics_q.scalar() or 0
-
         unenriched = max(0, total_songs - has_audio)
 
-        # Fully enriched approximation (bounded by smallest stage count)
-        fully_enriched = min(has_audio, has_tags, has_credits, has_lyrics)
+        # Fully enriched = all 3 stages complete (bounded by smallest count)
+        fully_enriched = min(has_audio, has_tags, has_credits)
         partial = max(0, has_audio - fully_enriched)
 
     pct = lambda n: round(n / total_songs * 100, 1) if total_songs > 0 else 0  # noqa: E731
@@ -232,7 +222,6 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
             "audio_features": has_audio,
             "lastfm_tags": has_tags,
             "musicbrainz_credits": has_credits,
-            "lyrics_embeddings": has_lyrics,
         },
     }
 
