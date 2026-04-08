@@ -384,6 +384,21 @@
     </div>
   </div>
 
+    <!-- Recent Songs -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M17.721 1.599a.75.75 0 01.279.584v11.29a2.25 2.25 0 01-1.774 2.198l-2.041.442a2.216 2.216 0 01-.938-4.333l2.478-.536V6.112l-8 1.73v7.684a2.25 2.25 0 01-1.774 2.2l-2.042.44a2.216 2.216 0 11-.938-4.332l2.479-.537V3.525a.75.75 0 01.596-.733l8.5-1.838a.75.75 0 01.675.145z" clip-rule="evenodd"/></svg>
+          Latest Songs
+        </div>
+        <span class="section-badge badge-blue" id="songCount"></span>
+      </div>
+      <div id="recentSongs">
+        <div class="empty-state">Loading songs...</div>
+      </div>
+    </div>
+  </div>
+
   <div class="footer">
     SmarTaste Admin &middot; Auto-refreshes every 30s
   </div>
@@ -516,6 +531,32 @@
             badge.className = 'section-badge badge-green';
           }
         }
+        // Fetch recent songs
+        const songsResp = await fetch('/api/admin/recent-songs?limit=15', { credentials: 'include' });
+        if (songsResp.ok) {
+          const sd = await songsResp.json();
+          const el = document.getElementById('recentSongs');
+          const badge = document.getElementById('songCount');
+          if (sd.songs && sd.songs.length > 0) {
+            el.innerHTML = sd.songs.map(s => {
+              const dot = s.enriched ? '🟢' : '🔴';
+              const src = s.source === 'library' ? '📚' : '🔧';
+              const time = s.fetched_at ? new Date(s.fetched_at).toLocaleTimeString() : '';
+              return `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0;border-bottom:1px solid var(--border-light);font-size:0.8rem">
+                <span title="${s.enriched ? 'Enriched' : 'Not enriched'}">${dot}</span>
+                <span title="${s.source}">${src}</span>
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>${s.artist_name}</b> — ${s.name}</span>
+                <span style="color:var(--text-muted);font-size:0.7rem">${s.service}</span>
+                <span style="color:var(--text-muted);font-size:0.7rem">${time}</span>
+              </div>`;
+            }).join('');
+            badge.textContent = sd.songs.length;
+          } else {
+            el.innerHTML = emptyState('No songs yet');
+            badge.textContent = '0';
+          }
+        }
+
         // Check for auth failures
         if (statusResp.status === 401 || statusResp.status === 403) {
           document.getElementById('stats').innerHTML =
