@@ -516,8 +516,23 @@
             badge.className = 'section-badge badge-green';
           }
         }
+        // Check for auth failures
+        if (statusResp.status === 401 || statusResp.status === 403) {
+          document.getElementById('stats').innerHTML =
+            `<div class="kpi-card" style="grid-column:1/-1;text-align:center;color:var(--danger)">
+              <b>API Error ${statusResp.status}</b><br>
+              Check ADMIN_SECRET env var on admin service and MUSICMIND_ADMIN_SECRET on backend.
+              <br><small>Backend URL: ${window.location.origin}/api/admin/status</small>
+            </div>`;
+          return;
+        }
+
       } catch (err) {
         console.error('Failed to fetch admin data:', err);
+        document.getElementById('stats').innerHTML =
+          `<div class="kpi-card" style="grid-column:1/-1;text-align:center;color:var(--danger)">
+            <b>Connection Error</b><br>${err.message}
+          </div>`;
       }
     }
 
