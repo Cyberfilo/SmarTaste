@@ -560,13 +560,13 @@ async def _backfill_tags_credits(
                     async with sem:
                         try:
                             tags = await fetch_track_tags(
+                                settings.lastfm_api_key,
                                 t["artist_name"], t["name"],
-                                api_key=settings.lastfm_api_key,
                             )
                             if not tags:
                                 tags = await fetch_artist_tags(
+                                    settings.lastfm_api_key,
                                     t["artist_name"],
-                                    api_key=settings.lastfm_api_key,
                                 )
                             if tags:
                                 async with engine.begin() as conn:

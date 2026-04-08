@@ -612,13 +612,13 @@ async def _backfill_global_songs(engine, settings) -> int:
                     async with sem:
                         try:
                             tags = await fetch_track_tags(
+                                settings.lastfm_api_key,
                                 artist, name,
-                                api_key=settings.lastfm_api_key,
                             )
                             if not tags:
                                 tags = await fetch_artist_tags(
+                                    settings.lastfm_api_key,
                                     artist,
-                                    api_key=settings.lastfm_api_key,
                                 )
                             if tags:
                                 async with engine.begin() as conn:
