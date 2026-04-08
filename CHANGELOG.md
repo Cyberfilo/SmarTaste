@@ -7,6 +7,14 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.100 — 2026-04-08
+
+### Added
+- **Indexer auto-trigger on login**: `/api/auth/me` checks if user's library is fully indexed. If not, triggers `run_indexing()` as background task. Skips if already complete or in progress (in-memory lock per user).
+- **Orchestrator respects env vars**: `WORKER_CONCURRENCY` and `WORKER_BATCH_SIZE` now configurable via environment (was hardcoded 5/20). Set to 15/100 on Railway for 8 vCPU.
+
+---
+
 ## V 5.000 — 2026-04-08
 
 ### Architecture Split — Indexer vs Worker

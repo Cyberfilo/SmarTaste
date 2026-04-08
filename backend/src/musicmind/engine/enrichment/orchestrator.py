@@ -15,6 +15,7 @@ import asyncio
 import gc
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -33,8 +34,8 @@ ENRICHABLE_FIELDS = {
 }
 
 # Concurrent tracks in-flight at once (bounded by memory: 5 × ~500KB = 2.5MB)
-CONCURRENCY = 5
-BATCH_SIZE = 20
+CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "5"))
+BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
 
 
 async def enrich_tracks(
