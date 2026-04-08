@@ -282,3 +282,57 @@ async def get_request_stats(
     except Exception:
         logger.warning("Failed to fetch request stats from logs DB")
         return {"stats": {}, "source": "error"}
+
+
+@router.get("/recent-songs")
+async def get_recent_songs(
+    request: Request,
+    limit: int = 20,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Get most recently cached songs with enrichment status (green/red)."""
+    from musicmind.db.schema import audio_features_cache, song_metadata_cache
+
+    engine = request.app.state.engine
+
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(
+                song_metadata_cache.c.catalog_id,
+                song_metadata_cache.c.name,
+                song_metadata_cache.c.artist_name,
+                song_metadata_cache.c.user_id,
+                song_metadata_cache.c.service_source,
+                song_metadata_cache.c.fetched_at,
+                song_metadata_cache.c.library_id,
+            )
+            .order_by(song_metadata_cache.c.fetched_at.desc())
+            .limit(limit)
+        )
+        songs = result.fetchall()
+
+        # Check enrichment status for each song
+        catalog_ids = [s.catalog_id for s in songs]
+        enriched_q = await conn.execute(
+            sa.select(audio_features_cache.c.catalog_id).where(
+                sa.and_(
+                    audio_features_cache.c.catalog_id.in_(catalog_ids),
+                    audio_features_cache.c.energy.isnot(None),
+                )
+            )
+        )
+        enriched_ids = {r.catalog_id for r in enriched_q}
+
+    items = []
+    for s in songs:
+        items.append({
+            "catalog_id": s.catalog_id,
+            "name": s.name,
+            "artist_name": s.artist_name,
+            "service": s.service_source,
+            "source": "library" if s.library_id else "worker",
+            "enriched": s.catalog_id in enriched_ids,
+            "fetched_at": s.fetched_at.isoformat() if s.fetched_at else None,
+        })
+
+    return {"songs": items}
