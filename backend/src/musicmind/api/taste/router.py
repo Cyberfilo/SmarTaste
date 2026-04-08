@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 
 from musicmind.api.rate_limit import TASTE_LIMIT, limiter
 from musicmind.api.taste.schemas import (
@@ -31,15 +39,16 @@ _rebuild_status: dict[str, str] = {}
 @limiter.limit(TASTE_LIMIT)
 async def get_profile(
     request: Request,
+    background_tasks: BackgroundTasks,
     service: str | None = Query(default=None),
     refresh: bool = Query(default=False),
     current_user: dict = Depends(get_current_user),
 ) -> TasteProfileResponse:
     """Get the full taste profile for the authenticated user.
 
-    Params:
-        service: Target service (spotify or apple_music). Auto-detected if omitted.
-        refresh: Force re-fetch even if cache is fresh (<24h).
+    Returns instantly from cache (even stale). If stale, triggers
+    a background refresh so the next request gets fresh data.
+    Never blocks the user waiting for API re-fetch.
     """
     try:
         profile = await taste_service.get_profile(
@@ -50,6 +59,28 @@ async def get_profile(
             service=service,
             force_refresh=refresh,
         )
+
+        # If profile is stale (>24h), trigger background refresh
+        if not refresh:
+            computed_at = profile.get("computed_at", "")
+            if computed_at:
+                from datetime import UTC, datetime, timedelta
+
+                try:
+                    ts = datetime.fromisoformat(computed_at)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    if datetime.now(UTC) - ts > timedelta(hours=24):
+                        background_tasks.add_task(
+                            _background_refresh_profile,
+                            engine=request.app.state.engine,
+                            encryption=request.app.state.encryption,
+                            settings=request.app.state.settings,
+                            user_id=current_user["user_id"],
+                            service=service,
+                        )
+                except (ValueError, TypeError):
+                    pass
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -306,14 +337,50 @@ async def enrichment_status(
         )
         enriched = enriched_q.scalar() or 0
 
-    # Total should be at least as large as enriched (discography adds extra)
-    total = max(total_library, enriched)
+        # Library songs only (user's actual library, not worker-discovered)
+        library_q = await conn.execute(
+            sa.select(sa.func.count()).select_from(song_metadata_cache).where(
+                sa.and_(
+                    song_metadata_cache.c.user_id == user_id,
+                    sa.or_(
+                        song_metadata_cache.c.date_added_to_library.isnot(None),
+                        song_metadata_cache.c.library_id.isnot(None),
+                    ),
+                )
+            )
+        )
+        library_songs = library_q.scalar() or 0
+
+    # Use library songs as denominator (worker songs are invisible to user)
+    total = library_songs if library_songs > 0 else total_library
     is_indexing = _enrichment_locks.get(user_id, False)
 
     return {
         "total_songs": total,
-        "enriched_songs": enriched,
-        "percentage": round(enriched / total * 100, 1) if total > 0 else 0,
+        "enriched_songs": min(enriched, total),
+        "percentage": round(min(enriched, total) / total * 100, 1) if total > 0 else 0,
         "complete": enriched >= total and total > 0 and not is_indexing,
         "indexing": is_indexing,
     }
+
+
+# ── Background Profile Refresh ───────────────────────────────────────────
+
+
+async def _background_refresh_profile(
+    *,
+    engine,
+    encryption,
+    settings,
+    user_id: str,
+    service: str | None,
+) -> None:
+    """Rebuild taste profile in background (triggered when stale cache served)."""
+    try:
+        await taste_service.get_profile(
+            engine, encryption, settings,
+            user_id=user_id, service=service, force_refresh=True,
+        )
+        logger.info("Background profile refresh complete for user %s", user_id)
+    except Exception:
+        logger.warning("Background profile refresh failed for user %s", user_id)

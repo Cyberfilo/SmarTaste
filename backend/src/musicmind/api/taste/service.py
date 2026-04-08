@@ -63,7 +63,14 @@ class TasteService:
         service: str | None = None,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
-        """Get the user's taste profile, using cache when fresh.
+        """Get the user's taste profile — returns instantly from cache.
+
+        Never blocks the user waiting for a full API re-fetch. If the
+        cached profile is stale (>24h), returns it immediately and the
+        caller can trigger a background refresh separately.
+
+        Only blocks on first-ever profile (no snapshot exists at all),
+        which happens once after service connection.
 
         Args:
             engine: SQLAlchemy async engine.
@@ -71,31 +78,37 @@ class TasteService:
             settings: Application settings.
             user_id: SmarTaste user ID.
             service: Target service (spotify or apple_music). Auto-detected if None.
-            force_refresh: Bypass staleness check and re-fetch.
+            force_refresh: Force full re-fetch (used by background tasks only).
 
         Returns:
             Taste profile dict with genre_vector, top_artists, etc.
-
-        Raises:
-            ValueError: If no connected service is found for the user.
         """
         resolved_service = await self._resolve_service(
             engine, user_id=user_id, service=service
         )
 
         if not force_refresh:
+            # Try fresh cache first (<24h)
             snapshot = await self._get_fresh_snapshot(
                 engine, user_id=user_id, service_source=resolved_service
             )
             if snapshot is not None:
-                logger.info(
-                    "Returning cached profile for user %s service %s",
-                    user_id,
-                    resolved_service,
-                )
                 return snapshot
 
-        # Unified profile: fetch from both services, deduplicate, normalize
+            # Return ANY existing snapshot (even stale) — never block the user
+            stale = await self._get_any_snapshot(
+                engine, user_id=user_id, service_source=resolved_service
+            )
+            if stale is not None:
+                logger.info(
+                    "Returning stale profile for user %s (will refresh in background)",
+                    user_id,
+                )
+                return stale
+
+        # No snapshot at all — must build from scratch (first-time only)
+        logger.info("Building first profile for user %s service %s", user_id, resolved_service)
+
         if resolved_service == "unified":
             return await self._build_unified_profile(
                 engine, encryption, settings, user_id=user_id,
@@ -214,17 +227,37 @@ class TasteService:
         profile["services_included"] = services_included
         return profile
 
+    async def _get_any_snapshot(
+        self, engine, *, user_id: str, service_source: str
+    ) -> dict[str, Any] | None:
+        """Return the latest profile snapshot regardless of age.
+
+        Used as a fallback when fresh cache is expired — returns stale
+        data instantly so the user isn't blocked.
+        """
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(taste_profile_snapshots)
+                .where(
+                    sa.and_(
+                        taste_profile_snapshots.c.user_id == user_id,
+                        taste_profile_snapshots.c.service_source == service_source,
+                    )
+                )
+                .order_by(taste_profile_snapshots.c.computed_at.desc())
+                .limit(1)
+            )
+            row = result.first()
+
+        if row is None:
+            return None
+        return self._row_to_profile(row)
+
     async def _get_fresh_snapshot(
         self, engine, *, user_id: str, service_source: str
     ) -> dict[str, Any] | None:
-        """Return a cached profile snapshot if fresh (< 24h old).
-
-        Returns None if no snapshot exists or the latest is stale.
-        SQLite stores timezone-naive datetimes, so we strip tzinfo
-        from the cutoff for comparison compatibility.
-        """
+        """Return a cached profile snapshot if fresh (< 24h old)."""
         cutoff = datetime.now(UTC) - timedelta(hours=STALENESS_HOURS)
-        # SQLite compat: strip tzinfo for comparison with naive stored dates
         cutoff_naive = cutoff.replace(tzinfo=None)
 
         async with engine.begin() as conn:
@@ -244,11 +277,14 @@ class TasteService:
 
         if row is None:
             return None
+        return self._row_to_profile(row)
 
+    @staticmethod
+    def _row_to_profile(row) -> dict[str, Any]:
+        """Convert a taste_profile_snapshots row to a profile dict."""
         mapping = row._mapping
 
-        def _parse_json(val: Any, default: Any) -> Any:
-            """Parse JSON string from DB if needed (SQLite stores JSON as TEXT)."""
+        def _pj(val: Any, default: Any) -> Any:
             if val is None:
                 return default
             if isinstance(val, str):
@@ -265,18 +301,18 @@ class TasteService:
                 if mapping["computed_at"]
                 else datetime.now(UTC).isoformat()
             ),
-            "genre_vector": _parse_json(mapping["genre_vector"], {}),
-            "top_artists": _parse_json(mapping["top_artists"], []),
-            "audio_trait_preferences": _parse_json(
+            "genre_vector": _pj(mapping["genre_vector"], {}),
+            "top_artists": _pj(mapping["top_artists"], []),
+            "audio_trait_preferences": _pj(
                 mapping["audio_trait_preferences"], {}
             ),
-            "release_year_distribution": _parse_json(
+            "release_year_distribution": _pj(
                 mapping["release_year_distribution"], {}
             ),
             "familiarity_score": mapping["familiarity_score"] or 0.0,
             "total_songs_analyzed": mapping["total_songs_analyzed"] or 0,
             "listening_hours_estimated": mapping["listening_hours_estimated"] or 0.0,
-            "audio_centroid": _parse_json(mapping.get("audio_centroid"), {}),
+            "audio_centroid": _pj(mapping.get("audio_centroid"), {}),
         }
 
     async def _fetch_and_cache_data(
