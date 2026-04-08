@@ -1,4 +1,8 @@
-"""Request logging middleware — logs every request with timing and user context."""
+"""Request logging middleware — logs every request with timing and user context.
+
+Writes to both stderr (for Railway logs) and a separate PostgreSQL logging DB
+via a batched async writer (flushes every 5s, no per-request DB writes).
+"""
 
 from __future__ import annotations
 
@@ -14,26 +18,26 @@ logger = logging.getLogger("musicmind.requests")
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Log every request with method, path, status, duration, and user_id.
+    """Log every request with method, path, status, duration, and user_id."""
 
-    Extracts user_id from the access_token cookie (best-effort, no auth check).
-    Skips health check and static asset requests to reduce noise.
-    """
-
-    SKIP_PATHS = {"/api/health", "/favicon.ico", "/_next"}
+    SKIP_PATHS = {"/api/health", "/health", "/favicon.ico", "/_next"}
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         path = request.url.path
 
-        # Skip noisy paths
         if any(path.startswith(skip) for skip in self.SKIP_PATHS):
             return await call_next(request)
 
         start = time.monotonic()
         user_id = self._extract_user_id(request)
         method = request.method
+        try:
+            ip = request.client.host if request.client else None
+        except Exception:
+            ip = None
+        ua = request.headers.get("user-agent")
 
         try:
             response = await call_next(request)
@@ -42,6 +46,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             logger.error(
                 "%s %s -> 500 (%dms) user=%s [unhandled exception]",
                 method, path, duration_ms, user_id or "-",
+            )
+            self._write_to_db(
+                request, method=method, path=path, status_code=500,
+                duration_ms=duration_ms, user_id=user_id, ip=ip, ua=ua,
+                error="unhandled exception",
             )
             raise
 
@@ -59,7 +68,6 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 method, path, status_code, duration_ms, user_id or "-",
             )
         elif duration_ms > 5000:
-            # Flag slow requests
             logger.warning(
                 "%s %s -> %d (%dms) user=%s [SLOW]",
                 method, path, status_code, duration_ms, user_id or "-",
@@ -70,11 +78,16 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 method, path, status_code, duration_ms, user_id or "-",
             )
 
+        self._write_to_db(
+            request, method=method, path=path, status_code=status_code,
+            duration_ms=duration_ms, user_id=user_id, ip=ip, ua=ua,
+        )
+
         return response
 
     @staticmethod
     def _extract_user_id(request: Request) -> str | None:
-        """Best-effort user_id extraction from JWT cookie. No auth check."""
+        """Best-effort user_id extraction from JWT cookie."""
         token = request.cookies.get("access_token")
         if not token:
             return None
@@ -83,3 +96,31 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             return payload.get("sub")
         except Exception:
             return None
+
+    @staticmethod
+    def _write_to_db(
+        request: Request,
+        *,
+        method: str,
+        path: str,
+        status_code: int,
+        duration_ms: int,
+        user_id: str | None,
+        ip: str | None,
+        ua: str | None,
+        error: str | None = None,
+    ) -> None:
+        """Write log entry to the logging DB via the batched writer."""
+        log_writer = getattr(request.app.state, "log_writer", None)
+        if log_writer is None:
+            return
+        log_writer.log_request(
+            method=method,
+            path=path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            user_id=user_id,
+            ip_address=ip,
+            user_agent=ua,
+            error_detail=error,
+        )

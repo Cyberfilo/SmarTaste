@@ -36,8 +36,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from musicmind.api.admin.log_stream import install_admin_handler
     install_admin_handler()
 
+    # Initialize logging database if configured
+    log_writer = None
+    logs_engine = None
+    if _settings.logs_database_url:
+        try:
+            from musicmind.db.logs import LogWriter, create_logs_engine, init_logs_schema
+
+            logs_engine = create_logs_engine(_settings.logs_database_url)
+            await init_logs_schema(logs_engine)
+            log_writer = LogWriter(logs_engine)
+            log_writer.start()
+            app.state.log_writer = log_writer
+            app.state.logs_engine = logs_engine
+            import logging as _logging
+            _logging.getLogger(__name__).info("Logging database connected")
+        except Exception:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Failed to connect logging database, continuing without", exc_info=True,
+            )
+
     yield
 
+    if log_writer:
+        await log_writer.stop()
+    if logs_engine:
+        await logs_engine.dispose()
     await engine.dispose()
 
 
