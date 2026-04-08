@@ -333,11 +333,18 @@ async def _process_user(
             access_token, developer_token,
         )
 
-    # ── Get ALL distinct artists from user's library ──────────────────
+    # ── Get distinct artists from user's LIBRARY ONLY ─────────────────
+    # Only library songs (not worker-discovered) to prevent snowball effect
     async with engine.begin() as conn:
         result = await conn.execute(
             sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
-                song_metadata_cache.c.user_id == user_id,
+                sa.and_(
+                    song_metadata_cache.c.user_id == user_id,
+                    sa.or_(
+                        song_metadata_cache.c.library_id.isnot(None),
+                        song_metadata_cache.c.date_added_to_library.isnot(None),
+                    ),
+                )
             )
         )
         raw_artist_names = [row[0] for row in result if row[0]]
@@ -346,26 +353,37 @@ async def _process_user(
         return stats
 
     # Parse featuring artists: "Drake feat. Future" → ["Drake", "Future"]
-    # Deduplicate by lowercase to avoid searching "drake" twice
+    # Primary artists (in library) get full depth, featuring artists get 3 tracks
     seen_artists: set[str] = set()
-    artist_names: list[str] = []
+    primary_artists: list[str] = []  # In library → full ARTIST_DEPTH
+    featured_artists: list[str] = []  # From featurings → 3 tracks only
+
     for raw_name in raw_artist_names:
         parsed = parse_artists(raw_name)
-        for name, _weight in parsed:
+        for i, (name, weight) in enumerate(parsed):
             key = name.strip().lower()
             if key and key not in seen_artists and len(key) > 1:
                 seen_artists.add(key)
-                artist_names.append(name.strip())
+                if i == 0 and weight >= 1.0:
+                    primary_artists.append(name.strip())
+                else:
+                    featured_artists.append(name.strip())
 
     logger.info(
-        "User %s: %d raw artist names → %d unique artists (after featuring parse)",
-        user_id[:8], len(raw_artist_names), len(artist_names),
+        "User %s: %d library artists → %d primary + %d featured",
+        user_id[:8], len(raw_artist_names),
+        len(primary_artists), len(featured_artists),
     )
 
     # ── For each artist: search → fetch top tracks → cache → enrich ───
     all_tracks: list[dict[str, Any]] = []
 
-    for artist_name in artist_names:
+    # Process all artists: primary get full depth, featured get 3
+    all_artists = [(a, ARTIST_DEPTH) for a in primary_artists] + [
+        (a, 3) for a in featured_artists
+    ]
+
+    for artist_name, depth in all_artists:
         try:
             artist_id = await _search_artist_id(
                 service, access_token, artist_name,
@@ -380,7 +398,7 @@ async def _process_user(
                     client, service, access_token, artist_id,
                     developer_token=developer_token,
                     storefront=storefront,
-                    limit=ARTIST_DEPTH,
+                    limit=depth,
                 )
 
             stats["artists_processed"] += 1
@@ -425,7 +443,7 @@ async def _process_user(
                 logger.info(
                     "User %s: processed %d/%d artists, %d tracks so far",
                     user_id[:8], stats["artists_processed"],
-                    len(artist_names), len(all_tracks),
+                    len(all_artists), len(all_tracks),
                 )
 
         except Exception:

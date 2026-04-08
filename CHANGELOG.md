@@ -7,6 +7,15 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 4.100 — 2026-04-08
+
+### Fixed
+- **Worker snowball bug**: queried ALL songs (including worker-discovered) for artist names, causing exponential growth (446 library songs → 148K worker songs → 78K artists). Now only queries library songs (library_id or date_added_to_library).
+
+### Changed
+- **Worker featured artist depth**: primary library artists get full depth (25 tracks), featuring artists from parsed names get 3 tracks only. Builds a focused enrichment database instead of infinite crawl.
+- **Worker logging**: shows "120 library artists → 85 primary + 35 featured" breakdown
+
 ## V 4.000 — 2026-04-08
 
 ### Added — Recommendation Engine Overhaul
