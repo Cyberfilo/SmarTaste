@@ -21,7 +21,7 @@ BACKEND_URL = os.environ.get(
     "BACKEND_URL", "https://musicmind-production.up.railway.app"
 )
 NOCODB_URL = os.environ.get(
-    "NOCODB_URL", "https://admin.music.menghi.dev"
+    "NOCODB_URL", "https://dbmanager.music.menghi.dev"
 )
 PORT = int(os.environ.get("PORT", "8080"))
 
