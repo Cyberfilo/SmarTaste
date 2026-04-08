@@ -609,41 +609,13 @@ async def _backfill_tags_credits(
             (t, mbid) for t, mbid in isrc_tracks if mbid not in cached_mbids
         ]
 
-        for t, source_mbid in uncached_isrc:
-            try:
-                from musicmind.engine.enrichment.musicbrainz_credits import (
-                    fetch_recording_credits,
-                )
+        from musicmind.engine.enrichment.musicbrainz_credits import (
+            fetch_recording_credits,
+        )
 
-                credits = await fetch_recording_credits(t["isrc"])
-                if credits:
-                    async with engine.begin() as conn:
-                        for c in credits:
-                            await conn.execute(
-                                sa.text(
-                                    "INSERT INTO kg_artists (mbid, name, type)"
-                                    " VALUES (:m, :n, :t)"
-                                    " ON CONFLICT DO NOTHING"
-                                ),
-                                {
-                                    "m": c["artist_mbid"],
-                                    "n": c["artist_name"],
-                                    "t": c.get("role", "person"),
-                                },
-                            )
-                            await conn.execute(
-                                sa.text(
-                                    "INSERT INTO kg_relationships"
-                                    " (source_mbid, target_mbid,"
-                                    "  relationship_type)"
-                                    " VALUES (:s, :tgt, :r)"
-                                    " ON CONFLICT DO NOTHING"
-                                ),
-                                {
-                                    "s": source_mbid,
-                                    "tgt": c["artist_mbid"],
-                                    "r": c.get("role", "producer"),
-                                },
-                            )
+        for t, _source_mbid in uncached_isrc:
+            try:
+                # fetch_recording_credits handles its own storage
+                await fetch_recording_credits(t["isrc"], engine=engine)
             except Exception:
                 pass

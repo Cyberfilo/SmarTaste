@@ -310,7 +310,7 @@ async def enrichment_status(
     """
     import sqlalchemy as sa
 
-    from musicmind.auth.router import _enrichment_locks
+    from musicmind.auth.router import _indexing_locks
     from musicmind.db.schema import audio_features_cache, song_metadata_cache
 
     engine = request.app.state.engine
@@ -353,7 +353,7 @@ async def enrichment_status(
 
     # Use library songs as denominator (worker songs are invisible to user)
     total = library_songs if library_songs > 0 else total_library
-    is_indexing = _enrichment_locks.get(user_id, False)
+    is_indexing = _indexing_locks.get(user_id, False)
 
     return {
         "total_songs": total,

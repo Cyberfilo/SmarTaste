@@ -694,43 +694,17 @@ async def _backfill_global_songs(engine, settings) -> int:
                 len(uncached_isrc),
             )
 
-            for isrc, source_mbid in uncached_isrc:
-                try:
-                    from musicmind.engine.enrichment.musicbrainz_credits import (
-                        fetch_recording_credits,
-                    )
+            from musicmind.engine.enrichment.musicbrainz_credits import (
+                fetch_recording_credits,
+            )
 
-                    credits = await fetch_recording_credits(isrc)
+            for isrc, _source_mbid in uncached_isrc:
+                try:
+                    # fetch_recording_credits handles its own storage
+                    credits = await fetch_recording_credits(
+                        isrc, engine=engine,
+                    )
                     if credits:
-                        async with engine.begin() as conn:
-                            for c in credits:
-                                await conn.execute(
-                                    sa.text(
-                                        "INSERT INTO kg_artists"
-                                        " (mbid, name, type)"
-                                        " VALUES (:m, :n, :t)"
-                                        " ON CONFLICT DO NOTHING"
-                                    ),
-                                    {
-                                        "m": c["artist_mbid"],
-                                        "n": c["artist_name"],
-                                        "t": c.get("role", "person"),
-                                    },
-                                )
-                                await conn.execute(
-                                    sa.text(
-                                        "INSERT INTO kg_relationships"
-                                        " (source_mbid, target_mbid,"
-                                        "  relationship_type)"
-                                        " VALUES (:s, :tgt, :r)"
-                                        " ON CONFLICT DO NOTHING"
-                                    ),
-                                    {
-                                        "s": source_mbid,
-                                        "tgt": c["artist_mbid"],
-                                        "r": c.get("role", "producer"),
-                                    },
-                                )
                         updated += 1
                 except Exception:
                     pass
