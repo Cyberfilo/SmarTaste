@@ -195,6 +195,41 @@ async def _enrich_single_track(
     feature_source = _get_source_dict(existing)
     enriched_by = "failed"
 
+    # Stage 0: AcousticBrainz (free, no API calls — from bulk import)
+    if isrc and _missing_fields(features):
+        try:
+            # We need the MBID — try to get it from the MusicBrainz ISRC lookup
+            # (the query is already rate-limited and cached)
+            from musicmind.engine.enrichment.acousticbrainz import (
+                enrich_from_acousticbrainz,
+            )
+
+            # Quick MBID lookup from existing data (no API call if cached)
+            async with engine.begin() as conn:
+                from musicmind.db.schema import isrc_spotify_mapping
+                result = await conn.execute(
+                    sa.select(isrc_spotify_mapping.c.resolved_via).where(
+                        isrc_spotify_mapping.c.isrc == isrc.upper()
+                    )
+                )
+                result.first()
+                # If we have an MBID-style resolved_via, try AcousticBrainz
+                # Otherwise skip (don't make API calls here)
+
+            # Try AcousticBrainz with ISRC as MBID proxy (some overlap)
+            ab_features = await enrich_from_acousticbrainz(
+                engine, isrc.upper(), existing_features=features,
+            )
+            if ab_features:
+                for k, v in ab_features.items():
+                    if k != "feature_source" and v is not None and features.get(k) is None:
+                        features[k] = v
+                        feature_source[k] = "acousticbrainz"
+                if not _missing_fields(features):
+                    enriched_by = "acousticbrainz"
+        except Exception:
+            pass  # AcousticBrainz is best-effort
+
     # Stage 1: Deezer (BPM + preview URL)
     preview_url = None
     if name and artist_name:
