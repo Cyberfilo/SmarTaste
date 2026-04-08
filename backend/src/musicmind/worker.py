@@ -369,16 +369,20 @@ async def _process_user(
                 else:
                     featured_artists.append(name.strip())
 
+    # Cap featured artists at 25% of primary count to keep DB focused
+    max_featured = max(5, len(primary_artists) // 4)
+    featured_artists = featured_artists[:max_featured]
+
     logger.info(
-        "User %s: %d library artists → %d primary + %d featured",
+        "User %s: %d library artists → %d primary + %d featured (capped at %d)",
         user_id[:8], len(raw_artist_names),
-        len(primary_artists), len(featured_artists),
+        len(primary_artists), len(featured_artists), max_featured,
     )
 
     # ── For each artist: search → fetch top tracks → cache → enrich ───
     all_tracks: list[dict[str, Any]] = []
 
-    # Process all artists: primary get full depth, featured get 3
+    # Primary artists first (full depth), then featured (3 tracks)
     all_artists = [(a, ARTIST_DEPTH) for a in primary_artists] + [
         (a, 3) for a in featured_artists
     ]
