@@ -162,14 +162,21 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d failed", cycle)
 
-        # Backfill tags + credits on globally cached songs
-        await _set_status(engine, "backfill", "Tags + credits on global songs", cycle=cycle)
+        # Backfill tags + credits
+        await _set_status(engine, "backfill", "Tags + credits on all songs", cycle=cycle)
         try:
             bf = await _backfill_global_songs(engine, settings)
             if bf > 0:
-                logger.info("Cycle %d backfill: %d global songs updated", cycle, bf)
+                logger.info("Cycle %d backfill: %d songs updated", cycle, bf)
+                if log_writer:
+                    log_writer.log_enrichment(
+                        user_id="system",
+                        catalog_id=f"backfill_cycle_{cycle}",
+                        stage="backfill",
+                        result=f"updated_{bf}",
+                    )
         except Exception:
-            logger.debug("Cycle %d backfill failed", cycle, exc_info=True)
+            logger.exception("Cycle %d backfill FAILED", cycle)
 
         await _set_status(engine, "idle", f"Sleeping {POLL_INTERVAL}s", cycle=cycle)
         await asyncio.sleep(POLL_INTERVAL)
@@ -547,17 +554,10 @@ async def _backfill_global_songs(engine, settings) -> int:
             fetch_track_tags,
         )
 
-        # Get distinct (artist, name) pairs from per-user songs
+        # Get (artist, name) pairs from per-user songs, deduplicate in Python
         async with engine.begin() as conn:
             result = await conn.execute(
                 sa.select(
-                    sa.distinct(
-                        sa.func.concat(
-                            sa.func.lower(song_metadata_cache.c.artist_name),
-                            sa.literal("|||"),
-                            sa.func.lower(song_metadata_cache.c.name),
-                        )
-                    ).label("key"),
                     song_metadata_cache.c.artist_name,
                     song_metadata_cache.c.name,
                 ).where(
@@ -567,7 +567,7 @@ async def _backfill_global_songs(engine, settings) -> int:
                         song_metadata_cache.c.name.isnot(None),
                         song_metadata_cache.c.name != "",
                     )
-                )
+                ).distinct()
             )
             all_pairs = [
                 (row.artist_name, row.name) for row in result
