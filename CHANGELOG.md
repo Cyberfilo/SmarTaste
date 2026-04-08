@@ -7,6 +7,31 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 3.310 — 2026-04-08
+
+### Added
+- Standalone admin dashboard service at admin.music.menghi.dev (FastAPI + static HTML)
+- Admin password auth (ADMIN_PASSWORD env var, independent from main app accounts)
+- X-Admin-Secret header auth for backend admin endpoints
+- Per-user library vs worker song breakdown in admin stats
+- Worker song enumeration logging before enrichment starts
+- Global ISRC audio features cache (audio_features_global table, migration 013)
+- Standalone enrichment worker with startup scan + featuring artist parse
+- NocoDB at dbmanager.music.menghi.dev for raw database browsing
+
+### Changed
+- Dashboard loads instantly (<1s) — stale profile served immediately, refresh in background
+- Enrichment bar only visible during calibration indexing (worker enrichment invisible)
+- Taste profile staleTime 5min → 30min, services staleTime 0 → 5min
+- Enrichment polling 15s → 30s, removed /me polling for enrichment
+- enrichment-status counts library songs only (worker songs excluded from user view)
+- Admin UI redesigned with light theme, Inter font, proper CSS variables
+- Removed is_admin flag dependency from main frontend (admin is separate service)
+
+### Fixed
+- 5-minute dashboard load caused by blocking profile rebuild on stale cache
+- useServices refetching on every navigation (staleTime was 0)
+
 ## V 3.240 — 2026-04-08
 
 ### Added
