@@ -1,6 +1,6 @@
 # SmarTaste — Complete Project Documentation
 
-> Last updated: 2026-04-08 | Version: 0.2.0 | Status: Production (beta)
+> Last updated: 2026-04-08 | Version: 3.240 | Status: Production (beta)
 
 ## What Is SmarTaste?
 
@@ -582,5 +582,16 @@ Run: `cd backend && uv run python -m pytest tests/ -v`
 
 | Version | Date | Notes |
 |---------|------|-------|
-| 0.2.0 | 2026-04-08 | Calibration wizard, adaptive weights, logging DB, NocoDB, production hardening |
-| 0.1.0 | 2026-03-30 | Initial alpha — core features working, deployed to music.menghi.dev |
+| 3.240 | 2026-04-08 | Logging DB, NocoDB, production hardening, Spotify genre backfill |
+| 3.100 | 2026-04-07 | Context-adaptive weights, play count proxy, engagement scoring |
+| 2.900 | 2026-04-01 | Onboarding calibration wizard, calibration-aware scoring |
+| 2.800 | 2026-04-01 | Standalone enrichment worker, concurrent processing |
+| 2.500 | 2026-03-31 | Two-pass scoring, enrichment progress bar, artist affinity |
+| 2.200 | 2026-03-31 | ReccoBeats audio, admin system, scorer rebalance |
+| 2.100 | 2026-03-30 | Audio enrichment pipeline, playlists, Synesthesia theme |
+| 2.000 | 2026-03-30 | Rebrand to SmarTaste, Vercel + Railway deploy |
+| 1.200 | 2026-03-28 | Multi-LLM support (Claude + OpenAI GPT-4o) |
+| 1.100 | 2026-03-28 | MusicKit JS auth, production fixes |
+| 1.000 | 2026-03-27 | Full webapp (12 phases), 370+ tests |
+| 0.200 | 2026-03-26 | Adaptive engine, regional genres |
+| 0.100 | 2026-03-25 | Initial MCP server, 21 tools |
