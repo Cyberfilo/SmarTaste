@@ -435,14 +435,17 @@ class TasteService:
     async def _fetch_apple_music_data(
         self, settings, *, access_token: str
     ) -> tuple[list[dict], list[dict]]:
-        """Fetch data from Apple Music using developer token."""
+        """Fetch data from Apple Music using developer token.
+
+        Also fetches ratings (Love/Dislike) and applies them to songs.
+        """
         developer_token = generate_apple_developer_token(
             settings.apple_team_id,
             settings.apple_key_id,
             settings.apple_private_key_path,
             private_key_b64=settings.apple_private_key_b64,
         )
-        music_user_token = access_token  # stored as access_token in service_connections
+        music_user_token = access_token
 
         library_songs = await fetch_apple_music_library(
             developer_token, music_user_token
@@ -450,6 +453,23 @@ class TasteService:
         recently_played = await fetch_apple_music_recently_played(
             developer_token, music_user_token
         )
+
+        # Fetch ratings (Love = 1, Dislike = -1) and apply to songs
+        try:
+            from musicmind.api.taste.fetch import fetch_apple_music_ratings
+
+            ratings = await fetch_apple_music_ratings(
+                developer_token, music_user_token,
+            )
+            if ratings:
+                rating_map = {r["catalog_id"]: r["rating"] for r in ratings}
+                for song in library_songs:
+                    cid = song.get("catalog_id", "")
+                    if cid in rating_map:
+                        song["user_rating"] = rating_map[cid]
+                logger.info("Applied %d Apple Music ratings to library songs", len(ratings))
+        except Exception:
+            logger.debug("Failed to fetch Apple Music ratings (optional)")
 
         return library_songs, recently_played
 
@@ -517,7 +537,24 @@ class TasteService:
     async def _cache_history(
         self, engine, *, user_id: str, service: str, history: list[dict]
     ) -> None:
-        """Cache listening history entries and update play count proxy."""
+        """Cache listening history entries and update play count proxy.
+
+        Smart delta detection: compares current recently-played list against
+        existing play_count_proxy to detect replays. Songs that reappear
+        across multiple polling snapshots get their seen_count incremented.
+        """
+        # Get existing play count data for delta comparison
+        existing_songs: dict[str, int] = {}
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    play_count_proxy.c.song_id,
+                    play_count_proxy.c.seen_count,
+                ).where(play_count_proxy.c.user_id == user_id)
+            )
+            for row in result:
+                existing_songs[row.song_id] = row.seen_count
+
         async with engine.begin() as conn:
             for entry in history:
                 song_id = entry.get("song_id", "")

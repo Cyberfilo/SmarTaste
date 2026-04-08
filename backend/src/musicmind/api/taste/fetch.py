@@ -491,3 +491,95 @@ async def fetch_apple_music_recently_played(
 
     logger.info("Fetched %d Apple Music recently played entries", len(results))
     return results
+
+
+# ── Apple Music Enhanced Behavioral Data ──────────────────────────────────
+
+
+async def fetch_apple_music_ratings(
+    developer_token: str,
+    music_user_token: str,
+    *,
+    limit: int = 100,
+    max_pages: int = 5,
+) -> list[dict[str, Any]]:
+    """Fetch user's song ratings (Love/Dislike) from Apple Music.
+
+    Apple Music ratings API: GET /v1/me/ratings/songs
+    Returns songs with value 1 (love) or -1 (dislike).
+    Strong explicit preference signals.
+    """
+    results: list[dict[str, Any]] = []
+    offset = 0
+    pages_fetched = 0
+    headers = {
+        "Authorization": f"Bearer {developer_token}",
+        "Music-User-Token": music_user_token,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while pages_fetched < max_pages:
+                resp = await client.get(
+                    f"{APPLE_MUSIC_API_BASE}/me/ratings/songs",
+                    headers=headers,
+                    params={"limit": limit, "offset": offset},
+                )
+                if resp.status_code == 404:
+                    break  # No ratings endpoint available
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("data", [])
+                if not items:
+                    break
+
+                for resource in items:
+                    attrs = resource.get("attributes", {})
+                    results.append({
+                        "catalog_id": resource.get("id", ""),
+                        "rating": attrs.get("value", 0),
+                    })
+
+                pages_fetched += 1
+                offset += len(items)
+                if data.get("next") is None:
+                    break
+    except (httpx.HTTPStatusError, httpx.HTTPError):
+        logger.debug("Error fetching Apple Music ratings (may not be supported)")
+
+    logger.info("Fetched %d Apple Music ratings", len(results))
+    return results
+
+
+async def fetch_spotify_saved_status(
+    access_token: str,
+    track_ids: list[str],
+) -> dict[str, bool]:
+    """Check which tracks are in the user's Spotify Liked Songs.
+
+    Returns dict of {track_id: is_saved}.
+    """
+    if not track_ids:
+        return {}
+
+    result: dict[str, bool] = {}
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Spotify allows checking 50 at a time
+            for i in range(0, len(track_ids), 50):
+                batch = track_ids[i : i + 50]
+                resp = await client.get(
+                    f"{SPOTIFY_API_BASE}/me/tracks/contains",
+                    headers=headers,
+                    params={"ids": ",".join(batch)},
+                )
+                resp.raise_for_status()
+                statuses = resp.json()
+                for tid, saved in zip(batch, statuses):
+                    result[tid] = saved
+    except (httpx.HTTPStatusError, httpx.HTTPError):
+        logger.debug("Error checking Spotify saved status")
+
+    return result
