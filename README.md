@@ -21,6 +21,7 @@
 | **Taste Profile** | Your musical DNA — top genres (with regional specificity), artists with featuring detection, audio traits, familiarity score |
 | **Smart Recommendations** | Language-first scoring (Italian Hip-Hop ≠ generic Hip-Hop) + audio similarity from Deezer/ReccoBeats analysis |
 | **Playlists** | Browse your real Apple Music / Spotify playlists with per-playlist recommendations |
+| **Taste Calibration** | 3-step onboarding wizard: pick playlists, rank artists (drag-to-reorder), pick favorite songs — compensates for Apple Music's missing play counts |
 | **Audio Enrichment** | Automatic: Deezer preview → ReccoBeats analysis → 9 audio features per track (free, no auth) |
 | **AI Chat** | Ask Claude or GPT about your taste, get recommendations by description, explore music conversationally |
 | **Listening Timeline** | Chronological song view with date labels — critical for Apple Music's limited API |
@@ -60,26 +61,35 @@
 │  │ Batch processing (5/batch) · Rate limit backoff       │  │
 │  └────────────────────────────────────────────────────────┘ │
 │  ┌─── Data Layer ────────────────────────────────────────┐  │
-│  │ PostgreSQL 16 · 22 tables · user-scoped · encrypted   │  │
+│  │ PostgreSQL 16 · 23 tables · user-scoped · encrypted   │  │
+│  │ + Separate logging DB (request/enrichment/error logs) │  │
 │  └────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
          ↕                    ↕                    ↕
    Spotify API          Apple Music API      Anthropic/OpenAI
    (OAuth PKCE)         (MusicKit JS)        (BYOK keys)
+
+         ↕                    ↕
+   smartaste-logs         NocoDB
+   (PostgreSQL)           (Admin UI)
 ```
 
 ## Recommendation Engine
 
-The scorer evaluates candidates across **4 weighted dimensions** with language-first prioritization:
+**Context-adaptive weights** — shift based on user profile characteristics:
 
-| Dimension | Weight | How it works |
-|-----------|--------|-------------|
-| Language/Region | **45%** | Detects regional genre prefixes ("Italian" from "Italian Hip-Hop/Rap"). Italian tracks score 1.0, generic 0.2, wrong-region 0.0 |
-| Audio similarity | **32%** | Energy, tempo, danceability, valence proximity from enriched features. Redistributed to other dimensions when features unavailable |
-| Genre match | **13%** | Cosine similarity with regional prioritization |
-| Artist affinity | **10%** | Featuring artists detected at 0.3 weight (parses feat./ft./&/x) |
+| Dimension | Default | Adaptive Range | How it works |
+|-----------|---------|----------------|-------------|
+| Genre match | **35%** | 25-45% | Cosine similarity with regional prioritization |
+| Audio similarity | **25%** | 20-40% | Feature similarity from enriched audio; dominant when mood active |
+| Artist affinity | **20%** | 15-25% | Calibration-aware; boosted when onboarding complete |
+| Language/Region | **20%** | 5-35% | Regional match; high for Italian-only listeners, near-zero for global |
 
-Diversity penalty and staleness cooldown applied on top. Per-playlist recommendations build a mini-profile from the playlist's songs only.
+Plus: calibration boost (+0.03 to +0.20 based on artist ranking), diversity penalty (MMR), staleness cooldown, cross-strategy bonus, mood filtering.
+
+**Play count proxy** for Apple Music (no play counts in API): tracks `seen_count` from recently-played polling, songs played recently get up to 10x weight in profile building.
+
+Per-playlist recommendations build a mini-profile from the playlist's songs only.
 
 ## Audio Enrichment Pipeline
 
@@ -138,9 +148,17 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 | `MUSICMIND_APPLE_TEAM_ID` | — | Apple Developer Team ID |
 | `MUSICMIND_APPLE_KEY_ID` | — | MusicKit key ID |
 | `MUSICMIND_APPLE_PRIVATE_KEY_PATH` | — | Path to `.p8` key file |
+| `MUSICMIND_LOGS_DATABASE_URL` | — | Separate PostgreSQL for request/enrichment/error logs |
 | `MUSICMIND_SOUNDSTAT_API_KEY` | — | SoundStat API key for premium enrichment |
 
 *Auto-generated on first Docker deploy if not set.
+
+### NocoDB (admin data browser)
+| Variable | Description |
+|----------|-------------|
+| `NC_DB` | Internal PostgreSQL URL for NocoDB metadata storage |
+| `NC_AUTH_JWT_SECRET` | JWT secret for NocoDB admin auth |
+| `NC_PUBLIC_URL` | Public URL (set after generating Railway domain) |
 
 <details>
 <summary><b>Full API endpoint list</b></summary>
@@ -226,7 +244,7 @@ smartaste/
 │   │   │   ├── audio/            # On-demand Essentia + cache layer
 │   │   │   ├── mood.py           # Mood filtering (8 profiles)
 │   │   │   └── ...               # Weights, genres, dedup, similarity
-│   │   ├── db/                   # 22-table SQLAlchemy Core schema
+│   │   ├── db/                   # 23-table SQLAlchemy Core schema + logs DB
 │   │   └── security/             # Fernet encryption
 │   ├── alembic/                  # 11 database migrations
 │   ├── tests/                    # 370+ tests
