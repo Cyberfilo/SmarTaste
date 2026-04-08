@@ -720,7 +720,7 @@
           const badge = document.getElementById('pipelineTotal');
           badge.textContent = `${b.total.toLocaleString()} songs`;
 
-          const stageNames = { audio_features: 'Audio Features', lastfm_tags: 'Last.fm Tags', musicbrainz_credits: 'MusicBrainz Credits', lyrics_embeddings: 'Lyrics Embeddings' };
+          const stageNames = { audio_features: 'Audio Features', lastfm_tags: 'Last.fm Tags', musicbrainz_credits: 'MusicBrainz Credits' };
           const stages = b.stages || {};
 
           el.innerHTML = `

@@ -7,6 +7,15 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 4.130 — 2026-04-08
+
+### Changed
+- **Removed lyrics embeddings** from enrichment pipeline — 3-stage pipeline now (audio features → Last.fm tags → MusicBrainz credits). Lyrics/Genius/sentence-transformers deferred to future phase.
+- **Backfill runs every cycle** — partially enriched songs (have audio but missing tags/credits) get completed on every worker cycle, not just startup. This ensures the 1,193 partially enriched songs get their Last.fm tags and MusicBrainz credits filled.
+- **Pipeline breakdown shows 3 stages**: "Fully enriched" now means all 3 stages complete (audio + tags + credits).
+
+---
+
 ## V 4.120 — 2026-04-08
 
 ### Fixed — Data Integrity
