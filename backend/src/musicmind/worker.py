@@ -142,6 +142,18 @@ async def main() -> None:
     except Exception:
         logger.exception("Orphan cleanup failed")
 
+    # ── Phase 0b: Unlink excess discovered artists ───────────────────
+    # Previous indexer runs created discography songs for ALL library artists.
+    # Now capped at top 20%. Delete non-library songs from artists outside
+    # the top artist list, keeping only songs that are also in global_song_cache.
+    await _set_status(engine, "cleanup", "Unlinking excess discovered songs")
+    try:
+        deleted_total = await _unlink_excess_discoveries(engine)
+        if deleted_total > 0:
+            logger.info("Unlinked %d excess discovered songs", deleted_total)
+    except Exception:
+        logger.exception("Excess discovery cleanup failed")
+
     # ── Main loop: library gaps → cobwebs → global enrich → backfill ──
     cycle = 0
     while True:
@@ -646,6 +658,112 @@ async def _fetch_artist_songs_globally(
             cached += 1
 
     return cached
+
+
+# ── Excess Discovery Cleanup ────────────────────────────────────────────
+
+
+async def _unlink_excess_discoveries(engine) -> int:
+    """Delete user-linked discography songs from artists outside the top 20%.
+
+    Previous indexer runs fetched discographies for ALL library artists.
+    Now capped at top 3 + 20%. This cleanup removes songs from excess
+    artists, keeping only library songs and top-artist discographies.
+    Also cleans up their audio_features_cache rows.
+    """
+    from musicmind.db.schema import song_metadata_cache, users
+
+    total_deleted = 0
+
+    async with engine.begin() as conn:
+        user_rows = (await conn.execute(sa.select(users.c.id))).fetchall()
+
+    for user_row in user_rows:
+        uid = user_row.id
+
+        # Get ranked artists (same logic as indexer)
+        try:
+            from musicmind.indexer import _get_ranked_artists
+            ranked = await _get_ranked_artists(engine, user_id=uid)
+        except Exception:
+            continue
+
+        if not ranked:
+            continue
+
+        # Top 3 + top 20% of the rest (same cap as indexer)
+        max_other = min(30, max(5, int(len(ranked) * 0.2)))
+        keep_artists = {a.lower() for a in ranked[:3 + max_other]}
+
+        # Also keep all library artist names (never delete library songs)
+        async with engine.begin() as conn:
+            lib_artists_q = await conn.execute(
+                sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == uid,
+                        sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ),
+                    )
+                )
+            )
+            for row in lib_artists_q:
+                if row[0]:
+                    keep_artists.add(row[0].lower())
+
+        # Find non-library songs from artists NOT in keep_artists
+        async with engine.begin() as conn:
+            excess_q = await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.artist_name,
+                ).where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == uid,
+                        song_metadata_cache.c.library_id.is_(None),
+                        song_metadata_cache.c.date_added_to_library.is_(None),
+                    )
+                )
+            )
+            to_delete = [
+                row.catalog_id for row in excess_q
+                if row.artist_name and row.artist_name.lower() not in keep_artists
+            ]
+
+        if not to_delete:
+            continue
+
+        # Delete in batches
+        for i in range(0, len(to_delete), 500):
+            batch = to_delete[i:i + 500]
+            async with engine.begin() as conn:
+                # Delete audio features first (FK-safe)
+                await conn.execute(
+                    sa.text(
+                        "DELETE FROM audio_features_cache"
+                        " WHERE user_id = :uid"
+                        "   AND catalog_id = ANY(:ids)"
+                    ),
+                    {"uid": uid, "ids": batch},
+                )
+                # Delete songs
+                result = await conn.execute(
+                    sa.text(
+                        "DELETE FROM song_metadata_cache"
+                        " WHERE user_id = :uid"
+                        "   AND catalog_id = ANY(:ids)"
+                    ),
+                    {"uid": uid, "ids": batch},
+                )
+                total_deleted += result.rowcount
+
+        logger.info(
+            "User %s: unlinked %d excess discovered songs (%d artists kept)",
+            uid[:8], len(to_delete), len(keep_artists),
+        )
+
+    return total_deleted
 
 
 # ── User-Linked Gap Detection ───────────────────────────────────────────
