@@ -212,7 +212,25 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d partial completion failed", cycle)
 
+        # ── Check if user-linked work is done ──────────────────────
+        user_work_remaining = await _count_user_linked_gaps(engine, settings)
+
+        if user_work_remaining > 0:
+            # User-linked work remains — skip cobweb, short sleep, loop back
+            logger.info(
+                "Cycle %d: %d user-linked gaps remain, skipping cobweb",
+                cycle, user_work_remaining,
+            )
+            await _set_status(
+                engine, "user_priority",
+                f"{user_work_remaining} user songs still need processing",
+                cycle=cycle,
+            )
+            await asyncio.sleep(10)  # Short pause, then re-check
+            continue
+
         # ── Phase 2: Build cobwebs + enrich globally ────────────────
+        # Only runs when ALL user-linked songs are fully enriched
         await _set_status(engine, "cobweb", "Building artist cobwebs", cycle=cycle)
 
         try:
@@ -240,7 +258,7 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d failed", cycle)
 
-        # ── Phase 3: Backfill tags + credits ────────────────────────
+        # ── Phase 3: Backfill tags + credits on global songs ────────
         await _set_status(engine, "backfill", "Tags + credits on all songs", cycle=cycle)
         try:
             bf = await _backfill_global_songs(engine, settings)
@@ -628,6 +646,73 @@ async def _fetch_artist_songs_globally(
             cached += 1
 
     return cached
+
+
+# ── User-Linked Gap Detection ───────────────────────────────────────────
+
+
+async def _count_user_linked_gaps(engine, settings) -> int:
+    """Count user-linked songs that still need any enrichment stage.
+
+    Returns the total number of gaps across all users:
+    - Songs missing audio features (excluding permanently failed)
+    - Songs missing Last.fm tags
+    - Songs missing MusicBrainz credits (for those with ISRC)
+
+    When this returns 0, all user-linked work is done and the worker
+    can move to cobweb/global enrichment.
+    """
+    gaps = 0
+    tags_gap = 0
+
+    async with engine.begin() as conn:
+        # 1. Songs missing audio features (not permanently failed)
+        audio_gap = (await conn.execute(sa.text("""
+            SELECT count(*) FROM song_metadata_cache s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM audio_features_cache af
+                WHERE af.catalog_id = s.catalog_id
+                  AND af.user_id = s.user_id
+                  AND (af.energy IS NOT NULL
+                       OR af.feature_source::text LIKE '%no_data_available%')
+            )
+        """))).scalar() or 0
+        gaps += audio_gap
+
+        # 2. Songs missing Last.fm tags (only if lastfm key configured)
+        if settings.lastfm_api_key:
+            tags_gap = (await conn.execute(sa.text("""
+                SELECT count(*) FROM (
+                    SELECT DISTINCT artist_name, name FROM song_metadata_cache
+                    WHERE artist_name IS NOT NULL AND artist_name != ''
+                      AND name IS NOT NULL AND name != ''
+                ) sub
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM lastfm_tags_cache lt
+                    WHERE lt.entity_id = 'track:' || lower(sub.artist_name)
+                                         || ':' || lower(sub.name)
+                )
+            """))).scalar() or 0
+            gaps += tags_gap
+
+        # 3. Songs missing MusicBrainz credits (only those with ISRC)
+        credits_gap = (await conn.execute(sa.text("""
+            SELECT count(DISTINCT isrc) FROM song_metadata_cache
+            WHERE isrc IS NOT NULL AND isrc != ''
+              AND NOT EXISTS (
+                SELECT 1 FROM kg_relationships kg
+                WHERE kg.source_mbid = 'isrc:' || upper(song_metadata_cache.isrc)
+            )
+        """))).scalar() or 0
+        gaps += credits_gap
+
+    if gaps > 0:
+        logger.debug(
+            "User-linked gaps: %d audio, %d tags, %d credits",
+            audio_gap, tags_gap if settings.lastfm_api_key else 0, credits_gap,
+        )
+
+    return gaps
 
 
 # ── Library Gap Fill (priority enrichment) ──────────────────────────────
