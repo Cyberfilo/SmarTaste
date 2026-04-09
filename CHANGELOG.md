@@ -7,6 +7,17 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.210 — 2026-04-09
+
+### Performance + Enrichment Recovery
+- **3x concurrency**: Enrichment CONCURRENCY 5→15, BATCH_SIZE 20→50, Last.fm/ISRC backfill Semaphore 5→10, MusicBrainz cap 100→200/cycle. Uses 8 vCPU available on Railway.
+- **Deezer ISRC lookup**: New primary lookup strategy — tries `/track/isrc:{ISRC}` first (exact match), falls back to name search. 153 previously-failed songs with ISRC can now be found.
+- **Reset failed songs on startup**: Cycle 1 clears `no_data_available` markers for songs that have ISRC, giving them a second chance with the new ISRC lookup.
+- **Orchestrator passes ISRC to Deezer**: Both per-user and global enrichment now send ISRC to `fetch_deezer_features()`.
+- **Last.fm backfill cap**: 500→1000/cycle (faster with Semaphore(10)).
+
+---
+
 ## V 5.200 — 2026-04-09
 
 ### Reliability Sprint — 32 Fixes Across 20 Files

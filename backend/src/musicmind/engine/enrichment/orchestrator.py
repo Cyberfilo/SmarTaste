@@ -33,9 +33,10 @@ ENRICHABLE_FIELDS = {
     "beat_strength", "brightness", "key", "scale", "instrumentalness", "loudness",
 }
 
-# Concurrent tracks in-flight at once (bounded by memory: 5 × ~500KB = 2.5MB)
-CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "5"))
-BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "20"))
+# Concurrent tracks in-flight at once (bounded by memory: 15 × ~500KB = 7.5MB)
+# With 8 vCPU available, I/O-bound async work scales well to 15 concurrent requests
+CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "15"))
+BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "50"))
 
 
 async def enrich_tracks(
@@ -129,10 +130,10 @@ async def enrich_tracks_global(
 
         # Stage 1: Deezer (check cached preview_url first)
         preview_url = track.get("preview_url") or None
-        if not preview_url and name and artist_name:
+        if not preview_url and (name or isrc):
             try:
                 deezer_result = await fetch_deezer_features(
-                    name=name, artist_name=artist_name,
+                    name=name, artist_name=artist_name, isrc=isrc or None,
                 )
                 if deezer_result:
                     preview_url = deezer_result.pop("preview_url", None)
@@ -314,10 +315,10 @@ async def _enrich_single_track(
             if row and row.preview_url:
                 preview_url = row.preview_url
 
-    if not preview_url and name and artist_name:
+    if not preview_url and (name or isrc):
         try:
             deezer_result = await fetch_deezer_features(
-                name=name, artist_name=artist_name,
+                name=name, artist_name=artist_name, isrc=isrc or None,
             )
             if deezer_result:
                 preview_url = deezer_result.pop("preview_url", None)
