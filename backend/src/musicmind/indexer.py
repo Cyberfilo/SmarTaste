@@ -162,10 +162,23 @@ async def run_indexing(
         logger.warning("User %s step 1 failed", user_id[:8], exc_info=True)
 
     # ── Steps 2-5: Artist discographies at decreasing depth ─────────
+    # Top 3 get full treatment (100%/70%/50%), then only the top 20%
+    # of remaining artists get 30% depth. This prevents 182 artists
+    # from creating 2000+ discography songs.
     ranked_artists = await _get_ranked_artists(engine, user_id=user_id)
     if ranked_artists:
-        total_artists = len(ranked_artists)
-        for i, artist_name in enumerate(ranked_artists):
+        # Cap "other" artists at top 20% of library artists (min 5, max 30)
+        max_other = min(30, max(5, int(len(ranked_artists) * 0.2)))
+        # Top 3 + top 20% of the rest
+        artists_to_process = ranked_artists[:3 + max_other]
+        total_artists = len(artists_to_process)
+
+        logger.info(
+            "User %s: processing %d/%d artists (top 3 + %d others)",
+            user_id[:8], total_artists, len(ranked_artists), max_other,
+        )
+
+        for i, artist_name in enumerate(artists_to_process):
             step = min(i + 2, 5)  # Steps 2, 3, 4, 5 (5 = "other")
             if i == 0:
                 depth_frac = STEP_DEPTHS[1]
