@@ -82,7 +82,54 @@ async def run_indexing(
     if not row:
         return stats
 
-    access_token = encryption.decrypt(row.access_token_encrypted)
+    try:
+        access_token = encryption.decrypt(row.access_token_encrypted)
+    except ValueError:
+        logger.warning("User %s: token decryption failed, skipping indexing", user_id[:8])
+        return stats
+
+    # Auto-refresh Spotify token if expired (tokens last ~1 hour)
+    if service == "spotify" and row.token_expires_at is not None:
+        from datetime import UTC, timedelta
+
+        token_expires = row.token_expires_at
+        if token_expires.tzinfo is None:
+            token_expires = token_expires.replace(tzinfo=UTC)
+        if token_expires < datetime.now(UTC) + timedelta(seconds=60):
+            refresh_encrypted = row.refresh_token_encrypted
+            if refresh_encrypted:
+                try:
+                    from musicmind.api.services.service import (
+                        refresh_spotify_token,
+                        upsert_service_connection,
+                    )
+                    refresh_value = encryption.decrypt(refresh_encrypted)
+                    token_data = await refresh_spotify_token(
+                        refresh_value, settings.spotify_client_id,
+                    )
+                    if token_data:
+                        access_token = token_data["access_token"]
+                        await upsert_service_connection(
+                            engine, encryption,
+                            user_id=user_id, service="spotify",
+                            access_token=access_token,
+                            refresh_token=token_data.get("refresh_token", refresh_value),
+                            expires_in=token_data.get("expires_in"),
+                            service_user_id=row.service_user_id,
+                        )
+                        logger.info(
+                            "User %s: refreshed Spotify token", user_id[:8],
+                        )
+                    else:
+                        logger.warning(
+                            "User %s: Spotify refresh failed", user_id[:8],
+                        )
+                except Exception:
+                    logger.warning(
+                        "User %s: Spotify token refresh error",
+                        user_id[:8], exc_info=True,
+                    )
+
     developer_token = None
     storefront = "us"
     if service == "apple_music":
@@ -227,7 +274,7 @@ async def _set_indexing_status(
                     )
                 )
     except Exception:
-        pass
+        logger.debug("Failed to update indexing status for user %s", user_id[:8])
 
 
 async def _enrich_library_songs(
@@ -240,12 +287,17 @@ async def _enrich_library_songs(
     from musicmind.db.schema import audio_features_cache, song_metadata_cache
     from musicmind.engine.enrichment.orchestrator import enrich_tracks
 
-    # Find unenriched library songs
+    # Find unenriched library songs (skip permanently failed ones)
     async with engine.begin() as conn:
-        enriched_ids = sa.select(audio_features_cache.c.catalog_id).where(
+        attempted_ids = sa.select(audio_features_cache.c.catalog_id).where(
             sa.and_(
                 audio_features_cache.c.user_id == user_id,
-                audio_features_cache.c.energy.isnot(None),
+                sa.or_(
+                    audio_features_cache.c.energy.isnot(None),
+                    audio_features_cache.c.feature_source.like(
+                        '%no_data_available%'
+                    ),
+                ),
             )
         )
         result = await conn.execute(
@@ -256,7 +308,7 @@ async def _enrich_library_songs(
                         song_metadata_cache.c.library_id.isnot(None),
                         song_metadata_cache.c.date_added_to_library.isnot(None),
                     ),
-                    song_metadata_cache.c.catalog_id.notin_(enriched_ids),
+                    song_metadata_cache.c.catalog_id.notin_(attempted_ids),
                 )
             )
         )
@@ -449,23 +501,26 @@ async def _suggest_and_enrich_artists(
             if key and key not in library_set and len(key) > 1:
                 candidates[key] = candidates.get(key, 0) + weight * 2
 
-    # Source 2: Last.fm similar tracks' artists
-    async with engine.begin() as conn:
-        try:
-            result = await conn.execute(
-                sa.select(
-                    lastfm_similar_tracks.c.similar_artist,
-                    sa.func.sum(lastfm_similar_tracks.c.similarity_score).label("score"),
-                ).group_by(lastfm_similar_tracks.c.similar_artist)
-                .order_by(sa.text("score DESC"))
-                .limit(max_artists * 3)
-            )
-            for row in result:
-                key = row.similar_artist.strip().lower()
-                if key and key not in library_set:
-                    candidates[key] = candidates.get(key, 0) + (row.score or 0)
-        except Exception:
-            pass
+    # Source 2: Last.fm similar tracks' artists (filtered to THIS user's artists)
+    if ranked_artists:
+        async with engine.begin() as conn:
+            try:
+                result = await conn.execute(
+                    sa.select(
+                        lastfm_similar_tracks.c.similar_artist,
+                        sa.func.sum(lastfm_similar_tracks.c.similarity_score).label("score"),
+                    ).where(
+                        lastfm_similar_tracks.c.source_artist.in_(ranked_artists)
+                    ).group_by(lastfm_similar_tracks.c.similar_artist)
+                    .order_by(sa.text("score DESC"))
+                    .limit(max_artists * 3)
+                )
+                for row in result:
+                    key = row.similar_artist.strip().lower()
+                    if key and key not in library_set:
+                        candidates[key] = candidates.get(key, 0) + (row.score or 0)
+            except Exception:
+                logger.debug("Last.fm similar lookup failed for suggested artists")
 
     # Rank and cap
     sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1])
@@ -481,7 +536,7 @@ async def _suggest_and_enrich_artists(
             )
             enriched_count += 1 if fetched > 0 else 0
         except Exception:
-            pass
+            logger.debug("Suggested artist enrichment failed for '%s'", artist_name)
 
     return enriched_count
 
@@ -575,7 +630,8 @@ async def _backfill_tags_credits(
                                             "INSERT INTO lastfm_tags_cache"
                                             " (entity_type, entity_id, tags)"
                                             " VALUES (:t, :eid, :tags)"
-                                            " ON CONFLICT DO NOTHING"
+                                            " ON CONFLICT (entity_type, entity_id)"
+                                            " DO UPDATE SET tags = :tags"
                                         ),
                                         {
                                             "t": "track",
@@ -584,7 +640,10 @@ async def _backfill_tags_credits(
                                         },
                                     )
                         except Exception:
-                            pass
+                            logger.debug(
+                                "Tag fetch failed: %s - %s",
+                                t.get("artist_name"), t.get("name"),
+                            )
 
                 await asyncio.gather(
                     *[_fetch_and_store_tags(t, eid) for t, eid in uncached]
@@ -618,4 +677,4 @@ async def _backfill_tags_credits(
                 # fetch_recording_credits handles its own storage
                 await fetch_recording_credits(t["isrc"], engine=engine)
             except Exception:
-                pass
+                logger.debug("MusicBrainz credit fetch failed for ISRC %s", t.get("isrc"))

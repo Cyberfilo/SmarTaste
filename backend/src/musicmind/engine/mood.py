@@ -115,15 +115,24 @@ def _score_mood_match(
     genres = candidate.get("genre_names") or []
     if isinstance(genres, str):
         genres = [genres]
-    genres_lower = [g.lower() for g in genres]
+
+    # Expand genre tokens for word-boundary matching instead of substring
+    # "Italian Hip-Hop/Rap" → {"italian", "hip-hop/rap", "italian hip-hop/rap"}
+    genre_tokens: set[str] = set()
+    for g in genres:
+        g_lower = g.lower()
+        genre_tokens.add(g_lower)
+        # Also add slash-split parts: "Hip-Hop/Rap" → "hip-hop", "rap"
+        for part in g_lower.split("/"):
+            genre_tokens.add(part.strip())
 
     genre_score = 0.0
     for pg in mood.preferred_genres:
-        if any(pg.lower() in g for g in genres_lower):
+        if pg.lower() in genre_tokens:
             genre_score = 1.0
             break
     for ag in mood.avoided_genres:
-        if any(ag.lower() in g for g in genres_lower):
+        if ag.lower() in genre_tokens:
             genre_score = max(0.0, genre_score - 0.5)
     scores.append(genre_score)
 

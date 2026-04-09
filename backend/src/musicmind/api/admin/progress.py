@@ -31,151 +31,140 @@ logger = logging.getLogger(__name__)
 async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
     """Get enrichment progress for all users.
 
-    Returns per-user stats with library songs vs total cached songs breakdown:
-    - library_songs: songs from the user's actual library import
-    - total_songs: all cached songs (library + worker-discovered discographies)
-    - enriched_songs: songs with audio features (only counting songs that still exist)
-    - library_artists / discovered_artists: artist breakdown by source
+    Uses batched queries (GROUP BY) instead of per-user loops to minimize
+    database round-trips. For N users this runs ~5 queries total, not 8N.
+
+    Returns per-user stats with library songs vs total cached songs breakdown.
     """
     async with engine.begin() as conn:
+        # ── Batch 1: Song counts per user (total + library) ─────────
+        song_stats = await conn.execute(
+            sa.select(
+                song_metadata_cache.c.user_id,
+                sa.func.count().label("total_songs"),
+                sa.func.count().filter(sa.or_(
+                    song_metadata_cache.c.date_added_to_library.isnot(None),
+                    song_metadata_cache.c.library_id.isnot(None),
+                )).label("library_songs"),
+                sa.func.count(sa.distinct(song_metadata_cache.c.artist_name)).label(
+                    "unique_artists"
+                ),
+                sa.func.count(sa.distinct(
+                    sa.case(
+                        (sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ), song_metadata_cache.c.artist_name),
+                    )
+                )).label("library_artists"),
+            ).group_by(song_metadata_cache.c.user_id)
+        )
+        song_map: dict[str, dict] = {}
+        for row in song_stats:
+            song_map[row.user_id] = {
+                "total_songs": row.total_songs,
+                "library_songs": row.library_songs,
+                "unique_artists": row.unique_artists,
+                "library_artists": row.library_artists,
+            }
+
+        # ── Batch 2: Enriched counts per user ──────────────────────
+        enriched_stats = await conn.execute(
+            sa.select(
+                audio_features_cache.c.user_id,
+                sa.func.count().label("enriched"),
+            ).where(
+                sa.and_(
+                    audio_features_cache.c.energy.isnot(None),
+                    sa.tuple_(
+                        audio_features_cache.c.catalog_id,
+                        audio_features_cache.c.user_id,
+                    ).in_(
+                        sa.select(
+                            song_metadata_cache.c.catalog_id,
+                            song_metadata_cache.c.user_id,
+                        )
+                    ),
+                )
+            ).group_by(audio_features_cache.c.user_id)
+        )
+        enriched_map: dict[str, int] = {
+            row.user_id: row.enriched for row in enriched_stats
+        }
+
+        # ── Batch 3: Cobweb stats per user ─────────────────────────
+        cobweb_stats = await conn.execute(
+            sa.select(
+                artist_cobweb.c.user_id,
+                sa.func.count().label("cobweb_total"),
+                sa.func.count().filter(
+                    artist_cobweb.c.enriched == sa.true()
+                ).label("cobweb_enriched"),
+            ).group_by(artist_cobweb.c.user_id)
+        )
+        cobweb_map: dict[str, dict] = {
+            row.user_id: {
+                "cobweb_total": row.cobweb_total,
+                "cobweb_enriched": row.cobweb_enriched,
+            }
+            for row in cobweb_stats
+        }
+
+        # ── Batch 4: Indexing status per user ──────────────────────
+        idx_stats = await conn.execute(
+            sa.select(user_indexing_status).where(
+                user_indexing_status.c.step != 99  # Exclude taste rebuild status
+            )
+        )
+        idx_map: dict[str, dict] = {}
+        for row in idx_stats:
+            idx_map[row.user_id] = {
+                "step": row.step,
+                "step_name": row.step_name,
+                "progress_current": row.progress_current,
+                "progress_total": row.progress_total,
+            }
+
+        # ── Batch 5: Users ─────────────────────────────────────────
         user_result = await conn.execute(
             sa.select(users.c.id, users.c.email, users.c.display_name)
         )
         all_users = user_result.fetchall()
 
-        progress: list[dict[str, Any]] = []
-        for user in all_users:
-            # Total cached songs (library + worker-discovered)
-            total_q = await conn.execute(
-                sa.select(sa.func.count()).select_from(song_metadata_cache).where(
-                    song_metadata_cache.c.user_id == user.id
-                )
-            )
-            total_songs = total_q.scalar() or 0
+    # ── Assemble results ───────────────────────────────────────────
+    progress: list[dict[str, Any]] = []
+    for user in all_users:
+        uid = user.id
+        songs = song_map.get(uid, {})
+        total_songs = songs.get("total_songs", 0)
+        if total_songs == 0:
+            continue
 
-            # Library songs only (have date_added_to_library or library_id)
-            library_q = await conn.execute(
-                sa.select(sa.func.count()).select_from(song_metadata_cache).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == user.id,
-                        sa.or_(
-                            song_metadata_cache.c.date_added_to_library.isnot(None),
-                            song_metadata_cache.c.library_id.isnot(None),
-                        ),
-                    )
-                )
-            )
-            library_songs = library_q.scalar() or 0
+        library_songs = songs.get("library_songs", 0)
+        unique_artists = songs.get("unique_artists", 0)
+        library_artists = songs.get("library_artists", 0)
+        enriched = enriched_map.get(uid, 0)
+        cobweb = cobweb_map.get(uid, {"cobweb_total": 0, "cobweb_enriched": 0})
 
-            # Enriched = songs with audio features that STILL EXIST in song_metadata_cache
-            # This prevents orphaned audio_features_cache rows from inflating the count
-            user_song_ids = sa.select(song_metadata_cache.c.catalog_id).where(
-                song_metadata_cache.c.user_id == user.id
-            ).correlate(None)
-            enriched_q = await conn.execute(
-                sa.select(sa.func.count()).select_from(audio_features_cache).where(
-                    sa.and_(
-                        audio_features_cache.c.user_id == user.id,
-                        audio_features_cache.c.energy.isnot(None),
-                        audio_features_cache.c.catalog_id.in_(user_song_ids),
-                    )
-                )
-            )
-            enriched = enriched_q.scalar() or 0
-
-            # Count orphaned audio_features_cache rows (for diagnostics)
-            orphan_q = await conn.execute(
-                sa.select(sa.func.count()).select_from(audio_features_cache).where(
-                    sa.and_(
-                        audio_features_cache.c.user_id == user.id,
-                        audio_features_cache.c.catalog_id.notin_(user_song_ids),
-                    )
-                )
-            )
-            orphan_count = orphan_q.scalar() or 0
-
-            # Library artists: distinct artists from library songs
-            lib_artists_q = await conn.execute(
-                sa.select(
-                    sa.func.count(sa.distinct(song_metadata_cache.c.artist_name))
-                ).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == user.id,
-                        sa.or_(
-                            song_metadata_cache.c.library_id.isnot(None),
-                            song_metadata_cache.c.date_added_to_library.isnot(None),
-                        ),
-                    )
-                )
-            )
-            library_artists = lib_artists_q.scalar() or 0
-
-            # Total unique artists across all songs
-            all_artists_q = await conn.execute(
-                sa.select(
-                    sa.func.count(sa.distinct(song_metadata_cache.c.artist_name))
-                ).where(song_metadata_cache.c.user_id == user.id)
-            )
-            unique_artists = all_artists_q.scalar() or 0
-            discovered_artists = unique_artists - library_artists
-
-            if total_songs == 0:
-                continue
-
-            worker_songs = total_songs - library_songs
-
-            # Indexing status
-            idx_q = await conn.execute(
-                sa.select(user_indexing_status).where(
-                    user_indexing_status.c.user_id == user.id
-                )
-            )
-            idx_row = idx_q.first()
-            indexing = None
-            if idx_row:
-                indexing = {
-                    "step": idx_row.step,
-                    "step_name": idx_row.step_name,
-                    "progress_current": idx_row.progress_current,
-                    "progress_total": idx_row.progress_total,
-                }
-
-            # Cobweb stats
-            cobweb_q = await conn.execute(
-                sa.select(sa.func.count()).select_from(artist_cobweb).where(
-                    artist_cobweb.c.user_id == user.id
-                )
-            )
-            cobweb_total = cobweb_q.scalar() or 0
-            cobweb_enriched_q = await conn.execute(
-                sa.select(sa.func.count()).select_from(artist_cobweb).where(
-                    sa.and_(
-                        artist_cobweb.c.user_id == user.id,
-                        artist_cobweb.c.enriched == sa.true(),
-                    )
-                )
-            )
-            cobweb_enriched = cobweb_enriched_q.scalar() or 0
-
-            progress.append({
-                "user_id": user.id,
-                "email": user.email,
-                "display_name": user.display_name or user.email,
-                "library_songs": library_songs,
-                "worker_songs": worker_songs,
-                "total_songs": total_songs,
-                "enriched_songs": enriched,
-                "library_artists": library_artists,
-                "discovered_artists": discovered_artists,
-                "unique_artists": unique_artists,
-                "orphan_features": orphan_count,
-                "indexing": indexing,
-                "cobweb_total": cobweb_total,
-                "cobweb_enriched": cobweb_enriched,
-                "percentage": round(
-                    min(enriched / total_songs, 1.0) * 100, 1
-                ) if total_songs > 0 else 0,
-            })
+        progress.append({
+            "user_id": uid,
+            "email": user.email,
+            "display_name": user.display_name or user.email,
+            "library_songs": library_songs,
+            "worker_songs": total_songs - library_songs,
+            "total_songs": total_songs,
+            "enriched_songs": enriched,
+            "library_artists": library_artists,
+            "discovered_artists": unique_artists - library_artists,
+            "unique_artists": unique_artists,
+            "orphan_features": 0,  # Computed on-demand via cleanup endpoint
+            "indexing": idx_map.get(uid),
+            "cobweb_total": cobweb["cobweb_total"],
+            "cobweb_enriched": cobweb["cobweb_enriched"],
+            "percentage": round(
+                min(enriched / total_songs, 1.0) * 100, 1
+            ) if total_songs > 0 else 0,
+        })
 
     return progress
 

@@ -78,16 +78,25 @@ def compute_context_weights(
     w_artist = 0.15
     w_language = 0.15
 
-    # Regional listeners: boost language + tags (both encode regional signals)
-    if regional_strength > 0.6:
-        boost = min(0.10, (regional_strength - 0.6) * 0.25)
+    # Regional listeners: proportional scaling based on actual concentration.
+    # 90% regional → language becomes dominant (~35%), genre/audio reduced
+    # 50% regional → moderate boost (~22%)
+    # 10% regional → language nearly zero (~5%), genre/tags get the weight
+    if regional_strength > 0.3:
+        # Continuous scaling: stronger regional taste = more language weight
+        # At 0.3 → boost=0.0, at 0.6 → boost=0.075, at 0.9 → boost=0.225
+        boost = min(0.25, (regional_strength - 0.3) ** 1.5 * 0.6)
         w_language += boost
-        w_genre -= boost * 0.5
-        w_audio -= boost * 0.5
-    elif regional_strength < 0.2:
-        w_language = 0.05
-        w_genre += 0.05
-        w_tags += 0.05
+        # Take proportionally from genre and audio (the least regional signals)
+        w_genre -= boost * 0.4
+        w_audio -= boost * 0.4
+        w_collab -= boost * 0.2
+    elif regional_strength < 0.15:
+        # Very global listener: language nearly irrelevant
+        reduction = w_language - 0.03
+        w_language = 0.03
+        w_genre += reduction * 0.5
+        w_tags += reduction * 0.5
 
     # Audio features available: boost audio
     if has_audio:

@@ -345,12 +345,17 @@ def build_audio_centroid(
     weighted_sums: dict[str, float] = {k: 0.0 for k in keys}
     total_weight = 0.0
 
+    import math
+
     for features, w in zip(audio_features_list, weights):
+        has_valid = False
         for k in keys:
             val = features.get(k)
-            if val is not None:
+            if val is not None and not math.isnan(val):
                 weighted_sums[k] += val * w
-        total_weight += w
+                has_valid = True
+        if has_valid:
+            total_weight += w
 
     if total_weight == 0:
         return {}

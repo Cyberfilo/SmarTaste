@@ -362,6 +362,29 @@ async def get_enrichment_breakdown_endpoint(
     return breakdown
 
 
+@router.get("/diagnostics")
+async def get_diagnostics(
+    request: Request,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Smart enrichment diagnostics with per-user, per-stage breakdown.
+
+    Returns detailed enrichment state for each user including:
+    - Per-stage counts (audio/tags/credits) with library vs non-library split
+    - Failed vs pending vs complete breakdown with failure reasons
+    - ISRC coverage gaps
+    - Cobweb expansion stats
+    - Cross-referenced failure analysis from logs DB
+    - Actionable insights (what needs attention)
+    """
+    from musicmind.api.admin.diagnostics import get_enrichment_diagnostics
+
+    logs_engine = getattr(request.app.state, "logs_engine", None)
+    return await get_enrichment_diagnostics(
+        request.app.state.engine, logs_engine=logs_engine,
+    )
+
+
 @router.get("/db-capacity")
 async def get_db_capacity(
     request: Request,

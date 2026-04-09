@@ -92,13 +92,25 @@ async def main() -> None:
     log_writer = None
     if settings.logs_database_url:
         try:
-            from musicmind.db.logs import LogWriter, create_logs_engine, init_logs_schema
+            from musicmind.db.logs import (
+                DatabaseLogHandler,
+                LogWriter,
+                create_logs_engine,
+                init_logs_schema,
+            )
 
             logs_engine = create_logs_engine(settings.logs_database_url)
             await init_logs_schema(logs_engine)
             log_writer = LogWriter(logs_engine)
             log_writer.start()
-            logger.info("Logging database connected")
+
+            # Forward all Python logs (WARNING+ global, INFO+ musicmind) to DB
+            db_handler = DatabaseLogHandler(log_writer)
+            db_handler.setFormatter(logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+            ))
+            logging.getLogger().addHandler(db_handler)
+            logger.info("Logging database connected (all logs forwarded)")
         except Exception:
             logger.warning("Failed to connect logging database", exc_info=True)
 
@@ -130,11 +142,35 @@ async def main() -> None:
     except Exception:
         logger.exception("Orphan cleanup failed")
 
-    # ── Main loop: build cobwebs + enrich globally ───────────────────
+    # ── Main loop: library gaps → cobwebs → global enrich → backfill ──
     cycle = 0
     while True:
         cycle += 1
         start = time.monotonic()
+
+        # ── Phase 1: Fill user library enrichment gaps first ────────
+        await _set_status(
+            engine, "library_gaps", "Enriching missing user library songs", cycle=cycle,
+        )
+        try:
+            lib_enriched = await _fill_library_gaps(engine, settings)
+            if lib_enriched > 0:
+                logger.info("Cycle %d: enriched %d user library gaps", cycle, lib_enriched)
+        except Exception:
+            logger.exception("Cycle %d library gap-fill failed", cycle)
+
+        # ── Phase 1b: Backfill missing ISRCs via Deezer ──────────────
+        await _set_status(
+            engine, "isrc_backfill", "Resolving missing ISRCs", cycle=cycle,
+        )
+        try:
+            isrc_filled = await _backfill_missing_isrcs(engine)
+            if isrc_filled > 0:
+                logger.info("Cycle %d: resolved %d missing ISRCs", cycle, isrc_filled)
+        except Exception:
+            logger.exception("Cycle %d ISRC backfill failed", cycle)
+
+        # ── Phase 2: Build cobwebs + enrich globally ────────────────
         await _set_status(engine, "cobweb", "Building artist cobwebs", cycle=cycle)
 
         try:
@@ -162,7 +198,7 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d failed", cycle)
 
-        # Backfill tags + credits
+        # ── Phase 3: Backfill tags + credits ────────────────────────
         await _set_status(engine, "backfill", "Tags + credits on all songs", cycle=cycle)
         try:
             bf = await _backfill_global_songs(engine, settings)
@@ -192,7 +228,7 @@ async def _run_cobweb_cycle(
     log_writer=None,
 ) -> dict[str, int]:
     """One cobweb expansion cycle across all users."""
-    from musicmind.db.schema import users
+    from musicmind.db.schema import user_indexing_status, users
 
     stats = {"cobweb_artists": 0, "songs_cached": 0, "songs_enriched": 0}
 
@@ -200,7 +236,29 @@ async def _run_cobweb_cycle(
         result = await conn.execute(sa.select(users.c.id))
         user_ids = [row.id for row in result]
 
+    # Check which users have active backend indexing (step < 7 = not complete)
+    actively_indexing: set[str] = set()
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(user_indexing_status.c.user_id).where(
+                    sa.and_(
+                        user_indexing_status.c.step < 7,
+                        user_indexing_status.c.completed_at.is_(None),
+                    )
+                )
+            )
+            actively_indexing = {row.user_id for row in result}
+    except Exception:
+        logger.debug("Could not check indexing status", exc_info=True)
+
     for user_id in user_ids:
+        if user_id in actively_indexing:
+            logger.info(
+                "User %s: backend indexing active, worker yielding",
+                user_id[:8],
+            )
+            continue
         try:
             user_stats = await _build_user_cobweb(engine, settings, user_id=user_id)
             for k in stats:
@@ -258,7 +316,8 @@ async def _build_user_cobweb(
         return stats
 
     library_set = {a.lower() for a in library_artist_names}
-    max_discovered = max(2, int(len(library_artist_names) * 0.2))
+    max_per_cycle = max(2, int(len(library_artist_names) * 0.2))
+    max_total = max(5, int(len(library_artist_names) * 0.5))  # absolute cap
 
     # Get existing cobweb artists to avoid re-adding
     async with engine.begin() as conn:
@@ -269,76 +328,86 @@ async def _build_user_cobweb(
         )
         existing_set = {row.artist_name.lower() for row in existing}
 
-    candidates: dict[str, tuple[str, float]] = {}  # key → (name, priority)
+    # Only expand cobweb if below total capacity
+    if len(existing_set) < max_total:
+        max_discovered = min(max_per_cycle, max_total - len(existing_set))
 
-    # Source 1: Featured artists from library songs
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
-                sa.and_(
-                    song_metadata_cache.c.user_id == user_id,
-                    sa.or_(
-                        song_metadata_cache.c.library_id.isnot(None),
-                        song_metadata_cache.c.date_added_to_library.isnot(None),
-                    ),
-                )
-            )
-        )
-        for row in result:
-            if not row[0]:
-                continue
-            parsed = parse_artists(row[0])
-            for name, weight in parsed:
-                key = name.strip().lower()
-                if key and key not in library_set and key not in existing_set:
-                    old_priority = candidates.get(key, ("", 0))[1]
-                    candidates[key] = (name.strip(), max(old_priority, weight * 2))
+        candidates: dict[str, tuple[str, float]] = {}  # key → (name, priority)
 
-    # Source 2: Last.fm similar tracks' artists
-    try:
+        # Source 1: Featured artists from library songs
         async with engine.begin() as conn:
             result = await conn.execute(
-                sa.select(
-                    lastfm_similar_tracks.c.similar_artist,
-                    sa.func.avg(lastfm_similar_tracks.c.similarity_score).label("s"),
-                ).where(
-                    lastfm_similar_tracks.c.source_artist.in_(library_artist_names)
-                ).group_by(lastfm_similar_tracks.c.similar_artist)
-                .order_by(sa.text("s DESC"))
-                .limit(max_discovered * 2)
+                sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == user_id,
+                        sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ),
+                    )
+                )
             )
             for row in result:
-                key = row.similar_artist.strip().lower()
-                if key and key not in library_set and key not in existing_set:
-                    old_priority = candidates.get(key, ("", 0))[1]
-                    candidates[key] = (
-                        row.similar_artist.strip(),
-                        max(old_priority, float(row.s or 0)),
-                    )
-    except Exception:
-        pass
+                if not row[0]:
+                    continue
+                parsed = parse_artists(row[0])
+                for name, weight in parsed:
+                    key = name.strip().lower()
+                    if key and key not in library_set and key not in existing_set:
+                        old_priority = candidates.get(key, ("", 0))[1]
+                        candidates[key] = (name.strip(), max(old_priority, weight * 2))
 
-    # Rank and cap
-    sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1][1])
-    to_add = sorted_candidates[:max_discovered]
-
-    # Insert into cobweb
-    for key, (name, priority) in to_add:
-        source = "feat" if priority >= 1.0 else "similar"
+        # Source 2: Last.fm similar tracks' artists
         try:
             async with engine.begin() as conn:
-                await conn.execute(
-                    sa.text(
-                        "INSERT INTO artist_cobweb"
-                        " (user_id, artist_name, source, priority)"
-                        " VALUES (:uid, :name, :src, :pri)"
-                        " ON CONFLICT (user_id, artist_name) DO NOTHING"
-                    ),
-                    {"uid": user_id, "name": name, "src": source, "pri": priority},
+                result = await conn.execute(
+                    sa.select(
+                        lastfm_similar_tracks.c.similar_artist,
+                        sa.func.avg(lastfm_similar_tracks.c.similarity_score).label("s"),
+                    ).where(
+                        lastfm_similar_tracks.c.source_artist.in_(library_artist_names)
+                    ).group_by(lastfm_similar_tracks.c.similar_artist)
+                    .order_by(sa.text("s DESC"))
+                    .limit(max_discovered * 2)
                 )
-            stats["cobweb_artists"] += 1
+                for row in result:
+                    key = row.similar_artist.strip().lower()
+                    if key and key not in library_set and key not in existing_set:
+                        old_priority = candidates.get(key, ("", 0))[1]
+                        candidates[key] = (
+                            row.similar_artist.strip(),
+                            max(old_priority, float(row.s or 0)),
+                        )
         except Exception:
-            pass
+            logger.debug("Last.fm similar lookup failed for user %s", user_id[:8])
+
+        # Rank and cap
+        sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1][1])
+        to_add = sorted_candidates[:max_discovered]
+
+        # Insert into cobweb (use rowcount to track actual inserts)
+        for key, (name, priority) in to_add:
+            source = "feat" if priority >= 1.0 else "similar"
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.text(
+                            "INSERT INTO artist_cobweb"
+                            " (user_id, artist_name, source, priority)"
+                            " VALUES (:uid, :name, :src, :pri)"
+                            " ON CONFLICT (user_id, artist_name) DO NOTHING"
+                        ),
+                        {"uid": user_id, "name": name, "src": source, "pri": priority},
+                    )
+                    if result.rowcount > 0:
+                        stats["cobweb_artists"] += 1
+            except Exception:
+                logger.debug("Cobweb insert failed for '%s'", name)
+    else:
+        logger.debug(
+            "User %s: cobweb at capacity (%d/%d), skipping expansion",
+            user_id[:8], len(existing_set), max_total,
+        )
 
     # Fetch songs for unenriched cobweb artists
     async with engine.begin() as conn:
@@ -416,7 +485,47 @@ async def _fetch_artist_songs_globally(
         return 0
 
     encryption = EncryptionService(settings.fernet_key)
-    access_token = encryption.decrypt(row.access_token_encrypted)
+    access_token = encryption.decrypt_or_none(row.access_token_encrypted)
+    if not access_token:
+        logger.warning("Failed to decrypt token for user %s", user_id[:8])
+        return 0
+
+    # Auto-refresh Spotify token if expired (tokens last ~1 hour)
+    if service == "spotify" and row.token_expires_at is not None:
+        from datetime import UTC, datetime, timedelta
+
+        token_expires = row.token_expires_at
+        if token_expires.tzinfo is None:
+            token_expires = token_expires.replace(tzinfo=UTC)
+        if token_expires < datetime.now(UTC) + timedelta(seconds=60):
+            refresh_encrypted = row.refresh_token_encrypted
+            refresh_value = (
+                encryption.decrypt_or_none(refresh_encrypted)
+                if refresh_encrypted else None
+            )
+            if refresh_value:
+                try:
+                    from musicmind.api.services.service import (
+                        refresh_spotify_token,
+                        upsert_service_connection,
+                    )
+                    token_data = await refresh_spotify_token(
+                        refresh_value, settings.spotify_client_id,
+                    )
+                    if token_data:
+                        access_token = token_data["access_token"]
+                        await upsert_service_connection(
+                            engine, encryption,
+                            user_id=user_id, service="spotify",
+                            access_token=access_token,
+                            refresh_token=token_data.get("refresh_token", refresh_value),
+                            expires_in=token_data.get("expires_in"),
+                            service_user_id=row.service_user_id,
+                        )
+                        logger.info("Refreshed Spotify token for worker user %s", user_id[:8])
+                except Exception:
+                    logger.warning("Spotify token refresh failed for worker user %s", user_id[:8])
+
     developer_token = None
     storefront = "us"
     if service == "apple_music":
@@ -477,6 +586,198 @@ async def _fetch_artist_songs_globally(
             cached += 1
 
     return cached
+
+
+# ── Library Gap Fill (priority enrichment) ──────────────────────────────
+
+
+async def _fill_library_gaps(engine, settings) -> int:
+    """Find user library songs missing audio features and enrich them first.
+
+    This ensures user-scoped library songs always get enriched before the
+    worker spends time on global cobweb songs. Only enriches the exact
+    count of missing songs — no wasted work.
+    """
+    from musicmind.db.schema import (
+        audio_features_cache,
+        song_metadata_cache,
+        user_indexing_status,
+        users,
+    )
+    from musicmind.engine.enrichment.orchestrator import enrich_tracks
+
+    total_enriched = 0
+
+    async with engine.begin() as conn:
+        result = await conn.execute(sa.select(users.c.id))
+        user_ids = [row.id for row in result]
+
+    for user_id in user_ids:
+        # Skip users with active backend indexing (it handles its own enrichment)
+        try:
+            async with engine.begin() as conn:
+                idx_row = (await conn.execute(
+                    sa.select(user_indexing_status.c.step).where(
+                        user_indexing_status.c.user_id == user_id
+                    )
+                )).first()
+                if idx_row and idx_row.step < 7:
+                    continue
+        except Exception:
+            pass
+
+        # Find library songs missing enrichment (skip permanently failed ones)
+        async with engine.begin() as conn:
+            # Songs that are either successfully enriched OR permanently failed
+            attempted_ids = sa.select(audio_features_cache.c.catalog_id).where(
+                sa.and_(
+                    audio_features_cache.c.user_id == user_id,
+                    sa.or_(
+                        # Successfully enriched (has real features)
+                        audio_features_cache.c.energy.isnot(None),
+                        # Permanently failed (marker row with no_data_available)
+                        audio_features_cache.c.feature_source.like(
+                            '%no_data_available%'
+                        ),
+                    ),
+                )
+            )
+            result = await conn.execute(
+                sa.select(song_metadata_cache).where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == user_id,
+                        sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ),
+                        song_metadata_cache.c.catalog_id.notin_(attempted_ids),
+                    )
+                )
+            )
+            rows = result.fetchall()
+
+        if not rows:
+            continue
+
+        logger.info(
+            "User %s: %d library songs missing enrichment, filling gaps",
+            user_id[:8], len(rows),
+        )
+
+        tracks = []
+        for row in rows:
+            genres = row.genre_names
+            if isinstance(genres, str):
+                try:
+                    genres = json.loads(genres)
+                except (json.JSONDecodeError, TypeError):
+                    genres = []
+            tracks.append({
+                "catalog_id": row.catalog_id,
+                "name": row.name or "",
+                "artist_name": row.artist_name or "",
+                "isrc": row.isrc or "",
+                "service_source": getattr(row, "service_source", ""),
+                "genre_names": genres,
+            })
+
+        try:
+            r = await enrich_tracks(engine, tracks, user_id=user_id)
+            enriched = r.get("deezer", 0) + r.get("reccobeats", 0) + r.get("soundstat", 0)
+            total_enriched += enriched
+        except Exception:
+            logger.warning(
+                "User %s: library gap-fill enrichment failed", user_id[:8], exc_info=True,
+            )
+
+    return total_enriched
+
+
+# ── ISRC Backfill ───────────────────────────────────────────────────────
+
+
+async def _backfill_missing_isrcs(engine) -> int:
+    """Resolve missing ISRCs by searching Deezer for name + artist.
+
+    Deezer's /track/{id} endpoint includes ISRC in the response.
+    This lets songs participate in the global audio features cache.
+    Caps at 100 per cycle to avoid rate limits (~5 req/s).
+    """
+    from musicmind.db.schema import song_metadata_cache
+    from musicmind.engine.enrichment.deezer import fetch_deezer_features
+
+    # Find songs missing ISRC (prioritize library songs)
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(
+                song_metadata_cache.c.catalog_id,
+                song_metadata_cache.c.user_id,
+                song_metadata_cache.c.name,
+                song_metadata_cache.c.artist_name,
+            ).where(
+                sa.and_(
+                    sa.or_(
+                        song_metadata_cache.c.isrc.is_(None),
+                        song_metadata_cache.c.isrc == "",
+                    ),
+                    song_metadata_cache.c.name.isnot(None),
+                    song_metadata_cache.c.name != "",
+                    song_metadata_cache.c.artist_name.isnot(None),
+                    song_metadata_cache.c.artist_name != "",
+                )
+            ).order_by(
+                # Library songs first (those with library_id or date_added)
+                sa.case(
+                    (sa.or_(
+                        song_metadata_cache.c.library_id.isnot(None),
+                        song_metadata_cache.c.date_added_to_library.isnot(None),
+                    ), 0),
+                    else_=1,
+                ),
+            ).limit(100)
+        )
+        rows = result.fetchall()
+
+    if not rows:
+        return 0
+
+    logger.info("ISRC backfill: resolving %d songs via Deezer", len(rows))
+
+    filled = 0
+    sem = asyncio.Semaphore(5)
+
+    async def _resolve_one(catalog_id: str, user_id: str, name: str, artist: str) -> bool:
+        async with sem:
+            try:
+                deezer_result = await fetch_deezer_features(
+                    name=name, artist_name=artist,
+                )
+                if deezer_result and deezer_result.get("isrc"):
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            sa.text(
+                                "UPDATE song_metadata_cache"
+                                " SET isrc = :isrc"
+                                " WHERE catalog_id = :cid AND user_id = :uid"
+                                "   AND (isrc IS NULL OR isrc = '')"
+                            ),
+                            {
+                                "isrc": deezer_result["isrc"],
+                                "cid": catalog_id,
+                                "uid": user_id,
+                            },
+                        )
+                    return True
+            except Exception:
+                logger.debug("ISRC resolve failed for %s - %s", artist, name)
+            return False
+
+    results = await asyncio.gather(
+        *[_resolve_one(r.catalog_id, r.user_id, r.name, r.artist_name) for r in rows],
+        return_exceptions=True,
+    )
+    filled = sum(1 for r in results if r is True)
+    return filled
 
 
 # ── Global Enrichment ────────────────────────────────────────────────────
@@ -631,7 +932,8 @@ async def _backfill_global_songs(engine, settings) -> int:
                                             " (entity_type, entity_id,"
                                             "  tags)"
                                             " VALUES (:t, :eid, :tags)"
-                                            " ON CONFLICT DO NOTHING"
+                                            " ON CONFLICT (entity_type, entity_id)"
+                                            " DO UPDATE SET tags = :tags"
                                         ),
                                         {
                                             "t": "track",
@@ -641,7 +943,7 @@ async def _backfill_global_songs(engine, settings) -> int:
                                     )
                                 return True
                         except Exception:
-                            pass
+                            logger.debug("Tag fetch failed: %s - %s", artist, name)
                         return False
 
                 for i in range(0, len(uncached), 100):
@@ -711,7 +1013,7 @@ async def _backfill_global_songs(engine, settings) -> int:
                     if credits:
                         updated += 1
                 except Exception:
-                    pass
+                    logger.debug("MusicBrainz credit fetch failed for ISRC %s", isrc)
 
     return updated
 

@@ -575,19 +575,35 @@ class RecommendationService:
                                 service_user_id=row.service_user_id,
                             )
 
-        # Generate Apple Music developer token and detect storefront
+        # Detect storefront / market for the user's region
         developer_token = None
         storefront = "us"
         if service == "apple_music":
             developer_token = generate_apple_developer_token(
                 settings.apple_team_id,
                 settings.apple_key_id,
-                settings.apple_private_key_path, private_key_b64=settings.apple_private_key_b64,
+                settings.apple_private_key_path,
+                private_key_b64=settings.apple_private_key_b64,
             )
             storefront = await detect_apple_music_storefront(
                 access_token, developer_token,
             )
             logger.info("Detected Apple Music storefront: %s", storefront)
+        elif service == "spotify":
+            # Detect Spotify market from user profile country
+            try:
+                from musicmind.api.services.service import (
+                    fetch_spotify_user_profile,
+                )
+                profile = await fetch_spotify_user_profile(access_token)
+                country = profile.get("country", "US")
+                if country and len(country) == 2:
+                    storefront = country.lower()
+                    logger.info(
+                        "Detected Spotify market: %s", storefront,
+                    )
+            except Exception:
+                logger.debug("Could not detect Spotify market")
 
         return service, access_token, developer_token, storefront
 
@@ -764,31 +780,36 @@ class RecommendationService:
 
         cutoff = datetime.now(UTC) - timedelta(days=730)  # 2 years
 
-        # Get library song IDs and their dates
+        # Get library song IDs and their dates (only actual library songs)
         library_ids: set[str] = set()
         async with engine.begin() as conn:
             result = await conn.execute(
                 sa.select(
                     song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.library_id,
                     song_metadata_cache.c.date_added_to_library,
                 ).where(
                     sa.and_(
                         song_metadata_cache.c.catalog_id.in_(catalog_ids),
                         song_metadata_cache.c.user_id == user_id,
+                        sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ),
                     )
                 )
             )
             for row in result:
                 date_added = row.date_added_to_library
-                # Keep songs added >2 years ago (rediscovery)
                 if date_added is not None:
                     if hasattr(date_added, "tzinfo") and date_added.tzinfo is None:
                         date_added = date_added.replace(tzinfo=UTC)
+                    # Keep songs added >2 years ago (rediscovery)
                     if date_added > cutoff:
                         library_ids.add(row.catalog_id)
                 else:
-                    # No date = assume recent, exclude
-                    library_ids.add(row.catalog_id)
+                    # Has library_id but no date — treat as old, allow rediscovery
+                    pass
 
         if not library_ids:
             return candidates

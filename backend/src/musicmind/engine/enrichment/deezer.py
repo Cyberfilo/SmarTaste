@@ -79,6 +79,10 @@ async def fetch_deezer_features(
                 if preview:
                     result["preview_url"] = preview
 
+                deezer_isrc = full.get("isrc")
+                if deezer_isrc:
+                    result["isrc"] = deezer_isrc
+
                 return result if len(result) > 1 else None
 
         except httpx.HTTPStatusError as exc:

@@ -170,7 +170,7 @@ def normalize_genre(genre: str) -> str:
         Canonical genre string.
     """
     if not genre:
-        return genre
+        return ""
 
     key = genre.strip().lower()
 

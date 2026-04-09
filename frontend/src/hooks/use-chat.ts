@@ -85,7 +85,7 @@ function mapErrorCode(code: string, fallback: string): string {
 
 function getInitialModel(): string {
   if (typeof window === "undefined") return "claude";
-  return localStorage.getItem("smartaste-preferred-model") || "claude";
+  return localStorage.getItem("musicmind-preferred-model") || "claude";
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -99,7 +99,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSelectedModel: (model: string) => {
     set({ selectedModel: model });
     if (typeof window !== "undefined") {
-      localStorage.setItem("smartaste-preferred-model", model);
+      localStorage.setItem("musicmind-preferred-model", model);
     }
   },
 

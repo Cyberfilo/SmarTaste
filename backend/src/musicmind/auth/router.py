@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -295,8 +296,22 @@ async def me(
     }
 
 
-# In-memory lock: prevent concurrent indexing runs per user
-_indexing_locks: dict[str, bool] = {}
+# Async-safe lock: prevent concurrent indexing runs per user.
+# asyncio.Lock guarantees mutual exclusion within the event loop — no TOCTOU race.
+_indexing_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_indexing_lock(user_id: str) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for a user_id."""
+    if user_id not in _indexing_locks:
+        _indexing_locks[user_id] = asyncio.Lock()
+    return _indexing_locks[user_id]
+
+
+def is_indexing(user_id: str) -> bool:
+    """Check if a user's indexing lock is currently held."""
+    lock = _indexing_locks.get(user_id)
+    return lock is not None and lock.locked()
 
 
 async def _background_indexing(
@@ -308,13 +323,34 @@ async def _background_indexing(
 ) -> None:
     """Trigger per-user indexing if the library isn't fully enriched.
 
-    Uses an in-memory lock to prevent concurrent runs for the same user.
+    Uses an asyncio.Lock to prevent concurrent runs for the same user.
     Checks indexing status — skips if already complete or in progress.
     """
-    if _indexing_locks.get(user_id):
+    lock = _get_indexing_lock(user_id)
+    if lock.locked():
         return
-    _indexing_locks[user_id] = True
 
+    async with lock:
+        try:
+            await _run_indexing_inner(
+                engine=engine, settings=settings,
+                encryption=encryption, user_id=user_id,
+            )
+        except Exception:
+            logger.warning(
+                "Background indexing failed for user %s",
+                user_id, exc_info=True,
+            )
+
+
+async def _run_indexing_inner(
+    *,
+    engine,
+    settings,
+    encryption,
+    user_id: str,
+) -> None:
+    """Inner indexing logic — separated so the lock wrapper stays clean."""
     try:
         from musicmind.api.services.service import get_user_connections
         from musicmind.db.schema import (
@@ -394,5 +430,3 @@ async def _background_indexing(
             "Background indexing failed for user %s",
             user_id, exc_info=True,
         )
-    finally:
-        _indexing_locks.pop(user_id, None)
