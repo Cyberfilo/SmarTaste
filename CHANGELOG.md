@@ -7,6 +7,18 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.300 — 2026-04-09
+
+### Unified Per-Song Enrichment Pipeline
+- **Full pipeline per song**: `enrich_tracks()` now runs audio → tags → credits for EACH song before moving to the next. Tags + credits run concurrently within each song. 15 songs processed in parallel.
+- **No more sequential stages**: Previously: all audio for all songs, then all tags, then all credits. Now: song1(audio+tags+credits), song2(audio+tags+credits), ..., all concurrent.
+- **Tags + credits built into orchestrator**: New `_enrich_tags_single()` and `_enrich_credits_single()` functions with cache-first checks (no duplicate API calls).
+- **Worker partial completion simplified**: Uses the same orchestrator functions. Semaphore(15) for high throughput.
+- **Indexer updated**: `_enrich_library_songs` and `_fetch_and_enrich_discography` pass `lastfm_api_key` — tags+credits happen during indexing, not as a separate backfill.
+- **Removed redundant `_backfill_tags_credits`** calls from indexer (now handled by unified pipeline).
+
+---
+
 ## V 5.230 — 2026-04-09
 
 ### User-Linked Priority Gate
