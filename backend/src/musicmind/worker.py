@@ -947,20 +947,23 @@ async def _fill_library_gaps(engine, settings) -> int:
 async def _complete_partial_enrichment(engine, settings) -> int:
     """Complete tags + credits for songs already enriched for audio.
 
-    Uses the unified per-song pipeline from orchestrator — each song
-    gets tags + credits concurrently. Handles songs from BEFORE the
-    unified pipeline was added (already have audio, missing tags/credits).
+    Three-phase approach matching the main pipeline:
+    Phase B: Tags at Sem(15) with batch cache check
+    Phase C: Credits at Sem(2) with batch cache check
     """
-    from musicmind.db.schema import song_metadata_cache
+    from musicmind.db.schema import (
+        kg_relationships,
+        lastfm_tags_cache,
+        song_metadata_cache,
+    )
     from musicmind.engine.enrichment.orchestrator import (
         _enrich_credits_single,
         _enrich_tags_single,
     )
 
-    if not settings.lastfm_api_key:
-        return 0
+    updated = 0
 
-    # Get all user songs (tags/credits are global — deduplicate by name+artist)
+    # Get all user songs (deduplicated by name+artist)
     async with engine.begin() as conn:
         result = await conn.execute(
             sa.select(
@@ -984,25 +987,79 @@ async def _complete_partial_enrichment(engine, settings) -> int:
     if not tracks:
         return 0
 
-    updated = 0
-    sem = asyncio.Semaphore(15)
+    # ── Phase B: Tags (batch cache check, then Sem(15)) ────────
+    if settings.lastfm_api_key:
+        tag_eids = {
+            f"track:{t['artist_name'].lower()}:{t['name'].lower()}": t
+            for t in tracks
+        }
+        cached_eids: set[str] = set()
+        eid_list = list(tag_eids.keys())
+        for i in range(0, len(eid_list), 500):
+            chunk = eid_list[i:i + 500]
+            async with engine.begin() as conn:
+                result = await conn.execute(
+                    sa.select(lastfm_tags_cache.c.entity_id).where(
+                        lastfm_tags_cache.c.entity_id.in_(chunk)
+                    )
+                )
+                cached_eids.update(row.entity_id for row in result)
 
-    async def _process_one(track: dict) -> int:
-        async with sem:
-            tag_ok = await _enrich_tags_single(
-                engine, track, lastfm_api_key=settings.lastfm_api_key,
+        uncached_tags = [(eid, tag_eids[eid]) for eid in eid_list if eid not in cached_eids]
+        if uncached_tags:
+            logger.info("Partial: %d tracks need tags", len(uncached_tags))
+            tag_sem = asyncio.Semaphore(15)
+
+            async def _tag(eid: str, t: dict) -> bool:
+                async with tag_sem:
+                    return await _enrich_tags_single(
+                        engine, t, lastfm_api_key=settings.lastfm_api_key,
+                        _skip_cache_check=True,
+                    )
+
+            tag_results = await asyncio.gather(
+                *[_tag(eid, t) for eid, t in uncached_tags],
+                return_exceptions=True,
             )
-            credit_ok = await _enrich_credits_single(engine, track)
-            return (1 if tag_ok else 0) + (1 if credit_ok else 0)
+            tag_count = sum(1 for r in tag_results if r is True)
+            updated += tag_count
+            if tag_count:
+                logger.info("Partial: %d tags added", tag_count)
 
-    results = await asyncio.gather(
-        *[_process_one(t) for t in tracks],
-        return_exceptions=True,
-    )
-    updated = sum(r for r in results if isinstance(r, int))
+    # ── Phase C: Credits (batch cache check, then Sem(2)) ──────
+    isrc_tracks = [t for t in tracks if t.get("isrc")]
+    if isrc_tracks:
+        all_mbids = [f"isrc:{t['isrc'].upper()}" for t in isrc_tracks]
+        cached_mbids: set[str] = set()
+        for i in range(0, len(all_mbids), 500):
+            chunk = all_mbids[i:i + 500]
+            async with engine.begin() as conn:
+                result = await conn.execute(
+                    sa.select(sa.distinct(kg_relationships.c.source_mbid)).where(
+                        kg_relationships.c.source_mbid.in_(chunk)
+                    )
+                )
+                cached_mbids.update(row[0] for row in result)
 
-    if updated > 0:
-        logger.info("Partial completion: %d tags/credits added", updated)
+        uncached = [t for t in isrc_tracks if f"isrc:{t['isrc'].upper()}" not in cached_mbids]
+        if uncached:
+            logger.info("Partial: %d tracks need credits", len(uncached))
+            credit_sem = asyncio.Semaphore(2)
+
+            async def _credit(t: dict) -> bool:
+                async with credit_sem:
+                    return await _enrich_credits_single(
+                        engine, t, _skip_cache_check=True,
+                    )
+
+            credit_results = await asyncio.gather(
+                *[_credit(t) for t in uncached],
+                return_exceptions=True,
+            )
+            credit_count = sum(1 for r in credit_results if r is True)
+            updated += credit_count
+            if credit_count:
+                logger.info("Partial: %d credits added", credit_count)
 
     return updated
 

@@ -48,76 +48,146 @@ async def enrich_tracks(
     budget_mode: bool = False,
     lastfm_api_key: str | None = None,
 ) -> dict[str, int]:
-    """Enrich tracks concurrently — FULL pipeline per song.
+    """Three-phase enrichment pipeline — each phase maxes its own concurrency.
 
-    Each song runs: audio features → Last.fm tags → MusicBrainz credits
-    all in one pass before moving on. CONCURRENCY songs run in parallel.
+    Phase A: Audio features — Sem(15), fast (Deezer + ReccoBeats generous limits)
+    Phase B: Last.fm tags  — Sem(15), fast (~20 req/s allowed)
+    Phase C: MusicBrainz   — Sem(2), slow (1 req/s strict limit)
 
-    Speed: ~15 songs in parallel, each doing its full pipeline independently.
-    Memory: bounded at CONCURRENCY × ~500KB previews.
+    Each phase batch-checks cache BEFORE making any API calls.
+    Phases run sequentially but internally parallel. Audio never waits for credits.
     """
     stats = {
         "deezer": 0, "reccobeats": 0, "soundstat": 0,
         "skipped": 0, "failed": 0, "total": len(tracks),
         "tags": 0, "credits": 0,
     }
-    semaphore = asyncio.Semaphore(CONCURRENCY)
 
-    async def _bounded_full_enrich(track: dict[str, Any]) -> dict[str, int]:
-        async with semaphore:
-            result = {"audio": "failed", "tags": 0, "credits": 0}
+    # ── Phase A: Audio features (critical path — do this FAST) ─────
+    audio_sem = asyncio.Semaphore(CONCURRENCY)
 
-            # Step 1: Audio features
-            result["audio"] = await _enrich_single_track(
+    async def _bounded_audio(track: dict[str, Any]) -> str:
+        async with audio_sem:
+            return await _enrich_single_track(
                 engine, track, user_id=user_id,
                 soundstat_api_key=soundstat_api_key,
             )
 
-            # Step 2: Last.fm tags (concurrent with step 3)
-            # Step 3: MusicBrainz credits
-            tag_task = _enrich_tags_single(
-                engine, track, lastfm_api_key=lastfm_api_key,
-            )
-            credit_task = _enrich_credits_single(engine, track)
-
-            tag_ok, credit_ok = await asyncio.gather(
-                tag_task, credit_task, return_exceptions=True,
-            )
-            if tag_ok is True:
-                result["tags"] = 1
-            if credit_ok is True:
-                result["credits"] = 1
-
-            return result
-
-    # Process in batches with concurrent tracks within each batch
     for batch_start in range(0, len(tracks), BATCH_SIZE):
         batch = tracks[batch_start:batch_start + BATCH_SIZE]
-
         results = await asyncio.gather(
-            *[_bounded_full_enrich(track) for track in batch],
+            *[_bounded_audio(t) for t in batch],
             return_exceptions=True,
         )
-
         for r in results:
-            if isinstance(r, dict):
-                audio = r.get("audio", "failed")
-                if isinstance(audio, str):
-                    stats[audio] = stats.get(audio, 0) + 1
-                stats["tags"] += r.get("tags", 0)
-                stats["credits"] += r.get("credits", 0)
+            if isinstance(r, str):
+                stats[r] = stats.get(r, 0) + 1
             else:
                 stats["failed"] += 1
-
         gc.collect()
 
+    audio_done = stats["deezer"] + stats["reccobeats"] + stats["soundstat"]
     logger.info(
-        "Enriched %d/%d: %d Deezer, %d ReccoBeats, %d SoundStat, "
-        "%d tags, %d credits, %d skipped, %d failed",
-        stats["deezer"] + stats["reccobeats"] + stats["soundstat"],
-        stats["total"], stats["deezer"], stats["reccobeats"],
-        stats["soundstat"], stats["tags"], stats["credits"],
-        stats["skipped"], stats["failed"],
+        "Phase A done: %d/%d audio enriched (%d skipped, %d failed)",
+        audio_done, stats["total"], stats["skipped"], stats["failed"],
+    )
+
+    # ── Phase B: Last.fm tags (fast, batch cache check first) ──────
+    if lastfm_api_key:
+        # Batch check which tracks already have tags
+        tag_eids = {
+            f"track:{t.get('artist_name', '').lower()}:{t.get('name', '').lower()}": t
+            for t in tracks
+            if t.get("artist_name") and t.get("name")
+        }
+        if tag_eids:
+            from musicmind.db.schema import lastfm_tags_cache
+            cached_eids: set[str] = set()
+            eid_list = list(tag_eids.keys())
+            for i in range(0, len(eid_list), 500):
+                chunk = eid_list[i:i + 500]
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(lastfm_tags_cache.c.entity_id).where(
+                            lastfm_tags_cache.c.entity_id.in_(chunk)
+                        )
+                    )
+                    cached_eids.update(row.entity_id for row in result)
+
+            # Only fetch tags for uncached tracks
+            uncached = [
+                (eid, tag_eids[eid]) for eid in eid_list if eid not in cached_eids
+            ]
+
+            if uncached:
+                logger.info(
+                    "Phase B: %d tracks need tags (of %d)", len(uncached), len(tag_eids),
+                )
+                tag_sem = asyncio.Semaphore(15)
+
+                async def _fetch_tag(eid: str, track: dict) -> bool:
+                    async with tag_sem:
+                        return await _enrich_tags_single(
+                            engine, track, lastfm_api_key=lastfm_api_key,
+                            _skip_cache_check=True,
+                        )
+
+                tag_results = await asyncio.gather(
+                    *[_fetch_tag(eid, t) for eid, t in uncached],
+                    return_exceptions=True,
+                )
+                stats["tags"] = sum(1 for r in tag_results if r is True)
+                logger.info("Phase B done: %d tags added", stats["tags"])
+
+    # ── Phase C: MusicBrainz credits (slow — 1 req/s) ─────────────
+    isrc_tracks = [t for t in tracks if t.get("isrc")]
+    if isrc_tracks:
+        # Batch check which ISRCs already have credits
+        from musicmind.db.schema import kg_relationships
+        all_mbids = [f"isrc:{t['isrc'].upper()}" for t in isrc_tracks]
+        cached_mbids: set[str] = set()
+        for i in range(0, len(all_mbids), 500):
+            chunk = all_mbids[i:i + 500]
+            async with engine.begin() as conn:
+                result = await conn.execute(
+                    sa.select(sa.distinct(kg_relationships.c.source_mbid)).where(
+                        kg_relationships.c.source_mbid.in_(chunk)
+                    )
+                )
+                cached_mbids.update(row[0] for row in result)
+
+        uncached_credits = [
+            t for t in isrc_tracks
+            if f"isrc:{t['isrc'].upper()}" not in cached_mbids
+        ]
+
+        if uncached_credits:
+            logger.info(
+                "Phase C: %d tracks need credits (out of %d with ISRC)",
+                len(uncached_credits), len(isrc_tracks),
+            )
+            # MusicBrainz: 2 concurrent (their limit is ~1 req/s but we can
+            # pipeline the next request while processing the response)
+            credit_sem = asyncio.Semaphore(2)
+
+            async def _fetch_credit(track: dict) -> bool:
+                async with credit_sem:
+                    return await _enrich_credits_single(
+                        engine, track, _skip_cache_check=True,
+                    )
+
+            credit_results = await asyncio.gather(
+                *[_fetch_credit(t) for t in uncached_credits],
+                return_exceptions=True,
+            )
+            stats["credits"] = sum(1 for r in credit_results if r is True)
+            logger.info("Phase C done: %d credits added", stats["credits"])
+
+    logger.info(
+        "Pipeline complete: %d audio, %d tags, %d credits "
+        "(%d skipped, %d failed) out of %d tracks",
+        audio_done, stats["tags"], stats["credits"],
+        stats["skipped"], stats["failed"], stats["total"],
     )
     return stats
 
@@ -127,6 +197,7 @@ async def _enrich_tags_single(
     track: dict[str, Any],
     *,
     lastfm_api_key: str | None = None,
+    _skip_cache_check: bool = False,
 ) -> bool:
     """Fetch and store Last.fm tags for a single track. Returns True on success."""
     if not lastfm_api_key:
@@ -138,16 +209,17 @@ async def _enrich_tags_single(
 
     eid = f"track:{artist.lower()}:{name.lower()}"
 
-    # Check cache first
-    from musicmind.db.schema import lastfm_tags_cache
-    async with engine.begin() as conn:
-        existing = (await conn.execute(
-            sa.select(lastfm_tags_cache.c.entity_id).where(
-                lastfm_tags_cache.c.entity_id == eid
-            )
-        )).first()
-    if existing:
-        return False  # Already cached
+    # Check cache (skipped when caller already batch-checked)
+    if not _skip_cache_check:
+        from musicmind.db.schema import lastfm_tags_cache
+        async with engine.begin() as conn:
+            existing = (await conn.execute(
+                sa.select(lastfm_tags_cache.c.entity_id).where(
+                    lastfm_tags_cache.c.entity_id == eid
+                )
+            )).first()
+        if existing:
+            return False
 
     try:
         from musicmind.engine.enrichment.lastfm import (
@@ -175,7 +247,12 @@ async def _enrich_tags_single(
     return False
 
 
-async def _enrich_credits_single(engine: Any, track: dict[str, Any]) -> bool:
+async def _enrich_credits_single(
+    engine: Any,
+    track: dict[str, Any],
+    *,
+    _skip_cache_check: bool = False,
+) -> bool:
     """Fetch and store MusicBrainz credits for a single track. Returns True on success."""
     isrc = track.get("isrc")
     if not isrc:
@@ -183,16 +260,17 @@ async def _enrich_credits_single(engine: Any, track: dict[str, Any]) -> bool:
 
     source_mbid = f"isrc:{isrc.upper()}"
 
-    # Check cache first
-    from musicmind.db.schema import kg_relationships
-    async with engine.begin() as conn:
-        existing = (await conn.execute(
-            sa.select(kg_relationships.c.id).where(
-                kg_relationships.c.source_mbid == source_mbid
-            ).limit(1)
-        )).first()
-    if existing:
-        return False  # Already cached
+    # Check cache (skipped when caller already batch-checked)
+    if not _skip_cache_check:
+        from musicmind.db.schema import kg_relationships
+        async with engine.begin() as conn:
+            existing = (await conn.execute(
+                sa.select(kg_relationships.c.id).where(
+                    kg_relationships.c.source_mbid == source_mbid
+                ).limit(1)
+            )).first()
+        if existing:
+            return False
 
     try:
         from musicmind.engine.enrichment.musicbrainz_credits import (
