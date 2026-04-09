@@ -32,7 +32,26 @@ class EncryptionService:
         Raises:
             cryptography.fernet.InvalidToken: If the key is wrong or data is corrupted.
         """
-        return self._fernet.decrypt(ciphertext.encode()).decode()
+        try:
+            return self._fernet.decrypt(ciphertext.encode()).decode()
+        except InvalidToken:
+            raise ValueError(
+                "Token decryption failed — Fernet key may have changed or data is corrupted. "
+                "The user should reconnect their service."
+            ) from None
+
+    def decrypt_or_none(self, ciphertext: str | None) -> str | None:
+        """Decrypt a ciphertext string, returning None on failure instead of raising.
+
+        Use this in non-critical paths (logging, background tasks) where a
+        corrupted token should not crash the operation.
+        """
+        if not ciphertext:
+            return None
+        try:
+            return self._fernet.decrypt(ciphertext.encode()).decode()
+        except (InvalidToken, Exception):
+            return None
 
     @staticmethod
     def generate_key() -> str:

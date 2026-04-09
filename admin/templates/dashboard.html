@@ -512,6 +512,20 @@
       </div>
     </div>
 
+    <!-- Smart Diagnostics -->
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M6.28 5.22a.75.75 0 010 1.06L2.56 10l3.72 3.72a.75.75 0 01-1.06 1.06L.97 10.53a.75.75 0 010-1.06l4.25-4.25a.75.75 0 011.06 0zm7.44 0a.75.75 0 011.06 0l4.25 4.25a.75.75 0 010 1.06l-4.25 4.25a.75.75 0 01-1.06-1.06L17.44 10l-3.72-3.72a.75.75 0 010-1.06zM11.377 2.011a.75.75 0 01.612.867l-2.5 14.5a.75.75 0 01-1.478-.255l2.5-14.5a.75.75 0 01.866-.612z" clip-rule="evenodd"/></svg>
+          Smart Diagnostics
+        </div>
+        <span class="section-badge badge-purple" id="diagBadge">loading...</span>
+      </div>
+      <div id="diagnostics">
+        <div class="empty-state">Loading diagnostics...</div>
+      </div>
+    </div>
+
     <!-- Worker Status -->
     <div class="section">
       <div class="section-header">
@@ -664,7 +678,7 @@
     // ── Data fetching ─────────────────────────────────
     async function fetchData() {
       try {
-        const [statusResp, progressResp, reqStatsResp, errorsResp, breakdownResp, workerResp, capacityResp] = await Promise.all([
+        const [statusResp, progressResp, reqStatsResp, errorsResp, breakdownResp, workerResp, capacityResp, diagResp] = await Promise.all([
           fetch('/api/admin/status', { credentials: 'include' }),
           fetch('/api/admin/progress', { credentials: 'include' }),
           fetch('/api/admin/request-stats', { credentials: 'include' }),
@@ -672,6 +686,7 @@
           fetch('/api/admin/enrichment-breakdown', { credentials: 'include' }),
           fetch('/api/admin/worker-status', { credentials: 'include' }),
           fetch('/api/admin/db-capacity', { credentials: 'include' }),
+          fetch('/api/admin/diagnostics', { credentials: 'include' }),
         ]);
 
         // Check for auth failures first
@@ -730,6 +745,100 @@
             badge.textContent = '0';
             if (cleanupBtn) cleanupBtn.style.display = 'none';
           }
+        }
+
+        // Smart diagnostics
+        if (diagResp && diagResp.ok) {
+          const d = await diagResp.json();
+          const el = document.getElementById('diagnostics');
+          const badge = document.getElementById('diagBadge');
+          const insightCount = (d.insights || []).length;
+          badge.textContent = insightCount > 0 ? `${insightCount} insights` : 'healthy';
+          badge.className = insightCount > 0 ? 'section-badge badge-amber' : 'section-badge badge-green';
+
+          let html = '';
+
+          // Per-user deep breakdown
+          for (const u of (d.users || [])) {
+            const af = u.audio_features || {};
+            const songs = u.songs || {};
+            const cw = u.cobweb || {};
+            const totalAF = af.enriched + af.failed + af.partial + af.not_attempted;
+
+            html += `<div style="margin-bottom:1.25rem;padding:1rem;background:var(--border-light);border-radius:var(--radius-sm)">
+              <div style="font-weight:600;margin-bottom:0.75rem;display:flex;justify-content:space-between;align-items:center">
+                <span>${u.display_name}</span>
+                <span style="font-size:0.75rem;color:var(--text-muted)">${songs.total} songs (${songs.library} library / ${songs.non_library} discovery)</span>
+              </div>
+
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;margin-bottom:0.75rem">
+                <div style="padding:0.5rem;background:var(--success-bg);border-radius:6px;text-align:center">
+                  <div style="font-size:1.25rem;font-weight:700;color:var(--success)">${af.enriched}</div>
+                  <div style="font-size:0.6875rem;color:var(--success)">Audio OK</div>
+                </div>
+                <div style="padding:0.5rem;background:var(--danger-bg);border-radius:6px;text-align:center">
+                  <div style="font-size:1.25rem;font-weight:700;color:var(--danger)">${af.failed}</div>
+                  <div style="font-size:0.6875rem;color:var(--danger)">Failed (permanent)</div>
+                </div>
+                <div style="padding:0.5rem;background:var(--accent-bg);border-radius:6px;text-align:center">
+                  <div style="font-size:1.25rem;font-weight:700;color:var(--accent)">${af.not_attempted}</div>
+                  <div style="font-size:0.6875rem;color:var(--accent)">Not Attempted</div>
+                </div>
+                <div style="padding:0.5rem;background:var(--purple-bg);border-radius:6px;text-align:center">
+                  <div style="font-size:1.25rem;font-weight:700;color:var(--purple)">${songs.missing_isrc}</div>
+                  <div style="font-size:0.6875rem;color:var(--purple)">Missing ISRC</div>
+                </div>
+              </div>
+
+              <div style="font-size:0.75rem;color:var(--text-secondary);display:flex;flex-wrap:wrap;gap:0.75rem">
+                <span>Library audio: <b style="color:${af.library_pending > 0 ? 'var(--danger)' : 'var(--success)'}">${af.library_enriched}/${songs.library}</b></span>
+                <span>Tags cached: <b>${u.tags?.global_cached || 0}</b></span>
+                <span>Credits: <b>${u.credits?.global_credits || 0}</b> (${u.credits?.songs_with_isrc || 0} with ISRC)</span>
+                <span>Cobweb: <b>${cw.enriched}/${cw.total}</b> artists (${cw.songs_fetched || 0} songs)</span>
+                ${u.indexing ? `<span>Indexing: <b>${u.indexing.step_name}</b> ${u.indexing.completed ? '(done)' : ''}</span>` : ''}
+              </div>
+            </div>`;
+          }
+
+          // Global totals
+          const t = d.totals || {};
+          html += `<div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem;font-size:0.75rem;color:var(--text-secondary)">
+            <span>Global audio cache: <b>${t.global_audio_features || 0}</b></span>
+            <span>Global songs: <b>${t.global_songs || 0}</b></span>
+            <span>Total tags: <b>${t.total_tags || 0}</b></span>
+            <span>Total credits: <b>${t.total_credits || 0}</b></span>
+          </div>`;
+
+          // Insights
+          const insights = d.insights || [];
+          if (insights.length > 0) {
+            html += `<div style="margin-top:0.75rem">`;
+            for (const ins of insights) {
+              const colors = { critical: 'var(--danger)', warning: 'var(--accent)', info: 'var(--primary)' };
+              const bgs = { critical: 'var(--danger-bg)', warning: 'var(--accent-bg)', info: 'var(--primary-bg)' };
+              html += `<div style="padding:0.5rem 0.75rem;margin-bottom:0.375rem;border-radius:6px;font-size:0.75rem;background:${bgs[ins.level] || bgs.info};color:${colors[ins.level] || colors.info};border-left:3px solid ${colors[ins.level] || colors.info}">
+                <b>${ins.level.toUpperCase()}</b> (${ins.user}): ${ins.message}
+              </div>`;
+            }
+            html += `</div>`;
+          }
+
+          // Failure analysis from logs DB
+          const fa = d.failure_analysis;
+          if (fa && fa.today && fa.today.length > 0) {
+            html += `<div style="margin-top:0.75rem">
+              <div style="font-size:0.75rem;font-weight:600;margin-bottom:0.375rem;color:var(--text-secondary)">Today's Failures by Stage</div>`;
+            for (const f of fa.today) {
+              html += `<div style="display:flex;gap:0.5rem;font-size:0.6875rem;padding:0.25rem 0;border-bottom:1px solid var(--border-light)">
+                <span style="font-weight:600;min-width:120px">${f.stage}</span>
+                <span style="color:var(--text-muted)">${f.result}</span>
+                <span style="margin-left:auto;font-weight:600;color:var(--danger)">${f.count}x</span>
+              </div>`;
+            }
+            html += `</div>`;
+          }
+
+          el.innerHTML = html || emptyState('No diagnostic data available');
         }
 
         // Enrichment pipeline breakdown

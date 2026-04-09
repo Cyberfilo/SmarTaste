@@ -311,13 +311,23 @@ def score_candidate(
         w_genre += redistribute * 0.5
         w_lang += redistribute * 0.5
 
+    # Renormalize redistributed weights so core dimensions sum to 1.0
+    w_total = w_genre + w_audio + w_artist + w_lang + w_tags + w_collab
+    if w_total > 0 and abs(w_total - 1.0) > 0.001:
+        w_genre /= w_total
+        w_audio /= w_total
+        w_artist /= w_total
+        w_lang /= w_total
+        w_tags /= w_total
+        w_collab /= w_total
+
     overall = (
         w_genre * genre_score
         + w_audio * audio_sim
         + w_artist * artist_match
         + w_lang * language_score
         + w_tags * tag_sim
-        + w_collab * min(1.0, collab_boost * 5.0)
+        + w_collab * collab_boost  # 0.0 or 0.20 — continuous, not binary
         - 0.05 * diversity_penalty
         - 0.03 * staleness
         + cross_bonus
@@ -432,12 +442,9 @@ def rank_candidates(
             else:
                 diversity_penalty = 0.0
 
-            # Adjust score: remove old diversity contribution, add new one
-            # Base score was computed with diversity=0 (no penalty),
-            # so the base includes diversity_weight * 1.0. Subtract and re-add.
-            adjusted = base_score - diversity_weight * 1.0 + diversity_weight * (
-                1.0 - diversity_penalty
-            )
+            # Base score was computed with already_selected=None (diversity=0).
+            # Simply subtract the diversity penalty from the base score.
+            adjusted = base_score - diversity_weight * diversity_penalty
             adjusted = max(0.0, min(1.0, adjusted))
 
             if adjusted > best_score:

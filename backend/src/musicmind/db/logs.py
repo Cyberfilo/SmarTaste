@@ -240,3 +240,44 @@ class LogWriter:
                     await conn.execute(error_logs.insert(), rows)
         except Exception:
             logger.warning("Failed to flush logs to database", exc_info=True)
+
+
+# ── Python Logging Handler → DB ──────────────────────────────────────────
+
+
+class DatabaseLogHandler(logging.Handler):
+    """Python logging handler that forwards log records to LogWriter.
+
+    Captures WARNING+ logs from all loggers and persists them to the
+    error_logs table via the batched LogWriter. INFO logs from the
+    musicmind namespace are also captured for observability.
+
+    Usage:
+        handler = DatabaseLogHandler(log_writer)
+        logging.getLogger().addHandler(handler)
+    """
+
+    def __init__(self, log_writer: LogWriter, level: int = logging.INFO) -> None:
+        super().__init__(level)
+        self._writer = log_writer
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # Only persist WARNING+ globally, or INFO+ from musicmind namespace
+        if record.levelno < logging.WARNING:
+            if not record.name.startswith("musicmind"):
+                return
+
+        try:
+            tb = None
+            if record.exc_info and record.exc_info[2]:
+                import traceback
+                tb = "".join(traceback.format_exception(*record.exc_info))
+
+            self._writer.log_error(
+                level=record.levelname,
+                logger_name=record.name,
+                message=self.format(record),
+                traceback=tb,
+            )
+        except Exception:
+            pass  # Never let logging crash the app

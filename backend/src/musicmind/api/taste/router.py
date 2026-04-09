@@ -31,8 +31,68 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/taste", tags=["taste"])
 taste_service = TasteService()
 
-# Track in-progress background rebuilds (user_id -> status)
-_rebuild_status: dict[str, str] = {}
+TASTE_REBUILD_STEP = 99  # Dedicated step number for taste rebuild status
+
+
+async def _get_rebuild_status(engine, user_id: str) -> str:
+    """Read taste rebuild status from user_indexing_status (step=99)."""
+    import sqlalchemy as sa
+
+    from musicmind.db.schema import user_indexing_status
+
+    async with engine.begin() as conn:
+        row = (await conn.execute(
+            sa.select(user_indexing_status.c.step_name).where(
+                sa.and_(
+                    user_indexing_status.c.user_id == user_id,
+                    user_indexing_status.c.step == TASTE_REBUILD_STEP,
+                )
+            )
+        )).first()
+    if row is None:
+        return "idle"
+    return row.step_name or "idle"
+
+
+async def _set_rebuild_status(engine, user_id: str, status_val: str) -> None:
+    """Persist taste rebuild status to user_indexing_status (step=99)."""
+    from datetime import UTC, datetime
+
+    import sqlalchemy as sa
+
+    from musicmind.db.schema import user_indexing_status
+
+    now = datetime.now(UTC)
+    try:
+        async with engine.begin() as conn:
+            existing = (await conn.execute(
+                sa.select(user_indexing_status.c.user_id).where(
+                    sa.and_(
+                        user_indexing_status.c.user_id == user_id,
+                        user_indexing_status.c.step == TASTE_REBUILD_STEP,
+                    )
+                )
+            )).first()
+            if existing:
+                await conn.execute(
+                    sa.update(user_indexing_status).where(
+                        sa.and_(
+                            user_indexing_status.c.user_id == user_id,
+                            user_indexing_status.c.step == TASTE_REBUILD_STEP,
+                        )
+                    ).values(step_name=status_val, updated_at=now)
+                )
+            else:
+                await conn.execute(
+                    user_indexing_status.insert().values(
+                        user_id=user_id, step=TASTE_REBUILD_STEP,
+                        step_name=status_val,
+                        progress_current=0, progress_total=0,
+                        started_at=now, updated_at=now,
+                    )
+                )
+    except Exception:
+        logger.debug("Failed to persist rebuild status for %s", user_id[:8])
 
 
 @router.get("/profile")
@@ -131,39 +191,42 @@ async def refresh_profile(
     Returns 202 immediately. Poll GET /api/taste/profile/status for completion.
     """
     user_id = current_user["user_id"]
+    engine = request.app.state.engine
 
-    if _rebuild_status.get(user_id) == "in_progress":
+    current_status = await _get_rebuild_status(engine, user_id)
+    if current_status == "in_progress":
         return {"status": "in_progress", "message": "Profile rebuild already in progress"}
 
     async def _rebuild() -> None:
-        _rebuild_status[user_id] = "in_progress"
+        await _set_rebuild_status(engine, user_id, "in_progress")
         try:
             await taste_service.get_profile(
-                request.app.state.engine,
+                engine,
                 request.app.state.encryption,
                 request.app.state.settings,
                 user_id=user_id,
                 service=service,
                 force_refresh=True,
             )
-            _rebuild_status[user_id] = "completed"
+            await _set_rebuild_status(engine, user_id, "completed")
             logger.info("Background profile rebuild completed for user %s", user_id)
         except Exception:
-            _rebuild_status[user_id] = "failed"
+            await _set_rebuild_status(engine, user_id, "failed")
             logger.exception("Background profile rebuild failed for user %s", user_id)
 
     background_tasks.add_task(_rebuild)
-    _rebuild_status[user_id] = "in_progress"
+    await _set_rebuild_status(engine, user_id, "in_progress")
     return {"status": "accepted", "message": "Profile rebuild started"}
 
 
 @router.get("/profile/status")
 async def get_profile_status(
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """Check status of a background profile rebuild."""
     user_id = current_user["user_id"]
-    status_val = _rebuild_status.get(user_id, "idle")
+    status_val = await _get_rebuild_status(request.app.state.engine, user_id)
     return {"status": status_val}
 
 
@@ -310,7 +373,7 @@ async def enrichment_status(
     """
     import sqlalchemy as sa
 
-    from musicmind.auth.router import _indexing_locks
+    from musicmind.auth.router import is_indexing
     from musicmind.db.schema import audio_features_cache, song_metadata_cache
 
     engine = request.app.state.engine
@@ -353,14 +416,14 @@ async def enrichment_status(
 
     # Use library songs as denominator (worker songs are invisible to user)
     total = library_songs if library_songs > 0 else total_library
-    is_indexing = _indexing_locks.get(user_id, False)
+    user_indexing = is_indexing(user_id)
 
     return {
         "total_songs": total,
         "enriched_songs": min(enriched, total),
         "percentage": round(min(enriched, total) / total * 100, 1) if total > 0 else 0,
-        "complete": enriched >= total and total > 0 and not is_indexing,
-        "indexing": is_indexing,
+        "complete": enriched >= total and total > 0 and not user_indexing,
+        "indexing": user_indexing,
     }
 
 

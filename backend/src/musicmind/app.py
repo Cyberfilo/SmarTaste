@@ -41,7 +41,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logs_engine = None
     if _settings.logs_database_url:
         try:
-            from musicmind.db.logs import LogWriter, create_logs_engine, init_logs_schema
+            from musicmind.db.logs import (
+                DatabaseLogHandler,
+                LogWriter,
+                create_logs_engine,
+                init_logs_schema,
+            )
 
             logs_engine = create_logs_engine(_settings.logs_database_url)
             await init_logs_schema(logs_engine)
@@ -49,8 +54,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log_writer.start()
             app.state.log_writer = log_writer
             app.state.logs_engine = logs_engine
+
+            # Forward all Python logs (WARNING+ global, INFO+ musicmind) to DB
             import logging as _logging
-            _logging.getLogger(__name__).info("Logging database connected")
+            db_handler = DatabaseLogHandler(log_writer)
+            db_handler.setFormatter(_logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+            ))
+            _logging.getLogger().addHandler(db_handler)
+            _logging.getLogger(__name__).info(
+                "Logging database connected (all logs forwarded)"
+            )
         except Exception:
             import logging as _logging
             _logging.getLogger(__name__).warning(

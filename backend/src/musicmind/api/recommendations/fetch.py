@@ -21,6 +21,21 @@ APPLE_MUSIC_API_BASE = "https://api.music.apple.com/v1"
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.0
 
+# Shared connection pool — reused across all discovery strategies.
+# Avoids creating separate TCP+SSL connections per strategy.
+_shared_client: httpx.AsyncClient | None = None
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """Get or create a shared httpx client with connection pooling."""
+    global _shared_client  # noqa: PLW0603
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _shared_client
+
 
 async def _request_with_retry(
     client: httpx.AsyncClient,
@@ -133,32 +148,32 @@ async def _search_artist_id(
     Returns None if no matching artist is found or on error.
     """
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if service == "spotify":
-                resp = await client.get(
-                    f"{SPOTIFY_API_BASE}/search",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    params={"q": artist_name, "type": "artist", "limit": 1},
-                )
-                resp.raise_for_status()
-                items = resp.json().get("artists", {}).get("items", [])
-                return items[0].get("id") if items else None
+        client = _get_shared_client()
+        if service == "spotify":
+            resp = await _request_with_retry(client, "GET",
+                f"{SPOTIFY_API_BASE}/search",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={"q": artist_name, "type": "artist", "limit": 1},
+            )
+            resp.raise_for_status()
+            items = resp.json().get("artists", {}).get("items", [])
+            return items[0].get("id") if items else None
 
-            elif service == "apple_music":
-                headers = {"Authorization": f"Bearer {developer_token or access_token}"}
-                resp = await client.get(
-                    f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
-                    headers=headers,
-                    params={"term": artist_name, "types": "artists", "limit": 1},
-                )
-                resp.raise_for_status()
-                results = (
-                    resp.json()
-                    .get("results", {})
-                    .get("artists", {})
-                    .get("data", [])
-                )
-                return results[0].get("id") if results else None
+        elif service == "apple_music":
+            headers = {"Authorization": f"Bearer {developer_token or access_token}"}
+            resp = await _request_with_retry(client, "GET",
+                f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
+                headers=headers,
+                params={"term": artist_name, "types": "artists", "limit": 1},
+            )
+            resp.raise_for_status()
+            results = (
+                resp.json()
+                .get("results", {})
+                .get("artists", {})
+                .get("data", [])
+            )
+            return results[0].get("id") if results else None
 
     except (httpx.HTTPStatusError, httpx.HTTPError):
         logger.warning("Failed to search artist '%s' on %s", artist_name, service)
@@ -214,41 +229,41 @@ async def discover_similar_artists(
     current_layer = list(seed_ids)
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for _ in range(depth):
-                next_layer: list[str] = []
-                for artist_id in current_layer[:10]:
-                    try:
-                        related = await _fetch_related_artists(
-                            client, service, access_token, artist_id,
+        client = _get_shared_client()
+        for _ in range(depth):
+            next_layer: list[str] = []
+            for artist_id in current_layer[:10]:
+                try:
+                    related = await _fetch_related_artists(
+                        client, service, access_token, artist_id,
+                        developer_token=developer_token,
+                        storefront=storefront,
+                        limit=5,
+                    )
+                    for rid, artist_genres in related:
+                        if rid in visited:
+                            continue
+                        visited.add(rid)
+                        next_layer.append(rid)
+
+                        tracks = await _fetch_artist_top_tracks(
+                            client, service, access_token, rid,
                             developer_token=developer_token,
                             storefront=storefront,
-                            limit=5,
+                            limit=songs_per_artist,
                         )
-                        for rid, artist_genres in related:
-                            if rid in visited:
-                                continue
-                            visited.add(rid)
-                            next_layer.append(rid)
-
-                            tracks = await _fetch_artist_top_tracks(
-                                client, service, access_token, rid,
-                                developer_token=developer_token,
-                                storefront=storefront,
-                                limit=songs_per_artist,
-                            )
-                            # Backfill Spotify genres from artist data
-                            if service == "spotify" and artist_genres:
-                                for t in tracks:
-                                    if not t.get("genre_names"):
-                                        t["genre_names"] = artist_genres
-                            candidates.extend(tracks)
-                    except (httpx.HTTPStatusError, httpx.HTTPError):
-                        logger.warning(
-                            "Error crawling artist %s on %s", artist_id, service
-                        )
-                        continue
-                current_layer = next_layer
+                        # Backfill Spotify genres from artist data
+                        if service == "spotify" and artist_genres:
+                            for t in tracks:
+                                if not t.get("genre_names"):
+                                    t["genre_names"] = artist_genres
+                        candidates.extend(tracks)
+                except (httpx.HTTPStatusError, httpx.HTTPError):
+                    logger.warning(
+                        "Error crawling artist %s on %s", artist_id, service
+                    )
+                    continue
+            current_layer = next_layer
 
     except (httpx.HTTPStatusError, httpx.HTTPError):
         logger.exception("Connection error during similar artist crawl on %s", service)
@@ -284,57 +299,96 @@ async def discover_genre_adjacent(
     candidates: list[dict[str, Any]] = []
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for genre in top_genres[:3]:
-                try:
-                    if service == "spotify":
-                        resp = await client.get(
-                            f"{SPOTIFY_API_BASE}/search",
-                            headers={"Authorization": f"Bearer {access_token}"},
-                            params={
-                                "q": f"genre:{genre}",
-                                "type": "track",
-                                "limit": limit,
-                            },
-                        )
-                        resp.raise_for_status()
-                        items = resp.json().get("tracks", {}).get("items", [])
-                        for t in items:
-                            track = _spotify_track_to_cache_dict(t)
-                            # Backfill genre from search query
-                            if not track["genre_names"]:
-                                track["genre_names"] = [genre]
-                            candidates.append(track)
-
-                    elif service == "apple_music":
-                        headers = {
-                            "Authorization": f"Bearer {developer_token or access_token}"
-                        }
-                        resp = await client.get(
-                            f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
-                            headers=headers,
-                            params={
-                                "term": genre,
-                                "types": "songs",
-                                "limit": limit,
-                            },
-                        )
-                        resp.raise_for_status()
-                        items = (
-                            resp.json()
-                            .get("results", {})
-                            .get("songs", {})
-                            .get("data", [])
-                        )
-                        candidates.extend(
-                            _apple_track_to_cache_dict(r) for r in items
-                        )
-
-                except (httpx.HTTPStatusError, httpx.HTTPError):
-                    logger.warning(
-                        "Error searching genre '%s' on %s", genre, service
+        client = _get_shared_client()
+        for genre in top_genres[:3]:
+            try:
+                if service == "spotify":
+                    genre_slug = genre.lower().replace("/", " ")
+                    resp = await _request_with_retry(client, "GET",
+                        f"{SPOTIFY_API_BASE}/search",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={
+                            "q": f"genre:{genre_slug}",
+                            "type": "track",
+                            "limit": limit,
+                        },
                     )
-                    continue
+                    resp.raise_for_status()
+                    items = resp.json().get("tracks", {}).get("items", [])
+
+                    # Batch-fetch artist genres for Spotify tracks
+                    # (Spotify tracks don't carry genres)
+                    artist_ids = list({
+                        a["id"]
+                        for t in items
+                        for a in t.get("artists", [])
+                        if a.get("id")
+                    })[:20]
+                    artist_genre_map: dict[str, list[str]] = {}
+                    if artist_ids:
+                        try:
+                            resp2 = await _request_with_retry(
+                                client, "GET",
+                                f"{SPOTIFY_API_BASE}/artists",
+                                headers={
+                                    "Authorization": f"Bearer {access_token}",
+                                },
+                                params={"ids": ",".join(artist_ids)},
+                            )
+                            if resp2.is_success:
+                                for a in resp2.json().get("artists", []):
+                                    if a and a.get("id"):
+                                        artist_genre_map[a["id"]] = (
+                                            a.get("genres", [])
+                                        )
+                        except Exception:
+                            pass  # Fall back to search-query genre
+
+                    for t in items:
+                        track = _spotify_track_to_cache_dict(t)
+                        # Enrich genres from artist data first, then query
+                        if not track["genre_names"]:
+                            first_artist_id = (
+                                t.get("artists", [{}])[0].get("id", "")
+                                if t.get("artists") else ""
+                            )
+                            artist_genres = artist_genre_map.get(
+                                first_artist_id, [],
+                            )
+                            track["genre_names"] = (
+                                artist_genres if artist_genres else [genre]
+                            )
+                        candidates.append(track)
+
+                elif service == "apple_music":
+                    headers = {
+                        "Authorization": f"Bearer {developer_token or access_token}"
+                    }
+                    resp = await _request_with_retry(client, "GET",
+                        f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
+                        headers=headers,
+                        params={
+                            "term": genre,
+                            "types": "songs",
+                            "limit": limit,
+                        },
+                    )
+                    resp.raise_for_status()
+                    items = (
+                        resp.json()
+                        .get("results", {})
+                        .get("songs", {})
+                        .get("data", [])
+                    )
+                    candidates.extend(
+                        _apple_track_to_cache_dict(r) for r in items
+                    )
+
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                logger.warning(
+                    "Error searching genre '%s' on %s", genre, service
+                )
+                continue
 
     except (httpx.HTTPStatusError, httpx.HTTPError):
         logger.exception(
@@ -372,58 +426,60 @@ async def discover_editorial(
     candidates: list[dict[str, Any]] = []
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for genre in top_genres[:3]:
-                try:
-                    query = f"best new {genre}"
-
-                    if service == "spotify":
-                        resp = await client.get(
-                            f"{SPOTIFY_API_BASE}/search",
-                            headers={"Authorization": f"Bearer {access_token}"},
-                            params={
-                                "q": query,
-                                "type": "track",
-                                "limit": limit,
-                            },
-                        )
-                        resp.raise_for_status()
-                        items = resp.json().get("tracks", {}).get("items", [])
-                        for t in items:
-                            track = _spotify_track_to_cache_dict(t)
-                            if not track["genre_names"]:
-                                track["genre_names"] = [genre]
-                            candidates.append(track)
-
-                    elif service == "apple_music":
-                        headers = {
-                            "Authorization": f"Bearer {developer_token or access_token}"
-                        }
-                        resp = await client.get(
-                            f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
-                            headers=headers,
-                            params={
-                                "term": query,
-                                "types": "songs",
-                                "limit": limit,
-                            },
-                        )
-                        resp.raise_for_status()
-                        items = (
-                            resp.json()
-                            .get("results", {})
-                            .get("songs", {})
-                            .get("data", [])
-                        )
-                        candidates.extend(
-                            _apple_track_to_cache_dict(r) for r in items
-                        )
-
-                except (httpx.HTTPStatusError, httpx.HTTPError):
-                    logger.warning(
-                        "Error in editorial search for '%s' on %s", genre, service
+        client = _get_shared_client()
+        for genre in top_genres[:3]:
+            try:
+                if service == "spotify":
+                    # Spotify search: use genre: filter + year range for fresh tracks
+                    # "best new {genre}" returns literal text matches, not editorial
+                    genre_slug = genre.lower().replace("/", " ").replace("&", " ")
+                    query = f"genre:{genre_slug} year:2024-2026"
+                    resp = await _request_with_retry(client, "GET",
+                        f"{SPOTIFY_API_BASE}/search",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={
+                            "q": query,
+                            "type": "track",
+                            "limit": limit,
+                        },
                     )
-                    continue
+                    resp.raise_for_status()
+                    items = resp.json().get("tracks", {}).get("items", [])
+                    for t in items:
+                        track = _spotify_track_to_cache_dict(t)
+                        if not track["genre_names"]:
+                            track["genre_names"] = [genre]
+                        candidates.append(track)
+
+                elif service == "apple_music":
+                    headers = {
+                        "Authorization": f"Bearer {developer_token or access_token}"
+                    }
+                    resp = await _request_with_retry(client, "GET",
+                        f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
+                        headers=headers,
+                        params={
+                            "term": query,
+                            "types": "songs",
+                            "limit": limit,
+                        },
+                    )
+                    resp.raise_for_status()
+                    items = (
+                        resp.json()
+                        .get("results", {})
+                        .get("songs", {})
+                        .get("data", [])
+                    )
+                    candidates.extend(
+                        _apple_track_to_cache_dict(r) for r in items
+                    )
+
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                logger.warning(
+                    "Error in editorial search for '%s' on %s", genre, service
+                )
+                continue
 
     except (httpx.HTTPStatusError, httpx.HTTPError):
         logger.exception(
@@ -462,58 +518,58 @@ async def discover_chart_filter(
     top5 = set(g.lower() for g in profile_genres[:5])
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if service == "spotify":
-                resp = await client.get(
-                    f"{SPOTIFY_API_BASE}/browse/new-releases",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    params={"limit": min(limit, 50)},
-                )
-                resp.raise_for_status()
-                albums = resp.json().get("albums", {}).get("items", [])
+        client = _get_shared_client()
+        if service == "spotify":
+            resp = await _request_with_retry(client, "GET",
+                f"{SPOTIFY_API_BASE}/browse/new-releases",
+                headers={"Authorization": f"Bearer {access_token}"},
+                params={"limit": min(limit, 50)},
+            )
+            resp.raise_for_status()
+            albums = resp.json().get("albums", {}).get("items", [])
 
-                # Fetch tracks from each new release album
-                for album in albums:
-                    album_id = album.get("id", "")
-                    if not album_id:
-                        continue
-                    try:
-                        resp2 = await client.get(
-                            f"{SPOTIFY_API_BASE}/albums/{album_id}/tracks",
-                            headers={"Authorization": f"Bearer {access_token}"},
-                            params={"limit": 5},
+            # Fetch tracks from each new release album
+            for album in albums:
+                album_id = album.get("id", "")
+                if not album_id:
+                    continue
+                try:
+                    resp2 = await _request_with_retry(client, "GET",
+                        f"{SPOTIFY_API_BASE}/albums/{album_id}/tracks",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={"limit": 5},
+                    )
+                    resp2.raise_for_status()
+                    tracks = resp2.json().get("items", [])
+                    for track in tracks:
+                        # Augment track with album info for cache dict
+                        track["album"] = album
+                        candidates.append(
+                            _spotify_track_to_cache_dict(track)
                         )
-                        resp2.raise_for_status()
-                        tracks = resp2.json().get("items", [])
-                        for track in tracks:
-                            # Augment track with album info for cache dict
-                            track["album"] = album
-                            candidates.append(
-                                _spotify_track_to_cache_dict(track)
-                            )
-                    except (httpx.HTTPStatusError, httpx.HTTPError):
-                        continue
+                except (httpx.HTTPStatusError, httpx.HTTPError):
+                    continue
 
-            elif service == "apple_music":
-                headers = {
-                    "Authorization": f"Bearer {developer_token or access_token}"
-                }
-                resp = await client.get(
-                    f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/charts",
-                    headers=headers,
-                    params={"types": "songs", "limit": limit},
-                )
-                resp.raise_for_status()
-                chart_data = resp.json().get("results", {}).get("songs", [])
-                for chart in chart_data:
-                    for item in chart.get("data", []):
-                        track = _apple_track_to_cache_dict(item)
-                        # Filter: keep only tracks with genre overlap
-                        track_genres = set(
-                            g.lower() for g in track.get("genre_names", [])
-                        )
-                        if track_genres & top5:
-                            candidates.append(track)
+        elif service == "apple_music":
+            headers = {
+                "Authorization": f"Bearer {developer_token or access_token}"
+            }
+            resp = await _request_with_retry(client, "GET",
+                f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/charts",
+                headers=headers,
+                params={"types": "songs", "limit": limit},
+            )
+            resp.raise_for_status()
+            chart_data = resp.json().get("results", {}).get("songs", [])
+            for chart in chart_data:
+                for item in chart.get("data", []):
+                    track = _apple_track_to_cache_dict(item)
+                    # Filter: keep only tracks with genre overlap
+                    track_genres = set(
+                        g.lower() for g in track.get("genre_names", [])
+                    )
+                    if track_genres & top5:
+                        candidates.append(track)
 
     except (httpx.HTTPStatusError, httpx.HTTPError):
         logger.exception(
@@ -545,7 +601,7 @@ async def _fetch_related_artists(
     (Spotify tracks don't carry genres — only artist objects do).
     """
     if service == "spotify":
-        resp = await client.get(
+        resp = await _request_with_retry(client, "GET",
             f"{SPOTIFY_API_BASE}/artists/{artist_id}/related-artists",
             headers={"Authorization": f"Bearer {access_token}"},
         )
@@ -558,7 +614,7 @@ async def _fetch_related_artists(
 
     elif service == "apple_music":
         headers = {"Authorization": f"Bearer {developer_token or access_token}"}
-        resp = await client.get(
+        resp = await _request_with_retry(client, "GET",
             f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/artists/{artist_id}",
             headers=headers,
             params={"views": "similar-artists"},
@@ -586,9 +642,12 @@ async def _fetch_artist_top_tracks(
 ) -> list[dict[str, Any]]:
     """Fetch top tracks for a given artist."""
     if service == "spotify":
-        resp = await client.get(
+        # market is required per Spotify API spec; use storefront as proxy
+        market = storefront.upper() if len(storefront) == 2 else "US"
+        resp = await _request_with_retry(client, "GET",
             f"{SPOTIFY_API_BASE}/artists/{artist_id}/top-tracks",
             headers={"Authorization": f"Bearer {access_token}"},
+            params={"market": market},
         )
         resp.raise_for_status()
         tracks = resp.json().get("tracks", [])
@@ -596,7 +655,7 @@ async def _fetch_artist_top_tracks(
 
     elif service == "apple_music":
         headers = {"Authorization": f"Bearer {developer_token or access_token}"}
-        resp = await client.get(
+        resp = await _request_with_retry(client, "GET",
             f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/artists/{artist_id}",
             headers=headers,
             params={"views": "top-songs"},
