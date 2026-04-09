@@ -791,7 +791,7 @@
               </div>
 
               <div style="font-size:0.75rem;color:var(--text-secondary);display:flex;flex-wrap:wrap;gap:0.75rem">
-                <span>Library audio: <b style="color:${af.library_pending > 0 ? 'var(--danger)' : 'var(--success)'}">${af.library_enriched}/${songs.library}</b></span>
+                <span>Library audio: <b style="color:${af.library_pending > 0 ? 'var(--danger)' : 'var(--success)'}">${af.library_enriched}/${songs.library}</b>${af.library_failed > 0 ? ` <span style="color:var(--danger)">(${af.library_failed} failed)</span>` : ''}</span>
                 <span>Tags cached: <b>${u.tags?.global_cached || 0}</b></span>
                 <span>Credits: <b>${u.credits?.global_credits || 0}</b> (${u.credits?.songs_with_isrc || 0} with ISRC)</span>
                 <span>Cobweb: <b>${cw.enriched}/${cw.total}</b> artists (${cw.songs_fetched || 0} songs)</span>

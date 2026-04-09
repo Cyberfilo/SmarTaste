@@ -119,6 +119,30 @@ async def get_enrichment_diagnostics(
             )
             lib_audio_enriched = lib_enriched_q.scalar() or 0
 
+            # Library songs that permanently failed (Deezer couldn't find)
+            lib_song_ids = sa.select(song_metadata_cache.c.catalog_id).where(
+                sa.and_(
+                    song_metadata_cache.c.user_id == uid,
+                    sa.or_(
+                        song_metadata_cache.c.library_id.isnot(None),
+                        song_metadata_cache.c.date_added_to_library.isnot(None),
+                    ),
+                )
+            )
+            lib_failed_q = await conn.execute(
+                sa.select(sa.func.count()).where(
+                    sa.and_(
+                        audio_features_cache.c.user_id == uid,
+                        audio_features_cache.c.energy.is_(None),
+                        sa.cast(
+                            audio_features_cache.c.feature_source, sa.Text
+                        ).like('%no_data_available%'),
+                        audio_features_cache.c.catalog_id.in_(lib_song_ids),
+                    )
+                )
+            )
+            lib_audio_failed = lib_failed_q.scalar() or 0
+
             # ── Last.fm tags count for this user's songs ───────────
             user_eids_q = await conn.execute(
                 sa.select(
@@ -224,7 +248,10 @@ async def get_enrichment_diagnostics(
                     "partial": audio_partial,
                     "not_attempted": audio_not_attempted,
                     "library_enriched": lib_audio_enriched,
-                    "library_pending": library_songs - lib_audio_enriched,
+                    "library_failed": lib_audio_failed,
+                    "library_pending": max(
+                        0, library_songs - lib_audio_enriched - lib_audio_failed,
+                    ),
                     "pct": round(audio_enriched / total_songs * 100, 1)
                     if total_songs > 0 else 0,
                 },
@@ -355,6 +382,16 @@ async def get_enrichment_diagnostics(
                 "message": (
                     f"{af['library_pending']} LIBRARY songs still need enrichment. "
                     f"These have priority over non-library songs."
+                ),
+            })
+        if af.get("library_failed", 0) > 0:
+            insights.append({
+                "level": "warning",
+                "user": u["email"],
+                "message": (
+                    f"{af['library_failed']} library songs failed enrichment "
+                    f"(Deezer couldn't find them). "
+                    f"Library audio: {af['library_enriched']}/{u['songs']['library']} OK."
                 ),
             })
         if u["songs"]["missing_isrc"] > 0:
