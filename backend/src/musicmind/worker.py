@@ -159,6 +159,30 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d library gap-fill failed", cycle)
 
+        # ── Phase 1a: Reset failed songs that have ISRC (first cycle only) ──
+        # New Deezer ISRC lookup can now find songs that name-search missed.
+        if cycle == 1:
+            try:
+                async with engine.begin() as conn:
+                    reset = await conn.execute(
+                        sa.text(
+                            "DELETE FROM audio_features_cache"
+                            " WHERE energy IS NULL"
+                            "   AND feature_source::text LIKE '%no_data_available%'"
+                            "   AND catalog_id IN ("
+                            "     SELECT catalog_id FROM song_metadata_cache"
+                            "     WHERE isrc IS NOT NULL AND isrc != ''"
+                            "   )"
+                        )
+                    )
+                    if reset.rowcount > 0:
+                        logger.info(
+                            "Reset %d failed songs with ISRC for re-enrichment",
+                            reset.rowcount,
+                        )
+            except Exception:
+                logger.debug("Failed to reset ISRC songs for retry")
+
         # ── Phase 1b: Backfill missing ISRCs via Deezer ──────────────
         await _set_status(
             engine, "isrc_backfill", "Resolving missing ISRCs", cycle=cycle,
@@ -744,7 +768,7 @@ async def _backfill_missing_isrcs(engine) -> int:
     logger.info("ISRC backfill: resolving %d songs via Deezer", len(rows))
 
     filled = 0
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(10)
 
     async def _resolve_one(catalog_id: str, user_id: str, name: str, artist: str) -> bool:
         async with sem:
@@ -900,15 +924,15 @@ async def _backfill_global_songs(engine, settings) -> int:
             ]
 
             if uncached:
-                # Cap at 500 per cycle to keep cycles short (~2 min at 5 req/s)
+                # Cap at 1000 per cycle (~100s at 10 req/s with Semaphore(10))
                 total_uncached = len(uncached)
-                uncached = uncached[:500]
+                uncached = uncached[:1000]
                 logger.info(
                     "Last.fm backfill: %d need tags, processing %d this cycle (%d cached)",
                     total_uncached, len(uncached), len(cached_eids),
                 )
 
-                sem = asyncio.Semaphore(5)
+                sem = asyncio.Semaphore(10)
 
                 async def _fetch_tag(
                     artist: str, name: str, eid: str,
@@ -994,8 +1018,8 @@ async def _backfill_global_songs(engine, settings) -> int:
         ]
 
         if uncached_isrc:
-            # Cap at 100 per cycle (MusicBrainz = 1 req/sec, ~3-4 min max)
-            batch = uncached_isrc[:100]
+            # Cap at 200 per cycle (MusicBrainz = 1 req/sec, ~7 min max)
+            batch = uncached_isrc[:200]
             logger.info(
                 "MusicBrainz backfill: %d need credits, processing %d this cycle",
                 len(uncached_isrc), len(batch),

@@ -26,45 +26,62 @@ async def fetch_deezer_features(
     artist_name: str,
     isrc: str | None = None,
 ) -> dict[str, Any] | None:
-    """Fetch BPM and preview URL from Deezer by searching title + artist.
+    """Fetch BPM and preview URL from Deezer.
 
-    Deezer's ISRC endpoint is broken, so we use search instead.
-    Returns BPM (if available) and a 30s preview MP3 URL.
+    Strategy: try ISRC lookup first (exact match), fall back to name search.
+    Returns BPM (if available), 30s preview MP3 URL, and ISRC.
 
     Args:
         name: Track title.
         artist_name: Primary artist name.
-        isrc: Not used for lookup (kept for interface compat).
+        isrc: ISRC for direct lookup (preferred, exact match).
 
     Returns:
-        Dict with tempo (BPM), preview_url, deezer_id. None on miss.
+        Dict with tempo (BPM), preview_url, deezer_id, isrc. None on miss.
     """
-    if not name or not artist_name:
+    if not name and not artist_name and not isrc:
         return None
-
-    query = f"{name} {artist_name}"
 
     for attempt in range(MAX_RETRIES):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                # Step 1: Search by title + artist
-                resp = await client.get(
-                    f"{DEEZER_API}/search",
-                    params={"q": query, "limit": 1},
-                )
-                resp.raise_for_status()
-                items = resp.json().get("data", [])
-                if not items:
-                    return None
+                full = None
 
-                deezer_id = items[0].get("id")
-                if not deezer_id:
-                    return None
+                # Strategy 1: ISRC direct lookup (exact match, faster)
+                if isrc:
+                    try:
+                        resp = await client.get(
+                            f"{DEEZER_API}/2.0/track/isrc:{isrc}",
+                        )
+                        if resp.is_success:
+                            data = resp.json()
+                            if "error" not in data and data.get("id"):
+                                full = data
+                    except Exception:
+                        pass  # Fall through to name search
 
-                # Step 2: Get full track details (includes BPM)
-                resp2 = await client.get(f"{DEEZER_API}/track/{deezer_id}")
-                resp2.raise_for_status()
-                full = resp2.json()
+                # Strategy 2: Name + artist search (fallback)
+                if not full and name and artist_name:
+                    query = f"{name} {artist_name}"
+                    resp = await client.get(
+                        f"{DEEZER_API}/search",
+                        params={"q": query, "limit": 1},
+                    )
+                    resp.raise_for_status()
+                    items = resp.json().get("data", [])
+                    if not items:
+                        return None
+
+                    deezer_id = items[0].get("id")
+                    if not deezer_id:
+                        return None
+
+                    resp2 = await client.get(f"{DEEZER_API}/track/{deezer_id}")
+                    resp2.raise_for_status()
+                    full = resp2.json()
+
+                if not full:
+                    return None
 
                 if "error" in full:
                     return None
