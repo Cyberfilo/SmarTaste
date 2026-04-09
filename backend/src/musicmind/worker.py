@@ -636,9 +636,9 @@ async def _fill_library_gaps(engine, settings) -> int:
                         # Successfully enriched (has real features)
                         audio_features_cache.c.energy.isnot(None),
                         # Permanently failed (marker row with no_data_available)
-                        audio_features_cache.c.feature_source.like(
-                            '%no_data_available%'
-                        ),
+                        sa.cast(
+                            audio_features_cache.c.feature_source, sa.Text
+                        ).like('%no_data_available%'),
                     ),
                 )
             )

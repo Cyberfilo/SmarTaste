@@ -74,17 +74,17 @@ async def get_enrichment_diagnostics(
                     sa.func.count().filter(
                         sa.and_(
                             audio_features_cache.c.energy.is_(None),
-                            audio_features_cache.c.feature_source.like(
-                                '%no_data_available%'
-                            ),
+                            sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%no_data_available%'),
                         )
                     ).label("permanently_failed"),
                     sa.func.count().filter(
                         sa.and_(
                             audio_features_cache.c.energy.is_(None),
-                            sa.not_(audio_features_cache.c.feature_source.like(
-                                '%no_data_available%'
-                            )),
+                            sa.not_(sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%no_data_available%')),
                         )
                     ).label("partial_features"),
                 ).where(audio_features_cache.c.user_id == uid)
