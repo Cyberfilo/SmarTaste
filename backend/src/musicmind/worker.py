@@ -5,7 +5,7 @@ Separate from per-user indexing (see indexer.py). The worker:
 2. Enriches each cobweb artist's top 50 songs GLOBALLY (no user_id)
 3. Stores songs in global_song_cache, features in audio_features_global
 4. Promotes featured artists who appear alongside library artists
-5. Caps discovered artists at library_artists * 0.4 per user
+5. Caps discovered artists at library_artists * 0.2 per user
 
 Results are available to ALL users for recommendation scoring.
 The worker does NOT touch per-user tables (song_metadata_cache, audio_features_cache).
@@ -228,7 +228,7 @@ async def _build_user_cobweb(
     2. Last.fm similar artists
     3. Same-genre artists from catalog
 
-    Caps at library_artists * 0.4 non-library artists.
+    Caps at library_artists * 0.2 non-library artists.
     """
     from musicmind.db.schema import (
         artist_cobweb,
@@ -258,7 +258,7 @@ async def _build_user_cobweb(
         return stats
 
     library_set = {a.lower() for a in library_artist_names}
-    max_discovered = max(2, int(len(library_artist_names) * 0.4))
+    max_discovered = max(2, int(len(library_artist_names) * 0.2))
 
     # Get existing cobweb artists to avoid re-adding
     async with engine.begin() as conn:

@@ -9,7 +9,7 @@ All results are user-scoped (stored with user_id).
   3. 2nd artist — 70% discography
   4. 3rd artist — 50% discography
   5. Other library artists — 30% discography each
-  6. Suggested artists — (library_artist_count * 0.4) new artists, 50% each
+  6. Suggested artists — (library_artist_count * 0.2) new artists, 50% each
 
 Each step updates user_indexing_status so the admin dashboard can show progress.
 """
@@ -149,7 +149,7 @@ async def run_indexing(
                 )
 
     # ── Step 6: Suggest new artists ─────────────────────────────────
-    max_suggested = max(2, int(len(ranked_artists) * 0.4)) if ranked_artists else 0
+    max_suggested = max(2, int(len(ranked_artists) * 0.2)) if ranked_artists else 0
     if max_suggested > 0:
         await _set_indexing_status(engine, user_id, 6, "suggesting_artists")
         try:
