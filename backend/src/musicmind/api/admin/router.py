@@ -676,18 +676,28 @@ async def reindex_user(
         user_row.email, promoted, del_songs.rowcount, del_af.rowcount,
     )
 
-    # Step 4: Trigger background indexing
-    try:
-        from musicmind.auth.router import _background_indexing
+    # Step 4: Build taste profile (fetches library) then run full indexing
+    async def _reindex_pipeline() -> None:
+        try:
+            # First: fetch library via taste profile (populates song_metadata_cache)
+            from musicmind.api.taste.service import TasteService
+            logger.info("Reindex %s: fetching library via taste profile...", user_row.email)
+            await TasteService().get_profile(
+                engine, request.app.state.encryption, request.app.state.settings,
+                user_id=user_id, force_refresh=True,
+            )
+            # Then: run the full enrichment pipeline (audio + tags + credits)
+            from musicmind.indexer import run_indexing
+            logger.info("Reindex %s: starting enrichment pipeline...", user_row.email)
+            await run_indexing(
+                engine, request.app.state.encryption, request.app.state.settings,
+                user_id=user_id,
+            )
+            logger.info("Reindex %s: complete", user_row.email)
+        except Exception:
+            logger.exception("Reindex pipeline failed for %s", user_row.email)
 
-        asyncio.ensure_future(_background_indexing(
-            engine=engine,
-            settings=request.app.state.settings,
-            encryption=request.app.state.encryption,
-            user_id=user_id,
-        ))
-    except Exception:
-        logger.warning("Failed to auto-trigger indexing after reindex")
+    asyncio.ensure_future(_reindex_pipeline())
 
     return {
         "status": "reindex_started",
