@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-5.110-8b5cf6?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-5.200-8b5cf6?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=nextdotjs&logoColor=white" alt="Next.js">
   <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
@@ -273,6 +273,8 @@ All backend variables use the `MUSICMIND_` prefix. See [`.env.example`](.env.exa
 | GET | `/api/admin/enrichment-breakdown` | Pipeline-level: unenriched / partial / fully enriched |
 | GET | `/api/admin/db-capacity` | Database size usage (main + logs) |
 | GET | `/api/admin/worker-status` | Worker activity from enrichment_logs |
+| GET | `/api/admin/diagnostics` | Smart per-user per-stage enrichment breakdown with failure analysis |
+| POST | `/api/admin/cleanup-orphans` | Delete orphaned audio_features_cache rows |
 
 </details>
 
@@ -329,7 +331,7 @@ smartaste/
 │   └── Dockerfile
 ├── scripts/
 │   └── import_acousticbrainz.py    # Bulk import AcousticBrainz CC0 dump
-├── VERSION                         # Single source of truth (4.110)
+├── VERSION                         # Single source of truth (5.200)
 ├── CHANGELOG.md
 ├── what.md                         # Full technical documentation
 ├── docker-compose.yml

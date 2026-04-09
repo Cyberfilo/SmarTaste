@@ -7,6 +7,60 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.200 — 2026-04-09
+
+### Reliability Sprint — 32 Fixes Across 20 Files
+
+#### Enrichment Priority & Smart Worker
+- **Library-first enrichment**: Worker now fills user library gaps BEFORE cobweb/global songs. If 218 library songs are missing, exactly those 218 get enriched first.
+- **ISRC backfill phase**: 807 library songs had NULL ISRC. New worker phase resolves ISRCs via Deezer search (100/cycle). Deezer track response now extracts ISRC.
+- **Cobweb total cap**: Artist cobweb capped at 50% of library artists (was unbounded — grew to 194 for 446 library songs).
+- **Worker yields to active indexing**: Checks `user_indexing_status` before processing each user. No more API competition between worker and backend indexer.
+- **Skip permanently failed enrichments**: Songs with `no_data_available` marker no longer retried every cycle.
+- **Indexer WHERE clause fix**: Last.fm suggested artists query now filters by THIS user's library artists (was querying all users' data globally).
+- **Last.fm tags UPSERT**: `ON CONFLICT DO UPDATE` replaces `DO NOTHING` — stale tags now refresh on re-fetch.
+
+#### Scoring & Recommendation Engine
+- **Collab boost continuous**: Was binary (0 or 1) due to `*5.0` scaling. Now proportional 0.0-0.20.
+- **Weight redistribution renormalized**: When audio/tags unavailable, redistributed weights now renormalize to sum=1.0 (prevented score inflation).
+- **Regional weights proportional**: 90% Italian = 40% language weight (was capped at 22.5%). 10% global = 3% language. Continuous scaling via `(strength - 0.3)^1.5`.
+- **MMR diversity fix**: Base score was computed without diversity, but adjustment subtracted `diversity_weight * 1.0` — incorrectly penalizing every candidate. Now simply subtracts `diversity_weight * penalty`.
+- **Mood genre matching**: Uses word-boundary/slash-split matching instead of substring containment. "Pop" no longer matches "Rock Pop".
+- **Audio centroid NaN filtering**: NaN values from bad API data no longer corrupt the weighted centroid.
+- **Genre normalize None**: Returns `""` instead of `None` (prevented downstream `.lower()` crashes).
+- **Library filter NULL dates**: Songs with NULL `date_added_to_library` treated as old (allow rediscovery) instead of assumed recent (excluded).
+
+#### Spotify Support
+- **Token auto-refresh in worker + indexer**: Spotify tokens expire in 1 hour. Both now check `token_expires_at` and refresh via `refresh_spotify_token()` before API calls.
+- **Market detection**: Fetches user's `country` from Spotify profile and uses it as `market` parameter. Italian Spotify users get Italian charts.
+- **Editorial discovery fix**: Uses `genre:rock year:2024-2026` Spotify search syntax instead of `"best new rock"` (literal text match).
+- **Genre backfill**: `discover_genre_adjacent` batch-fetches artist genres via `/artists?ids=` endpoint. Spotify tracks now get proper genre metadata.
+- **Top-tracks market parameter**: Required `market` param added per Spotify API spec.
+
+#### Infrastructure
+- **DB indexes (Alembic 018)**: Standalone `user_id` indexes on 8 tables. Per-user queries go from O(n) table scan to O(log n) index lookup.
+- **Connection pooling**: Shared `httpx.AsyncClient` with `max_connections=20` across all discovery strategies. Was creating 4+ separate TCP+SSL connections per recommendation request.
+- **Retry on all API calls**: `_request_with_retry()` (was defined but never called) now wired into all 13 API call sites. Exponential backoff on 429/5xx.
+- **Async-safe indexing locks**: `asyncio.Lock` per user replaces plain `dict[str, bool]` (had TOCTOU race condition).
+- **Taste rebuild status persisted**: Moved from in-memory `_rebuild_status` dict to `user_indexing_status` table (step=99). Survives server restarts.
+- **Token decryption safety**: `decrypt()` raises `ValueError` with clear message. New `decrypt_or_none()` for background tasks. Worker/indexer handle corrupted tokens gracefully.
+- **Admin N+1 fix**: `get_enrichment_progress()` replaced 8N queries (8 per user in loop) with 5 batched GROUP BY queries.
+- **12+ silent `except: pass`** replaced with `logger.debug/warning` calls.
+- **Cobweb stats use rowcount**: Only counts actual INSERTs, not CONFLICT DO NOTHING no-ops.
+
+#### Logging
+- **DatabaseLogHandler**: New `logging.Handler` subclass forwards all Python logs to the log DB. WARNING+ from all loggers, INFO+ from `musicmind.*` namespace. Wired into both worker and main app.
+- All logs visible on Railway are now also persisted to the `error_logs` table.
+
+#### Admin Dashboard
+- **New `/api/admin/diagnostics` endpoint**: Per-user, per-stage enrichment breakdown with failure analysis.
+- **Smart Diagnostics UI section**: Shows per-user cards with enriched/failed/pending/missing-ISRC counts. Library vs non-library audio split. Actionable insights (CRITICAL/WARNING/INFO). Today's failure breakdown from logs DB.
+
+#### Frontend
+- **localStorage key unified**: `use-chat.ts` now reads/writes `musicmind-preferred-model` (was split between two keys — model selection in Settings didn't persist to Chat).
+
+---
+
 ## V 5.110 — 2026-04-08
 
 ### Fixed — Tags + Credits Not Completing
