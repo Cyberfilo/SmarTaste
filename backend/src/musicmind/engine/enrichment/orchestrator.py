@@ -46,42 +46,66 @@ async def enrich_tracks(
     user_id: str,
     soundstat_api_key: str | None = None,
     budget_mode: bool = False,
+    lastfm_api_key: str | None = None,
 ) -> dict[str, int]:
-    """Enrich tracks concurrently with bounded parallelism.
+    """Enrich tracks concurrently — FULL pipeline per song.
 
-    Runs CONCURRENCY tracks simultaneously using asyncio.Semaphore.
-    Each track: Deezer search + preview download + ReccoBeats upload
-    overlap with other tracks' I/O waits.
+    Each song runs: audio features → Last.fm tags → MusicBrainz credits
+    all in one pass before moving on. CONCURRENCY songs run in parallel.
 
-    Speed: ~5x faster than sequential (8s/track → ~1.6s/track effective).
+    Speed: ~15 songs in parallel, each doing its full pipeline independently.
     Memory: bounded at CONCURRENCY × ~500KB previews.
     """
     stats = {
         "deezer": 0, "reccobeats": 0, "soundstat": 0,
         "skipped": 0, "failed": 0, "total": len(tracks),
+        "tags": 0, "credits": 0,
     }
     semaphore = asyncio.Semaphore(CONCURRENCY)
 
-    async def _bounded_enrich(track: dict[str, Any]) -> str:
+    async def _bounded_full_enrich(track: dict[str, Any]) -> dict[str, int]:
         async with semaphore:
-            return await _enrich_single_track(
+            result = {"audio": "failed", "tags": 0, "credits": 0}
+
+            # Step 1: Audio features
+            result["audio"] = await _enrich_single_track(
                 engine, track, user_id=user_id,
                 soundstat_api_key=soundstat_api_key,
             )
 
-    # Process in batches of BATCH_SIZE with concurrent tracks within each batch
+            # Step 2: Last.fm tags (concurrent with step 3)
+            # Step 3: MusicBrainz credits
+            tag_task = _enrich_tags_single(
+                engine, track, lastfm_api_key=lastfm_api_key,
+            )
+            credit_task = _enrich_credits_single(engine, track)
+
+            tag_ok, credit_ok = await asyncio.gather(
+                tag_task, credit_task, return_exceptions=True,
+            )
+            if tag_ok is True:
+                result["tags"] = 1
+            if credit_ok is True:
+                result["credits"] = 1
+
+            return result
+
+    # Process in batches with concurrent tracks within each batch
     for batch_start in range(0, len(tracks), BATCH_SIZE):
         batch = tracks[batch_start:batch_start + BATCH_SIZE]
 
-        # Run all tracks in this batch concurrently (bounded by semaphore)
         results = await asyncio.gather(
-            *[_bounded_enrich(track) for track in batch],
+            *[_bounded_full_enrich(track) for track in batch],
             return_exceptions=True,
         )
 
-        for result in results:
-            if isinstance(result, str):
-                stats[result] += 1
+        for r in results:
+            if isinstance(r, dict):
+                audio = r.get("audio", "failed")
+                if isinstance(audio, str):
+                    stats[audio] = stats.get(audio, 0) + 1
+                stats["tags"] += r.get("tags", 0)
+                stats["credits"] += r.get("credits", 0)
             else:
                 stats["failed"] += 1
 
@@ -89,12 +113,95 @@ async def enrich_tracks(
 
     logger.info(
         "Enriched %d/%d: %d Deezer, %d ReccoBeats, %d SoundStat, "
-        "%d skipped, %d failed",
+        "%d tags, %d credits, %d skipped, %d failed",
         stats["deezer"] + stats["reccobeats"] + stats["soundstat"],
         stats["total"], stats["deezer"], stats["reccobeats"],
-        stats["soundstat"], stats["skipped"], stats["failed"],
+        stats["soundstat"], stats["tags"], stats["credits"],
+        stats["skipped"], stats["failed"],
     )
     return stats
+
+
+async def _enrich_tags_single(
+    engine: Any,
+    track: dict[str, Any],
+    *,
+    lastfm_api_key: str | None = None,
+) -> bool:
+    """Fetch and store Last.fm tags for a single track. Returns True on success."""
+    if not lastfm_api_key:
+        return False
+    artist = track.get("artist_name", "")
+    name = track.get("name", "")
+    if not artist or not name:
+        return False
+
+    eid = f"track:{artist.lower()}:{name.lower()}"
+
+    # Check cache first
+    from musicmind.db.schema import lastfm_tags_cache
+    async with engine.begin() as conn:
+        existing = (await conn.execute(
+            sa.select(lastfm_tags_cache.c.entity_id).where(
+                lastfm_tags_cache.c.entity_id == eid
+            )
+        )).first()
+    if existing:
+        return False  # Already cached
+
+    try:
+        from musicmind.engine.enrichment.lastfm import (
+            fetch_artist_tags,
+            fetch_track_tags,
+        )
+        tags = await fetch_track_tags(lastfm_api_key, artist, name)
+        if not tags:
+            tags = await fetch_artist_tags(lastfm_api_key, artist)
+        if tags:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.text(
+                        "INSERT INTO lastfm_tags_cache"
+                        " (entity_type, entity_id, tags)"
+                        " VALUES (:t, :eid, :tags)"
+                        " ON CONFLICT (entity_type, entity_id)"
+                        " DO UPDATE SET tags = :tags"
+                    ),
+                    {"t": "track", "eid": eid, "tags": json.dumps(tags)},
+                )
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def _enrich_credits_single(engine: Any, track: dict[str, Any]) -> bool:
+    """Fetch and store MusicBrainz credits for a single track. Returns True on success."""
+    isrc = track.get("isrc")
+    if not isrc:
+        return False
+
+    source_mbid = f"isrc:{isrc.upper()}"
+
+    # Check cache first
+    from musicmind.db.schema import kg_relationships
+    async with engine.begin() as conn:
+        existing = (await conn.execute(
+            sa.select(kg_relationships.c.id).where(
+                kg_relationships.c.source_mbid == source_mbid
+            ).limit(1)
+        )).first()
+    if existing:
+        return False  # Already cached
+
+    try:
+        from musicmind.engine.enrichment.musicbrainz_credits import (
+            fetch_recording_credits,
+        )
+        credits = await fetch_recording_credits(isrc, engine=engine)
+        return bool(credits)
+    except Exception:
+        return False
 
 
 async def enrich_tracks_global(

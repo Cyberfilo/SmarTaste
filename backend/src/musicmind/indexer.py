@@ -332,11 +332,12 @@ async def _enrich_library_songs(
 
     tracks = _rows_to_track_dicts(rows)
 
-    r = await enrich_tracks(engine, tracks, user_id=user_id)
+    # Full pipeline per song: audio + tags + credits concurrently
+    r = await enrich_tracks(
+        engine, tracks, user_id=user_id,
+        lastfm_api_key=settings.lastfm_api_key,
+    )
     enriched = r.get("deezer", 0) + r.get("reccobeats", 0) + r.get("soundstat", 0)
-
-    # Also run Last.fm + MusicBrainz on library songs
-    await _backfill_tags_credits(engine, settings, tracks)
 
     return enriched
 
@@ -469,9 +470,11 @@ async def _fetch_and_enrich_discography(
     if not new_tracks:
         return 0
 
-    # Enrich
-    await enrich_tracks(engine, new_tracks, user_id=user_id)
-    await _backfill_tags_credits(engine, settings, new_tracks)
+    # Full pipeline per song: audio + tags + credits concurrently
+    await enrich_tracks(
+        engine, new_tracks, user_id=user_id,
+        lastfm_api_key=settings.lastfm_api_key,
+    )
 
     return len(new_tracks)
 
