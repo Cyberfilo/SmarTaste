@@ -643,7 +643,10 @@
       return `<div class="progress-item">
         <div class="progress-top">
           <span class="progress-name">${u.display_name}</span>
-          <span class="progress-ratio">${u.enriched_songs}/${u.total_songs} <span style="color:var(--text-muted)">(${pct}%)</span></span>
+          <div style="display:flex;align-items:center;gap:0.5rem">
+            <button class="btn" style="font-size:0.625rem;padding:0.15rem 0.5rem;color:var(--primary);border-color:var(--primary)" onclick="reindexUser('${u.user_id}','${u.display_name}')">Reindex</button>
+            <span class="progress-ratio">${u.enriched_songs}/${u.total_songs} <span style="color:var(--text-muted)">(${pct}%)</span></span>
+          </div>
         </div>
         ${progressBar(pct)}
         <div class="progress-meta">
@@ -1138,6 +1141,25 @@
         console.error('Cleanup failed:', e);
       }
       setTimeout(() => { btn.disabled = false; }, 3000);
+    }
+
+    // ── Reindex User ────────────────────────────────
+    async function reindexUser(userId, displayName) {
+      if (!confirm(`Reindex ${displayName}?\n\nThis will:\n- Save audio features to global cache\n- Clear per-user song data\n- Re-scan library from music service\n- Reuse cached enrichment data\n\nNo data is lost.`)) return;
+
+      try {
+        const resp = await fetch(`/api/admin/reindex/${userId}`, { method: 'POST', credentials: 'include' });
+        if (resp.ok) {
+          const r = await resp.json();
+          alert(`Reindex started for ${displayName}\n\n${r.message}`);
+          setTimeout(() => fetchData(), 2000);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          alert(`Reindex failed: ${err.detail || resp.status}`);
+        }
+      } catch (e) {
+        alert('Reindex failed: ' + e.message);
+      }
     }
 
     // ── Logout ──────────────────────────────────────
