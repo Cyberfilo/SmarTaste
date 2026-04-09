@@ -294,9 +294,9 @@ async def _enrich_library_songs(
                 audio_features_cache.c.user_id == user_id,
                 sa.or_(
                     audio_features_cache.c.energy.isnot(None),
-                    audio_features_cache.c.feature_source.like(
-                        '%no_data_available%'
-                    ),
+                    sa.cast(
+                        audio_features_cache.c.feature_source, sa.Text
+                    ).like('%no_data_available%'),
                 ),
             )
         )
