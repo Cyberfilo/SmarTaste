@@ -7,6 +7,15 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.230 — 2026-04-09
+
+### User-Linked Priority Gate
+- **Cobweb only after user work done**: Worker checks `_count_user_linked_gaps()` — counts songs missing audio, tags, or credits across all users. If gaps remain, skips cobweb/global phases and loops back to user-linked work with 10s pause instead of 120s sleep.
+- **No sleep while work remains**: Worker only sleeps the full `POLL_INTERVAL` (120s) when all user-linked songs are fully enriched. Otherwise: 10s short pause → retry.
+- **Cobweb is NOT user-linked**: Cobweb-discovered artists and their songs are global (no user_id). They only get processed when user work is complete.
+
+---
+
 ## V 5.220 — 2026-04-09
 
 ### Smart Enrichment Priority + Artist Cap
