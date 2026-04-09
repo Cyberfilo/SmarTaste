@@ -7,6 +7,17 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 5.220 — 2026-04-09
+
+### Smart Enrichment Priority + Artist Cap
+- **Partial enrichment completion phase**: New worker phase runs BEFORE cobweb expansion. Songs with audio but missing tags/credits get completed first (Semaphore(15) for Last.fm, 200/cycle for MusicBrainz). 880 songs with audio but no tags will now be addressed.
+- **Indexer artist cap**: Step 5 ("other library artists") now capped at top 20% (max 30) instead of ALL artists. 182 artists → 3 + ~36 = 39 processed (was 182 creating 2362 discography songs).
+- **Worker cycle order**: library gaps → ISRC retry → ISRC backfill → **complete partial tags/credits** → cobwebs → global → backfill → sleep.
+- **Tags concurrency 15**: Last.fm allows ~20 req/s. Semaphore raised from 10 to 15 in the partial completion phase.
+- **Batch pre-filtering**: All backfill phases check existing cache in single batch query before making any API calls. No duplicate requests.
+
+---
+
 ## V 5.210 — 2026-04-09
 
 ### Performance + Enrichment Recovery

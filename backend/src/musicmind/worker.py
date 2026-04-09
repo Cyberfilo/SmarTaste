@@ -194,6 +194,24 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d ISRC backfill failed", cycle)
 
+        # ── Phase 1c: Complete partially enriched songs (tags + credits) ──
+        # Songs with audio features but missing Last.fm tags or MusicBrainz
+        # credits. These are user-linked songs that should finish before
+        # any new cobweb expansion or global enrichment starts.
+        await _set_status(
+            engine, "partial_completion",
+            "Completing tags + credits for user songs", cycle=cycle,
+        )
+        try:
+            partial_done = await _complete_partial_enrichment(engine, settings)
+            if partial_done > 0:
+                logger.info(
+                    "Cycle %d: completed tags/credits for %d songs",
+                    cycle, partial_done,
+                )
+        except Exception:
+            logger.exception("Cycle %d partial completion failed", cycle)
+
         # ── Phase 2: Build cobwebs + enrich globally ────────────────
         await _set_status(engine, "cobweb", "Building artist cobwebs", cycle=cycle)
 
@@ -715,6 +733,172 @@ async def _fill_library_gaps(engine, settings) -> int:
             )
 
     return total_enriched
+
+
+# ── Partial Enrichment Completion ────────────────────────────────────────
+
+
+async def _complete_partial_enrichment(engine, settings) -> int:
+    """Complete tags + credits for songs that already have audio features.
+
+    Priority: user-linked songs (in song_metadata_cache) first.
+    Only processes songs that are MISSING tags or credits, not ones
+    that already have them. Uses high concurrency since Last.fm is
+    not heavily rate-limited.
+    """
+    from musicmind.db.schema import (
+        kg_relationships,
+        lastfm_tags_cache,
+        song_metadata_cache,
+    )
+
+    if not settings.lastfm_api_key:
+        return 0
+
+    from musicmind.engine.enrichment.lastfm import (
+        fetch_artist_tags,
+        fetch_track_tags,
+    )
+
+    updated = 0
+
+    # Get user songs with audio features but missing tags
+    # Only fetch distinct (artist, name) pairs, deduplicated
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(
+                song_metadata_cache.c.artist_name,
+                song_metadata_cache.c.name,
+                song_metadata_cache.c.isrc,
+            ).where(
+                sa.and_(
+                    song_metadata_cache.c.artist_name.isnot(None),
+                    song_metadata_cache.c.artist_name != "",
+                    song_metadata_cache.c.name.isnot(None),
+                    song_metadata_cache.c.name != "",
+                )
+            ).distinct().limit(2000)
+        )
+        all_pairs = [(r.artist_name, r.name, r.isrc) for r in result]
+
+    if not all_pairs:
+        return 0
+
+    # ── Last.fm tags: batch check which are missing ────────────
+    pairs_with_eid = [
+        (a, n, isrc, f"track:{a.lower()}:{n.lower()}")
+        for a, n, isrc in all_pairs
+    ]
+    all_eids = [eid for _, _, _, eid in pairs_with_eid]
+
+    cached_eids: set[str] = set()
+    for i in range(0, len(all_eids), 500):
+        chunk = all_eids[i:i + 500]
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(lastfm_tags_cache.c.entity_id).where(
+                    lastfm_tags_cache.c.entity_id.in_(chunk)
+                )
+            )
+            cached_eids.update(row.entity_id for row in result)
+
+    uncached_tags = [
+        (a, n, eid)
+        for a, n, _, eid in pairs_with_eid
+        if eid not in cached_eids
+    ]
+
+    if uncached_tags:
+        # High concurrency — Last.fm allows ~20 req/s
+        batch = uncached_tags[:1500]
+        logger.info(
+            "Partial completion: %d songs need tags, processing %d",
+            len(uncached_tags), len(batch),
+        )
+
+        sem = asyncio.Semaphore(15)
+
+        async def _fetch_tag(artist: str, name: str, eid: str) -> bool:
+            async with sem:
+                try:
+                    tags = await fetch_track_tags(
+                        settings.lastfm_api_key, artist, name,
+                    )
+                    if not tags:
+                        tags = await fetch_artist_tags(
+                            settings.lastfm_api_key, artist,
+                        )
+                    if tags:
+                        async with engine.begin() as conn:
+                            await conn.execute(
+                                sa.text(
+                                    "INSERT INTO lastfm_tags_cache"
+                                    " (entity_type, entity_id, tags)"
+                                    " VALUES (:t, :eid, :tags)"
+                                    " ON CONFLICT (entity_type, entity_id)"
+                                    " DO UPDATE SET tags = :tags"
+                                ),
+                                {
+                                    "t": "track",
+                                    "eid": eid,
+                                    "tags": json.dumps(tags),
+                                },
+                            )
+                        return True
+                except Exception:
+                    pass
+                return False
+
+        results = await asyncio.gather(
+            *[_fetch_tag(a, n, eid) for a, n, eid in batch],
+            return_exceptions=True,
+        )
+        updated += sum(1 for r in results if r is True)
+
+    # ── MusicBrainz credits: batch check missing ───────────────
+    isrc_pairs = [
+        (isrc, f"isrc:{isrc.upper()}")
+        for _, _, isrc, _ in pairs_with_eid
+        if isrc
+    ]
+
+    if isrc_pairs:
+        all_mbids = [mbid for _, mbid in isrc_pairs]
+        cached_mbids: set[str] = set()
+        for i in range(0, len(all_mbids), 500):
+            chunk = all_mbids[i:i + 500]
+            async with engine.begin() as conn:
+                result = await conn.execute(
+                    sa.select(sa.distinct(kg_relationships.c.source_mbid)).where(
+                        kg_relationships.c.source_mbid.in_(chunk)
+                    )
+                )
+                cached_mbids.update(row[0] for row in result)
+
+        uncached_credits = [
+            isrc for isrc, mbid in isrc_pairs if mbid not in cached_mbids
+        ]
+
+        if uncached_credits:
+            batch = uncached_credits[:200]
+            logger.info(
+                "Partial completion: %d ISRCs need credits, processing %d",
+                len(uncached_credits), len(batch),
+            )
+
+            from musicmind.engine.enrichment.musicbrainz_credits import (
+                fetch_recording_credits,
+            )
+
+            for isrc in batch:
+                try:
+                    credits = await fetch_recording_credits(isrc, engine=engine)
+                    if credits:
+                        updated += 1
+                except Exception:
+                    pass
+
+    return updated
 
 
 # ── ISRC Backfill ───────────────────────────────────────────────────────
