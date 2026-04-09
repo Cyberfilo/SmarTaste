@@ -127,9 +127,9 @@ async def enrich_tracks_global(
         features: dict[str, Any] = {}
         feature_source: dict[str, str] = {}
 
-        # Stage 1: Deezer
-        preview_url = None
-        if name and artist_name:
+        # Stage 1: Deezer (check cached preview_url first)
+        preview_url = track.get("preview_url") or None
+        if not preview_url and name and artist_name:
             try:
                 deezer_result = await fetch_deezer_features(
                     name=name, artist_name=artist_name,
@@ -300,8 +300,21 @@ async def _enrich_single_track(
             pass  # AcousticBrainz is best-effort
 
     # Stage 1: Deezer (BPM + preview URL)
-    preview_url = None
-    if name and artist_name:
+    # Check if we already have a cached preview URL from a previous enrichment
+    preview_url = track.get("preview_url") or None
+    if not preview_url:
+        async with engine.begin() as conn:
+            from musicmind.db.schema import song_metadata_cache as smc
+            cached_url = await conn.execute(
+                sa.select(smc.c.preview_url).where(
+                    sa.and_(smc.c.catalog_id == catalog_id, smc.c.preview_url.isnot(None))
+                ).limit(1)
+            )
+            row = cached_url.first()
+            if row and row.preview_url:
+                preview_url = row.preview_url
+
+    if not preview_url and name and artist_name:
         try:
             deezer_result = await fetch_deezer_features(
                 name=name, artist_name=artist_name,
@@ -311,6 +324,21 @@ async def _enrich_single_track(
                 deezer_result.pop("deezer_id", None)
                 if _merge_features(features, feature_source, deezer_result, "deezer"):
                     enriched_by = "deezer"
+                # Save the preview URL to song_metadata_cache for future use
+                if preview_url:
+                    try:
+                        async with engine.begin() as conn:
+                            await conn.execute(
+                                sa.text(
+                                    "UPDATE song_metadata_cache"
+                                    " SET preview_url = :url"
+                                    " WHERE catalog_id = :cid"
+                                    "   AND (preview_url IS NULL OR preview_url = '')"
+                                ),
+                                {"url": preview_url, "cid": catalog_id},
+                            )
+                    except Exception:
+                        pass
         except Exception:
             logger.debug("Deezer enrichment failed for %s - %s", artist_name, name)
 
