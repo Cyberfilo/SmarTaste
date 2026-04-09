@@ -562,3 +562,142 @@ async def cleanup_orphans(
     """
     result = await cleanup_orphaned_features(request.app.state.engine)
     return result
+
+
+@router.post("/reindex/{user_id}")
+async def reindex_user(
+    request: Request,
+    user_id: str,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Smart reindex: preserve enriched data, re-scan library, re-enrich gaps.
+
+    Steps:
+    1. Promote per-user audio features to global cache (by ISRC)
+    2. Clear per-user song_metadata_cache + audio_features_cache
+    3. Reset indexing status to trigger fresh library scan
+    4. The indexer will re-fetch library from Apple Music/Spotify
+    5. Audio enrichment will find existing data in global cache (instant)
+    6. Tags + credits already global — no data lost
+
+    No API calls are wasted: audio features are preserved in audio_features_global,
+    tags in lastfm_tags_cache, credits in kg_relationships. Only the library
+    re-scan calls the music service API.
+    """
+    from musicmind.db.schema import (
+        audio_features_cache,
+        song_metadata_cache,
+        user_indexing_status,
+    )
+
+    engine = request.app.state.engine
+
+    # Verify user exists
+    async with engine.begin() as conn:
+        user_row = (await conn.execute(
+            sa.select(users.c.id, users.c.email).where(users.c.id == user_id)
+        )).first()
+    if not user_row:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Step 1: Promote per-user audio features to global ISRC cache
+    promoted = 0
+    async with engine.begin() as conn:
+        # Get all per-user features that have ISRC
+        af_rows = (await conn.execute(
+            sa.select(audio_features_cache, song_metadata_cache.c.isrc).where(
+                sa.and_(
+                    audio_features_cache.c.user_id == user_id,
+                    audio_features_cache.c.energy.isnot(None),
+                    audio_features_cache.c.catalog_id == song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.user_id == user_id,
+                    song_metadata_cache.c.isrc.isnot(None),
+                    song_metadata_cache.c.isrc != "",
+                )
+            )
+        )).fetchall()
+
+        for row in af_rows:
+            try:
+                await conn.execute(sa.text(
+                    "INSERT INTO audio_features_global"
+                    " (isrc, tempo, energy, brightness, danceability,"
+                    "  acousticness, valence_proxy, beat_strength,"
+                    "  key, scale, instrumentalness, loudness,"
+                    "  feature_source, analyzed_at)"
+                    " VALUES (:isrc, :tempo, :energy, :brightness,"
+                    "  :danceability, :acousticness, :valence_proxy,"
+                    "  :beat_strength, :key, :scale, :instrumentalness,"
+                    "  :loudness, :feature_source, now())"
+                    " ON CONFLICT (isrc) DO NOTHING"
+                ), {
+                    "isrc": row.isrc,
+                    "tempo": row.tempo, "energy": row.energy,
+                    "brightness": row.brightness,
+                    "danceability": row.danceability,
+                    "acousticness": row.acousticness,
+                    "valence_proxy": row.valence_proxy,
+                    "beat_strength": row.beat_strength,
+                    "key": row.key, "scale": row.scale,
+                    "instrumentalness": row.instrumentalness,
+                    "loudness": row.loudness,
+                    "feature_source": (
+                        row.feature_source if isinstance(row.feature_source, str)
+                        else json.dumps(row.feature_source or {})
+                    ),
+                })
+                promoted += 1
+            except Exception:
+                pass
+
+    # Step 2: Clear per-user data
+    async with engine.begin() as conn:
+        del_af = await conn.execute(
+            sa.delete(audio_features_cache).where(
+                audio_features_cache.c.user_id == user_id
+            )
+        )
+        del_songs = await conn.execute(
+            sa.delete(song_metadata_cache).where(
+                song_metadata_cache.c.user_id == user_id
+            )
+        )
+
+    # Step 3: Reset indexing status
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.delete(user_indexing_status).where(
+                user_indexing_status.c.user_id == user_id
+            )
+        )
+
+    logger.info(
+        "Reindex for %s: promoted %d features to global, cleared %d songs + %d features",
+        user_row.email, promoted, del_songs.rowcount, del_af.rowcount,
+    )
+
+    # Step 4: Trigger background indexing
+    try:
+        from musicmind.auth.router import _background_indexing
+
+        asyncio.ensure_future(_background_indexing(
+            engine=engine,
+            settings=request.app.state.settings,
+            encryption=request.app.state.encryption,
+            user_id=user_id,
+        ))
+    except Exception:
+        logger.warning("Failed to auto-trigger indexing after reindex")
+
+    return {
+        "status": "reindex_started",
+        "user": user_row.email,
+        "promoted_to_global": promoted,
+        "songs_cleared": del_songs.rowcount,
+        "features_cleared": del_af.rowcount,
+        "message": (
+            f"Promoted {promoted} audio features to global cache. "
+            f"Cleared {del_songs.rowcount} songs. "
+            "Indexing will re-fetch library and reuse cached data."
+        ),
+    }
