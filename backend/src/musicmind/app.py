@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import sqlalchemy as sa
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -31,6 +32,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engine = engine
     app.state.settings = _settings
     app.state.encryption = encryption
+
+    # Staging mode: auto-reset DB on startup for clean testing
+    if _settings.staging:
+        import logging as _log
+        _log.getLogger(__name__).warning("STAGING MODE: resetting database...")
+        try:
+            async with engine.begin() as conn:
+                # Read and execute the reset SQL
+                from pathlib import Path
+                sql_path = Path(__file__).resolve().parents[3] / "scripts" / "reset-staging-db.sql"
+                if not sql_path.exists():
+                    sql_path = Path("/app/scripts/reset-staging-db.sql")
+                if sql_path.exists():
+                    sql = sql_path.read_text()
+                    for stmt in sql.split(";"):
+                        stmt = stmt.strip()
+                        if stmt and not stmt.startswith("--"):
+                            await conn.execute(sa.text(stmt))
+                    _log.getLogger(__name__).warning("STAGING: database reset complete")
+                else:
+                    _log.getLogger(__name__).warning("STAGING: reset SQL not found at %s", sql_path)
+        except Exception:
+            _log.getLogger(__name__).exception("STAGING: database reset failed")
 
     # Install admin log handler for live log streaming
     from musicmind.api.admin.log_stream import install_admin_handler

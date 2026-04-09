@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # SoundStat: paid API (0.01 EUR/track), used only for specific recommendations
     soundstat_api_key: str | None = None
 
+    # Staging mode: auto-resets DB on startup (clean slate for testing).
+    # Set MUSICMIND_STAGING=true on the staging Railway environment.
+    staging: bool = False
+
     model_config = {"env_prefix": "MUSICMIND_", "env_file": ".env"}
 
     def model_post_init(self, __context: object) -> None:
