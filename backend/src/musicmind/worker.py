@@ -599,9 +599,12 @@ async def _backfill_global_songs(engine, settings) -> int:
             ]
 
             if uncached:
+                # Cap at 500 per cycle to keep cycles short (~2 min at 5 req/s)
+                total_uncached = len(uncached)
+                uncached = uncached[:500]
                 logger.info(
-                    "Last.fm backfill: %d songs need tags (%d already cached)",
-                    len(uncached), len(cached_eids),
+                    "Last.fm backfill: %d need tags, processing %d this cycle (%d cached)",
+                    total_uncached, len(uncached), len(cached_eids),
                 )
 
                 sem = asyncio.Semaphore(5)
@@ -689,18 +692,19 @@ async def _backfill_global_songs(engine, settings) -> int:
         ]
 
         if uncached_isrc:
+            # Cap at 100 per cycle (MusicBrainz = 1 req/sec, ~3-4 min max)
+            batch = uncached_isrc[:100]
             logger.info(
-                "MusicBrainz backfill: %d songs need credits",
-                len(uncached_isrc),
+                "MusicBrainz backfill: %d need credits, processing %d this cycle",
+                len(uncached_isrc), len(batch),
             )
 
             from musicmind.engine.enrichment.musicbrainz_credits import (
                 fetch_recording_credits,
             )
 
-            for isrc, _source_mbid in uncached_isrc:
+            for isrc, _source_mbid in batch:
                 try:
-                    # fetch_recording_credits handles its own storage
                     credits = await fetch_recording_credits(
                         isrc, engine=engine,
                     )
