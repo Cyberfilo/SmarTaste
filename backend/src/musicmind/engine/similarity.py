@@ -6,11 +6,14 @@ and other metadata signals. No API calls — works purely from cached data.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
 
 from musicmind.engine.profile import expand_genres
+
+logger = logging.getLogger(__name__)
 
 
 def genre_jaccard(genres_a: list[str], genres_b: list[str]) -> float:
@@ -126,6 +129,11 @@ def embedding_cosine_similarity(
     if not embedding_a or not embedding_b:
         return 0.5
     if len(embedding_a) != len(embedding_b):
+        logger.warning(
+            "Embedding dimension mismatch: %d vs %d — returning neutral 0.5",
+            len(embedding_a),
+            len(embedding_b),
+        )
         return 0.5
 
     a = np.array(embedding_a)

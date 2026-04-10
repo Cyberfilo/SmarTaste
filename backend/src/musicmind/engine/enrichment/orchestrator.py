@@ -51,7 +51,7 @@ async def enrich_tracks(
 ) -> dict[str, int]:
     """Three-phase enrichment pipeline — each phase maxes its own concurrency.
 
-    Phase A: Audio features — Sem(15), fast (Deezer + ReccoBeats generous limits)
+    Phase A: Audio features — Sem(15), fast (Essentia primary, ReccoBeats fallback)
     Phase B: Last.fm tags  — Sem(15), fast (~20 req/s allowed)
     Phase C: MusicBrainz   — Sem(2), slow (1 req/s strict limit)
 

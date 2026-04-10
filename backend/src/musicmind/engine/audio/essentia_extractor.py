@@ -47,23 +47,7 @@ def _check_onnx() -> bool:
         return False
 
 
-@property
-def ESSENTIA_AVAILABLE() -> bool:  # noqa: N802
-    global _essentia_available
-    if _essentia_available is None:
-        _essentia_available = _check_essentia()
-    return _essentia_available
 
-
-@property
-def ONNX_AVAILABLE() -> bool:  # noqa: N802
-    global _onnx_available
-    if _onnx_available is None:
-        _onnx_available = _check_onnx()
-    return _onnx_available
-
-
-# Use functions instead of properties (module-level properties don't work)
 def is_essentia_available() -> bool:
     global _essentia_available
     if _essentia_available is None:
