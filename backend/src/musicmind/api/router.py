@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from musicmind.api.admin.router import dashboard_router
 from musicmind.api.admin.router import router as admin_router
 from musicmind.api.calibration.router import router as calibration_router
 from musicmind.api.chat.router import router as chat_router
@@ -23,6 +24,7 @@ from musicmind.auth.router import router as auth_router
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(admin_router)
+api_router.include_router(dashboard_router)
 api_router.include_router(auth_router)
 api_router.include_router(calibration_router)
 api_router.include_router(services_router)
