@@ -7,6 +7,20 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.100 — 2026-04-10
+
+### Full Audio Intelligence Stack
+- **Essentia classifier heads**: mood (aggressive/happy/party/relaxed/sad), voice/instrumental, acoustic — run on CPU from EffNet embedding
+- **Modal GPU worker**: CLAP 512-dim + MERT 768-dim serverless on A100, scale-to-zero (~$0.018/track)
+- **GPU client**: Railway→Modal HTTP integration for Tier 2 enrichment
+- **OpenAI GPT-5.4 explanations**: track captions + "why you'll like this" from structured tags
+- **Multi-signal similarity**: 0.30 CLAP + 0.25 EffNet + 0.20 MERT + 0.10 mood + 0.10 scalar (adaptive weights)
+- **Natural language search**: GET /api/search?q="aggressive drill energy" via CLAP text-to-audio
+- **Tag-to-caption pipeline**: AI captions generated during enrichment, stored per-song
+- **DB migration 020**: CLAP/MERT embedding columns, ai_caption, ai_tags, profile centroids
+
+---
+
 ## V 6.000 — 2026-04-10
 
 ### Local Audio Intelligence (Essentia + ONNX)
