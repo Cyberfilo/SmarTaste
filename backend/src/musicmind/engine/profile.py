@@ -370,6 +370,7 @@ def build_taste_profile(
     use_temporal_decay: bool = False,
     half_life_days: float = 90.0,
     audio_features_map: dict[str, dict[str, float]] | None = None,
+    embedding_map: dict[str, list[float]] | None = None,
 ) -> dict[str, Any]:
     """Build a complete taste profile from cached data.
 
@@ -379,6 +380,7 @@ def build_taste_profile(
         use_temporal_decay: Apply exponential decay to older songs
         half_life_days: Half-life in days for temporal decay
         audio_features_map: Optional catalog_id → audio features dict
+        embedding_map: Optional catalog_id → embedding vector dict
 
     Returns:
         Dict ready for saving as a taste_profile_snapshot
@@ -413,6 +415,24 @@ def build_taste_profile(
         ]
         audio_centroid = build_audio_centroid(feature_list)
 
+    # Build embedding centroid (L2-normalized mean of all library embeddings)
+    embedding_centroid: list[float] | None = None
+    if embedding_map:
+        import numpy as np
+
+        emb_list = [
+            embedding_map[s.get("catalog_id", "")]
+            for s in songs
+            if s.get("catalog_id", "") in embedding_map
+        ]
+        if emb_list:
+            arr = np.array(emb_list)
+            mean = arr.mean(axis=0)
+            norm = np.linalg.norm(mean)
+            if norm > 0:
+                mean = mean / norm  # L2 normalize
+            embedding_centroid = [round(float(v), 6) for v in mean]
+
     return {
         "genre_vector": genre_vector,
         "top_artists": top_artists,
@@ -422,4 +442,5 @@ def build_taste_profile(
         "total_songs_analyzed": len(songs),
         "listening_hours_estimated": listening_hours,
         "audio_centroid": audio_centroid,
+        "embedding_centroid": embedding_centroid,
     }
