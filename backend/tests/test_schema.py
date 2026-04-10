@@ -9,28 +9,18 @@ ALL_TABLE_NAMES = [
     "user_api_keys",
     "service_connections",
     "refresh_tokens",
-    "listening_history",
     "song_metadata_cache",
     "artist_cache",
     "taste_profile_snapshots",
-    "recommendation_feedback",
     "audio_features_cache",
     "sound_classification_cache",
-    "play_count_proxy",
     "chat_conversations",
     "chat_messages",
     "audio_embeddings",
-    "kg_artists",
-    "kg_relationships",
-    "bandit_arms",
-    "lastfm_tags_cache",
     "generated_playlists",
-    "isrc_spotify_mapping",
     "playlist_items",
     "user_calibration",
     "audio_features_global",
-    "lastfm_similar_tracks",
-    "acousticbrainz_cache",
     "worker_status",
     "user_indexing_status",
     "artist_cobweb",
@@ -41,28 +31,24 @@ ALL_TABLE_NAMES = [
 DATA_TABLE_NAMES = [
     "user_api_keys",
     "service_connections",
-    "listening_history",
     "song_metadata_cache",
     "artist_cache",
     "taste_profile_snapshots",
-    "recommendation_feedback",
     "audio_features_cache",
     "sound_classification_cache",
-    "play_count_proxy",
     "chat_conversations",
     "audio_embeddings",
-    "bandit_arms",
     "generated_playlists",
     "user_calibration",
 ]
 
 
 def test_all_tables_present() -> None:
-    """All 31 tables are defined in the schema metadata."""
+    """All 21 tables are defined in the schema metadata."""
     table_names = set(metadata.tables.keys())
     for name in ALL_TABLE_NAMES:
         assert name in table_names, f"Table '{name}' missing from schema"
-    assert len(metadata.tables) == 31
+    assert len(metadata.tables) == 21
 
 
 def test_user_id_on_all_data_tables() -> None:
@@ -88,14 +74,6 @@ def test_service_connections_unique_constraint() -> None:
     )
 
 
-def test_listening_history_has_service_source() -> None:
-    """listening_history has a service_source column."""
-    table = metadata.tables["listening_history"]
-    assert "service_source" in table.columns, (
-        "listening_history missing service_source column"
-    )
-
-
 def test_song_metadata_composite_pk() -> None:
     """song_metadata_cache primary key is (catalog_id, user_id)."""
     table = metadata.tables["song_metadata_cache"]
@@ -104,18 +82,9 @@ def test_song_metadata_composite_pk() -> None:
     assert "user_id" in pk_col_names, "user_id not in primary key"
 
 
-def test_play_count_proxy_composite_pk() -> None:
-    """play_count_proxy primary key is (song_id, user_id)."""
-    table = metadata.tables["play_count_proxy"]
-    pk_col_names = [col.name for col in table.primary_key.columns]
-    assert "song_id" in pk_col_names, "song_id not in primary key"
-    assert "user_id" in pk_col_names, "user_id not in primary key"
-
-
 def test_service_source_on_multi_service_tables() -> None:
     """Tables that store per-service data have service_source column."""
     tables_with_service_source = [
-        "listening_history",
         "song_metadata_cache",
         "artist_cache",
         "generated_playlists",

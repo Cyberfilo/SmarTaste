@@ -253,7 +253,7 @@ async def fetch_spotify_recently_played(
         limit: Items per request (max 50).
 
     Returns:
-        List of listening_history-compatible dicts.
+        List of song_metadata_cache-compatible dicts.
     """
     results: list[dict[str, Any]] = []
     headers = {"Authorization": f"Bearer {access_token}"}
@@ -437,7 +437,7 @@ async def fetch_apple_music_recently_played(
         max_pages: Maximum pages to fetch.
 
     Returns:
-        List of listening_history-compatible dicts.
+        List of song_metadata_cache-compatible dicts.
     """
     results: list[dict[str, Any]] = []
     offset = 0

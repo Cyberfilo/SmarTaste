@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -10,7 +9,6 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -24,7 +22,6 @@ from musicmind.app import app  # noqa: E402
 from musicmind.config import Settings  # noqa: E402
 from musicmind.db.schema import (  # noqa: E402
     metadata,
-    recommendation_feedback,
     service_connections,
     users,
 )
@@ -155,26 +152,6 @@ async def _insert_service_connection(
                 connected_at=now,
             )
         )
-
-
-async def _insert_feedback_rows(
-    engine: AsyncEngine,
-    user_id: str,
-    count: int,
-    feedback_type: str = "thumbs_up",
-) -> None:
-    """Insert multiple feedback rows to reach/exceed the optimization threshold."""
-    async with engine.begin() as conn:
-        for i in range(count):
-            await conn.execute(
-                recommendation_feedback.insert().values(
-                    user_id=user_id,
-                    catalog_id=f"sp_feedback_{i:03d}",
-                    feedback_type=feedback_type,
-                    predicted_score=0.7,
-                    weight_snapshot=json.dumps({"genre": 0.35}),
-                )
-            )
 
 
 async def _get_csrf_token(client: AsyncClient) -> str:
@@ -423,7 +400,10 @@ async def test_submit_feedback_stored(
     auth_cookies: dict[str, str],
     encryption: EncryptionService,
 ) -> None:
-    """POST /api/recommendations/{catalog_id}/feedback stores feedback (RECO-03)."""
+    """POST /api/recommendations/{catalog_id}/feedback accepts feedback (RECO-03).
+
+    Feedback is logged but not persisted (recommendation_feedback table removed).
+    """
     await _insert_test_user(test_engine, test_user_id)
     await _insert_service_connection(test_engine, encryption, test_user_id, "spotify")
 
@@ -440,21 +420,6 @@ async def test_submit_feedback_stored(
     assert data["catalog_id"] == catalog_id
     assert data["feedback_type"] == "thumbs_up"
     assert data["recorded"] is True
-
-    # Verify the row was actually inserted into the DB
-    async with test_engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(recommendation_feedback).where(
-                sa.and_(
-                    recommendation_feedback.c.user_id == test_user_id,
-                    recommendation_feedback.c.catalog_id == catalog_id,
-                )
-            )
-        )
-        row = result.first()
-
-    assert row is not None
-    assert row.feedback_type == "thumbs_up"
 
 
 async def test_submit_feedback_thumbs_down(
@@ -510,12 +475,9 @@ async def test_weights_adapt_after_feedback(
     auth_cookies: dict[str, str],
     encryption: EncryptionService,
 ) -> None:
-    """With 10+ feedback records, response has weights_adapted=true (RECO-04)."""
+    """Weights adaptation is disabled (feedback table removed) — always False (RECO-04)."""
     await _insert_test_user(test_engine, test_user_id)
     await _insert_service_connection(test_engine, encryption, test_user_id, "spotify")
-
-    # Insert 12 feedback rows -- above the MIN_FEEDBACK_FOR_OPTIMIZATION threshold (10)
-    await _insert_feedback_rows(test_engine, test_user_id, count=12)
 
     p1, p2, p3, p4, p5, p6 = _reco_mocks()
     with p1, p2, p3, p4, p5, p6:
@@ -523,7 +485,7 @@ async def test_weights_adapt_after_feedback(
 
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["weights_adapted"] is True
+    assert data["weights_adapted"] is False
 
 
 async def test_weights_default_insufficient_feedback(
@@ -533,12 +495,9 @@ async def test_weights_default_insufficient_feedback(
     auth_cookies: dict[str, str],
     encryption: EncryptionService,
 ) -> None:
-    """With fewer than 10 feedback records, response has weights_adapted=false (RECO-04)."""
+    """Weights adaptation is disabled (feedback table removed) — always False (RECO-04)."""
     await _insert_test_user(test_engine, test_user_id)
     await _insert_service_connection(test_engine, encryption, test_user_id, "spotify")
-
-    # Insert only 5 feedback rows -- below the threshold
-    await _insert_feedback_rows(test_engine, test_user_id, count=5)
 
     p1, p2, p3, p4, p5, p6 = _reco_mocks()
     with p1, p2, p3, p4, p5, p6:
