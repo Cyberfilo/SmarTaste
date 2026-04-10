@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -34,7 +35,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.encryption = encryption
 
     # Staging mode: auto-reset DB on startup for clean testing
-    if _settings.staging:
+    # Safety: require BOTH staging flag AND explicit confirmation env var
+    if _settings.staging and os.environ.get("MUSICMIND_CONFIRM_RESET", "") == "yes":
         import logging as _log
         _log.getLogger(__name__).warning("STAGING MODE: resetting database...")
         try:
