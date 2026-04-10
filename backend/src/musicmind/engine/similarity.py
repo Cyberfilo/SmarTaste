@@ -157,6 +157,74 @@ def combined_audio_similarity(
     return scalar_sim
 
 
+def multi_signal_similarity(
+    a: dict[str, Any],
+    b: dict[str, Any],
+) -> float:
+    """Multi-signal similarity using all available embeddings + features.
+
+    Weights adapt based on which signals are available:
+      0.30 × CLAP cosine (holistic vibe, enables text search)
+      0.25 × EffNet cosine (genre/style granularity)
+      0.20 × MERT cosine (musical structure — pitch, tonal, rhythmic)
+      0.10 × mood vector similarity (emotional match)
+      0.10 × scalar similarity (BPM, key, energy, danceability)
+      0.05 × reserved (future: caption embedding similarity)
+
+    Falls back gracefully: unavailable signals redistribute weight
+    to available ones.
+
+    Args:
+        a, b: Dicts with keys: effnet_1280, clap_512, mert_768,
+               moods (dict), scalars (dict with tempo/energy/danceability/etc.)
+    """
+    weights: dict[str, float] = {}
+    scores: dict[str, float] = {}
+
+    # EffNet
+    if a.get("effnet_1280") and b.get("effnet_1280"):
+        scores["effnet"] = embedding_cosine_similarity(a["effnet_1280"], b["effnet_1280"])
+        weights["effnet"] = 0.25
+
+    # CLAP
+    if a.get("clap_512") and b.get("clap_512"):
+        scores["clap"] = embedding_cosine_similarity(a["clap_512"], b["clap_512"])
+        weights["clap"] = 0.30
+
+    # MERT
+    if a.get("mert_768") and b.get("mert_768"):
+        scores["mert"] = embedding_cosine_similarity(a["mert_768"], b["mert_768"])
+        weights["mert"] = 0.20
+
+    # Mood vector (cosine of mood scores)
+    moods_a = a.get("moods")
+    moods_b = b.get("moods")
+    if moods_a and moods_b:
+        all_keys = set(moods_a.keys()) | set(moods_b.keys())
+        if all_keys:
+            vec_a = [moods_a.get(k, 0.0) for k in all_keys]
+            vec_b = [moods_b.get(k, 0.0) for k in all_keys]
+            va, vb = np.array(vec_a), np.array(vec_b)
+            na, nb = np.linalg.norm(va), np.linalg.norm(vb)
+            if na > 0 and nb > 0:
+                scores["mood"] = float(np.dot(va, vb) / (na * nb))
+                weights["mood"] = 0.10
+
+    # Scalar features
+    scalars_a = a.get("scalars")
+    scalars_b = b.get("scalars")
+    if scalars_a and scalars_b:
+        scores["scalar"] = audio_feature_similarity(scalars_a, scalars_b)
+        weights["scalar"] = 0.10
+
+    if not scores:
+        return 0.5  # neutral when nothing available
+
+    # Normalize weights to sum to 1.0
+    total_w = sum(weights.values())
+    return sum(scores[k] * (weights[k] / total_w) for k in scores)
+
+
 def classification_similarity(
     labels_a: dict[str, float] | None,
     labels_b: dict[str, float] | None,
