@@ -2,6 +2,11 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
+# System deps: ffmpeg for Essentia's MonoLoader M4A/AAC support
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
@@ -11,8 +16,15 @@ COPY src/ src/
 COPY alembic.ini ./
 COPY alembic/ alembic/
 
-# Install dependencies
-RUN uv sync --frozen --no-dev
+# Install dependencies (including audio extras for Essentia + ONNX)
+RUN uv sync --frozen --no-dev --extra audio || uv sync --frozen --no-dev
+
+# Download Essentia EffNet ONNX model (~18MB) if not mounted externally
+RUN mkdir -p /models && \
+    python3 -c "import urllib.request; urllib.request.urlretrieve(\
+    'https://essentia.upf.edu/models/feature-extractors/discogs-effnet/\
+discogs-effnet-bsdynamic-1.onnx', '/models/discogs-effnet-bsdynamic-1.onnx')" \
+    2>/dev/null || echo "Model download skipped (will use ReccoBeats fallback)"
 
 # Railway provides PORT env var; default to 8000 for local docker
 ENV PORT=8000
