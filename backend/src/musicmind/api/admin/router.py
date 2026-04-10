@@ -187,7 +187,6 @@ async def get_system_status(
         ) if total_songs > 0 else 0,
         "global_isrc_cache": global_cache_count,
         "listening_history_entries": history_count,
-        "soundstat_configured": bool(settings.soundstat_api_key),
     }
 
 
@@ -370,9 +369,10 @@ async def get_diagnostics(
     """Smart enrichment diagnostics with per-user, per-stage breakdown.
 
     Returns detailed enrichment state for each user including:
-    - Per-stage counts (audio/tags/credits) with library vs non-library split
+    - Per-stage counts (audio/embeddings/AI) with library vs non-library split
     - Failed vs pending vs complete breakdown with failure reasons
-    - ISRC coverage gaps
+    - GPU embedding coverage (CLAP + MERT)
+    - AI enrichment coverage (captions + classifier labels)
     - Cobweb expansion stats
     - Cross-referenced failure analysis from logs DB
     - Actionable insights (what needs attention)
@@ -578,11 +578,9 @@ async def reindex_user(
     3. Reset indexing status to trigger fresh library scan
     4. The indexer will re-fetch library from Apple Music/Spotify
     5. Audio enrichment will find existing data in global cache (instant)
-    6. Tags + credits already global — no data lost
 
-    No API calls are wasted: audio features are preserved in audio_features_global,
-    tags in lastfm_tags_cache, credits in kg_relationships. Only the library
-    re-scan calls the music service API.
+    No API calls are wasted: audio features are preserved in audio_features_global.
+    Only the library re-scan calls the music service API.
     """
     from musicmind.db.schema import (
         audio_features_cache,
@@ -686,7 +684,7 @@ async def reindex_user(
                 engine, request.app.state.encryption, request.app.state.settings,
                 user_id=user_id, force_refresh=True,
             )
-            # Then: run the full enrichment pipeline (audio + tags + credits)
+            # Then: run the full enrichment pipeline (audio + embeddings + AI)
             from musicmind.indexer import run_indexing
             logger.info("Reindex %s: starting enrichment pipeline...", user_row.email)
             await run_indexing(
