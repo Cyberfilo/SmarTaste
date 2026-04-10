@@ -363,6 +363,32 @@ def build_audio_centroid(
     return {k: round(v / total_weight, 3) for k, v in weighted_sums.items()}
 
 
+def _compute_embedding_centroid(
+    songs: list[dict[str, Any]],
+    emb_map: dict[str, list[float]],
+) -> list[float] | None:
+    """Compute L2-normalized mean embedding from a catalog_id → embedding map.
+
+    Returns None if no embeddings are available for the user's songs.
+    """
+    import numpy as np
+
+    emb_list = [
+        emb_map[s.get("catalog_id", "")]
+        for s in songs
+        if s.get("catalog_id", "") in emb_map
+    ]
+    if not emb_list:
+        return None
+
+    arr = np.array(emb_list)
+    mean = arr.mean(axis=0)
+    norm = float(np.linalg.norm(mean))
+    if norm > 0:
+        mean = mean / norm  # L2 normalize
+    return [round(float(v), 6) for v in mean]
+
+
 def build_taste_profile(
     songs: list[dict[str, Any]],
     history: list[dict[str, Any]],
@@ -371,6 +397,8 @@ def build_taste_profile(
     half_life_days: float = 90.0,
     audio_features_map: dict[str, dict[str, float]] | None = None,
     embedding_map: dict[str, list[float]] | None = None,
+    clap_map: dict[str, list[float]] | None = None,
+    mert_map: dict[str, list[float]] | None = None,
 ) -> dict[str, Any]:
     """Build a complete taste profile from cached data.
 
@@ -379,8 +407,10 @@ def build_taste_profile(
         history: Listening history entries
         use_temporal_decay: Apply exponential decay to older songs
         half_life_days: Half-life in days for temporal decay
-        audio_features_map: Optional catalog_id → audio features dict
-        embedding_map: Optional catalog_id → embedding vector dict
+        audio_features_map: Optional catalog_id → scalar audio features dict
+        embedding_map: Optional catalog_id → EffNet embedding (1280-dim)
+        clap_map: Optional catalog_id → CLAP embedding (512-dim)
+        mert_map: Optional catalog_id → MERT embedding (768-dim)
 
     Returns:
         Dict ready for saving as a taste_profile_snapshot
@@ -405,7 +435,7 @@ def build_taste_profile(
     )
     listening_hours = round(total_duration_ms / 3_600_000, 1)
 
-    # Build audio centroid from enriched features
+    # Build audio centroid from enriched scalar features
     audio_centroid: dict[str, float] = {}
     if audio_features_map:
         feature_list = [
@@ -415,23 +445,19 @@ def build_taste_profile(
         ]
         audio_centroid = build_audio_centroid(feature_list)
 
-    # Build embedding centroid (L2-normalized mean of all library embeddings)
-    embedding_centroid: list[float] | None = None
-    if embedding_map:
-        import numpy as np
-
-        emb_list = [
-            embedding_map[s.get("catalog_id", "")]
-            for s in songs
-            if s.get("catalog_id", "") in embedding_map
-        ]
-        if emb_list:
-            arr = np.array(emb_list)
-            mean = arr.mean(axis=0)
-            norm = np.linalg.norm(mean)
-            if norm > 0:
-                mean = mean / norm  # L2 normalize
-            embedding_centroid = [round(float(v), 6) for v in mean]
+    # Build embedding centroids (L2-normalized mean per model)
+    embedding_centroid = (
+        _compute_embedding_centroid(songs, embedding_map)
+        if embedding_map else None
+    )
+    clap_centroid = (
+        _compute_embedding_centroid(songs, clap_map)
+        if clap_map else None
+    )
+    mert_centroid = (
+        _compute_embedding_centroid(songs, mert_map)
+        if mert_map else None
+    )
 
     return {
         "genre_vector": genre_vector,
@@ -443,4 +469,6 @@ def build_taste_profile(
         "listening_hours_estimated": listening_hours,
         "audio_centroid": audio_centroid,
         "embedding_centroid": embedding_centroid,
+        "clap_centroid": clap_centroid,
+        "mert_centroid": mert_centroid,
     }
