@@ -163,6 +163,8 @@ song_metadata_cache = sa.Table(
     sa.Column("artwork_url_template", sa.Text, nullable=True),
     sa.Column("preview_url", sa.Text, nullable=True),
     sa.Column("user_rating", sa.Integer, nullable=True),
+    sa.Column("ai_caption", sa.Text, nullable=True),
+    sa.Column("ai_tags", sa.JSON, nullable=True),
     sa.Column("date_added_to_library", sa.DateTime(timezone=True), nullable=True),
     sa.Column(
         "fetched_at",
@@ -225,6 +227,8 @@ taste_profile_snapshots = sa.Table(
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
     sa.Column("audio_centroid", sa.JSON, server_default="{}"),
     sa.Column("embedding_centroid", sa.JSON, nullable=True),
+    sa.Column("clap_centroid", sa.JSON, nullable=True),
+    sa.Column("mert_centroid", sa.JSON, nullable=True),
 )
 
 recommendation_feedback = sa.Table(
@@ -433,6 +437,8 @@ audio_embeddings = sa.Table(
     sa.Column("isrc", sa.Text, nullable=True),
     sa.Column("model_version", sa.Text, server_default="discogs-effnet-1280"),
     sa.Column("embedding_dim", sa.Integer, server_default="128"),
+    sa.Column("clap_embedding", sa.JSON, nullable=True),
+    sa.Column("mert_embedding", sa.JSON, nullable=True),
     sa.Column(
         "analyzed_at",
         sa.DateTime(timezone=True),
@@ -449,6 +455,8 @@ audio_embeddings_global = sa.Table(
     sa.Column("embedding", sa.JSON, nullable=False, server_default="[]"),
     sa.Column("embedding_dim", sa.Integer, nullable=False, server_default="1280"),
     sa.Column("model_version", sa.Text, server_default="discogs-effnet-1280"),
+    sa.Column("clap_embedding", sa.JSON, nullable=True),
+    sa.Column("mert_embedding", sa.JSON, nullable=True),
     sa.Column(
         "analyzed_at",
         sa.DateTime(timezone=True),
