@@ -13,6 +13,7 @@ from musicmind.api.playlists.schemas import (
     PlaylistTracksResponse,
 )
 from musicmind.api.playlists.service import PlaylistService
+from musicmind.api.rate_limit import PLAYLISTS_LIMIT, limiter
 from musicmind.auth.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ playlist_service = PlaylistService()
 
 
 @router.get("")
+@limiter.limit(PLAYLISTS_LIMIT)
 async def list_playlists(
     request: Request,
     service: str | None = Query(default=None),
@@ -57,6 +59,7 @@ async def list_playlists(
 
 
 @router.get("/{playlist_id}/tracks")
+@limiter.limit(PLAYLISTS_LIMIT)
 async def get_playlist_tracks(
     request: Request,
     playlist_id: str,
@@ -103,6 +106,7 @@ async def get_playlist_tracks(
 
 
 @router.get("/{playlist_id}/recommendations")
+@limiter.limit(PLAYLISTS_LIMIT)
 async def get_playlist_recommendations(
     request: Request,
     playlist_id: str,

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 
+from musicmind.api.rate_limit import SERVICES_LIMIT, limiter
 from musicmind.api.services.schemas import (
     AppleMusicConnectRequest,
     AppleMusicDeveloperTokenResponse,
@@ -36,6 +37,7 @@ VALID_SERVICES = ("spotify", "apple_music")
 
 
 @router.get("")
+@limiter.limit(SERVICES_LIMIT)
 async def list_connections(
     request: Request, current_user: dict = Depends(get_current_user)
 ) -> ServiceListResponse:
@@ -94,6 +96,7 @@ async def list_connections(
 
 
 @router.post("/spotify/connect")
+@limiter.limit(SERVICES_LIMIT)
 async def spotify_connect(
     request: Request, current_user: dict = Depends(get_current_user)
 ) -> SpotifyConnectResponse:
@@ -131,6 +134,7 @@ async def spotify_connect(
 
 
 @router.get("/spotify/callback")
+@limiter.limit(SERVICES_LIMIT)
 async def spotify_callback(
     request: Request, code: str, state: str,
     background_tasks: BackgroundTasks,
@@ -144,8 +148,9 @@ async def spotify_callback(
     On success: redirect to /settings?service=spotify&status=connected
     On error: redirect to /settings?service=spotify&status=error&detail=...
     """
-    from starlette.responses import RedirectResponse
     from urllib.parse import quote
+
+    from starlette.responses import RedirectResponse
 
     settings = request.app.state.settings
     engine = request.app.state.engine
@@ -213,7 +218,6 @@ async def spotify_callback(
     )
 
     # Redirect back to the frontend settings page using configured frontend URL
-    from starlette.responses import RedirectResponse
 
     frontend_url = settings.frontend_url.rstrip("/")
     return RedirectResponse(
@@ -223,6 +227,7 @@ async def spotify_callback(
 
 
 @router.get("/apple-music/developer-token")
+@limiter.limit(SERVICES_LIMIT)
 async def apple_music_developer_token(
     request: Request, current_user: dict = Depends(get_current_user)
 ) -> AppleMusicDeveloperTokenResponse:
@@ -250,6 +255,7 @@ async def apple_music_developer_token(
 
 
 @router.post("/apple-music/connect")
+@limiter.limit(SERVICES_LIMIT)
 async def apple_music_connect(
     request: Request,
     body: AppleMusicConnectRequest,
@@ -290,6 +296,7 @@ async def apple_music_connect(
 
 
 @router.delete("/{service}")
+@limiter.limit(SERVICES_LIMIT)
 async def disconnect_service(
     request: Request,
     service: str,
@@ -390,6 +397,7 @@ async def _cache_artist_discographies(
 
     # Get credentials
     import sqlalchemy as sa
+
     from musicmind.db.schema import service_connections as sc_table
 
     async with engine.begin() as conn:
@@ -419,6 +427,7 @@ async def _cache_artist_discographies(
 
     # Resolve artist IDs and fetch their top songs
     import httpx
+
     from musicmind.api.recommendations.fetch import _search_artist_id
 
     all_tracks: list[dict] = []

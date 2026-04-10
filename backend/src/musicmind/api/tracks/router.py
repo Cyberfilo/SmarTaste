@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from musicmind.api.rate_limit import TRACKS_LIMIT, limiter
 from musicmind.api.tracks.schemas import (
     AnalysisResult,
     AnalyzeRequest,
@@ -65,6 +66,7 @@ async def get_audio_features(
 
 
 @router.post("/analyze")
+@limiter.limit(TRACKS_LIMIT)
 async def analyze_seed_tracks(
     request: Request,
     body: AnalyzeRequest,
