@@ -198,6 +198,10 @@ def score_candidate(
     user_audio_centroid: dict[str, float] | None = None,
     candidate_embedding: list[float] | None = None,
     user_embedding_centroid: list[float] | None = None,
+    candidate_clap: list[float] | None = None,
+    user_clap_centroid: list[float] | None = None,
+    candidate_mert: list[float] | None = None,
+    user_mert_centroid: list[float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     staleness_index: dict[str, dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
@@ -226,14 +230,30 @@ def score_candidate(
         candidate.get("genre_names", []), genre_vector
     )
 
-    # 3. Audio similarity (hybrid: 70% embedding + 30% scalar when available)
-    audio_sim = 0.5  # neutral default when no features available
-    if audio_features or candidate_embedding:
-        from musicmind.engine.similarity import combined_audio_similarity
-        audio_sim = combined_audio_similarity(
-            audio_features, user_audio_centroid,
-            candidate_embedding, user_embedding_centroid,
-        )
+    # 3. Audio similarity (multi-signal when CLAP/MERT available)
+    audio_sim = 0.5
+    if candidate_clap or candidate_mert or audio_features or candidate_embedding:
+        if candidate_clap or candidate_mert:
+            from musicmind.engine.similarity import multi_signal_similarity
+            sig_a = {
+                "effnet_1280": candidate_embedding,
+                "clap_512": candidate_clap,
+                "mert_768": candidate_mert,
+                "scalars": audio_features,
+            }
+            sig_b = {
+                "effnet_1280": user_embedding_centroid,
+                "clap_512": user_clap_centroid,
+                "mert_768": user_mert_centroid,
+                "scalars": user_audio_centroid,
+            }
+            audio_sim = multi_signal_similarity(sig_a, sig_b)
+        else:
+            from musicmind.engine.similarity import combined_audio_similarity
+            audio_sim = combined_audio_similarity(
+                audio_features, user_audio_centroid,
+                candidate_embedding, user_embedding_centroid,
+            )
 
     # 4. Artist match — penalized if known artist but wrong genre
     artist_name = candidate.get("artist_name", "").lower()
@@ -393,6 +413,10 @@ def rank_candidates(
     user_audio_centroid: dict[str, float] | None = None,
     embedding_map: dict[str, list[float]] | None = None,
     user_embedding_centroid: list[float] | None = None,
+    clap_map: dict[str, list[float]] | None = None,
+    user_clap_centroid: list[float] | None = None,
+    mert_map: dict[str, list[float]] | None = None,
+    user_mert_centroid: list[float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
     user_tag_profile: dict[str, float] | None = None,
@@ -424,6 +448,10 @@ def rank_candidates(
             user_audio_centroid=user_audio_centroid,
             candidate_embedding=emb_map.get(cid),
             user_embedding_centroid=user_embedding_centroid,
+            candidate_clap=(clap_map or {}).get(cid),
+            user_clap_centroid=user_clap_centroid,
+            candidate_mert=(mert_map or {}).get(cid),
+            user_mert_centroid=user_mert_centroid,
             staleness_index=staleness_idx,
             calibration_artists=calibration_artists,
             candidate_tags=c_tags,
