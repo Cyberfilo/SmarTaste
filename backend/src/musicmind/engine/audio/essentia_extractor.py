@@ -170,6 +170,24 @@ def extract_all(
         if embedding is None:
             embedding = _extract_embedding_tf(es, tmp_path)
 
+        # ── Classifier heads on embedding ────────────────────────
+        if embedding is not None:
+            from musicmind.engine.audio.classifiers import (
+                CLASSIFIERS_AVAILABLE,
+                classify_from_embedding,
+            )
+
+            if CLASSIFIERS_AVAILABLE:
+                classifier_results = classify_from_embedding(embedding)
+                if classifier_results:
+                    features.mood_aggressive = classifier_results.get("mood_aggressive")
+                    features.mood_happy = classifier_results.get("mood_happy")
+                    features.mood_party = classifier_results.get("mood_party")
+                    features.mood_relaxed = classifier_results.get("mood_relaxed")
+                    features.mood_sad = classifier_results.get("mood_sad")
+                    features.voice_instrumental = classifier_results.get("voice_instrumental")
+                    features.mood_acoustic = classifier_results.get("mood_acoustic")
+
         return features, embedding
 
     except Exception:
