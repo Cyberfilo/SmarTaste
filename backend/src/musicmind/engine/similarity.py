@@ -1,7 +1,8 @@
-"""Song similarity scoring from metadata.
+"""Song similarity scoring from metadata and audio embeddings.
 
 Compares songs by genre overlap, artist match, release year proximity,
-and other metadata signals. No API calls — works purely from cached data.
+embedding cosine similarity (CLAP/MERT/EffNet), and scalar audio features.
+No API calls — works purely from cached data.
 """
 
 from __future__ import annotations
@@ -14,6 +15,83 @@ import numpy as np
 from musicmind.engine.profile import expand_genres
 
 logger = logging.getLogger(__name__)
+
+
+# ── Embedding Similarity Wrappers ──────────────────────────────────────────
+
+
+def clap_similarity(
+    centroid: list[float] | None,
+    candidate_embedding: list[float] | None,
+) -> float:
+    """Cosine similarity between user's CLAP centroid and candidate CLAP embedding (512-dim).
+
+    CLAP captures holistic audio-text similarity — the primary scoring signal.
+    Returns 0.0 if either embedding is missing.
+    """
+    return embedding_cosine_similarity(centroid, candidate_embedding)
+
+
+def mert_similarity(
+    centroid: list[float] | None,
+    candidate_embedding: list[float] | None,
+) -> float:
+    """Cosine similarity between user's MERT centroid and candidate MERT embedding (768-dim).
+
+    MERT captures musical structure — pitch, tonality, rhythm patterns.
+    Returns 0.0 if either embedding is missing.
+    """
+    return embedding_cosine_similarity(centroid, candidate_embedding)
+
+
+def effnet_similarity(
+    centroid: list[float] | None,
+    candidate_embedding: list[float] | None,
+) -> float:
+    """Cosine similarity between user's EffNet centroid and candidate EffNet embedding (1280-dim).
+
+    EffNet captures genre/style granularity from Discogs-EffNet model.
+    Returns 0.0 if either embedding is missing.
+    """
+    return embedding_cosine_similarity(centroid, candidate_embedding)
+
+
+def scalar_audio_similarity(
+    profile_scalars: dict[str, float] | None,
+    candidate_scalars: dict[str, float] | None,
+) -> float:
+    """Normalized euclidean distance similarity on scalar audio features.
+
+    Compares tempo, energy, danceability, and other scalar features.
+    Returns 0.0 if either is None, 1.0 for identical, decaying toward 0.0 for
+    increasing distance.
+    """
+    if not profile_scalars or not candidate_scalars:
+        return 0.0
+
+    keys = ["energy", "brightness", "danceability", "acousticness",
+            "valence_proxy", "beat_strength"]
+
+    def _norm_tempo(t: float | None) -> float:
+        if t is None:
+            return 0.5
+        return max(0.0, min(1.0, (t - 40.0) / 180.0))
+
+    vec_a = [_norm_tempo(profile_scalars.get("tempo"))] + [
+        profile_scalars.get(k, 0.5) for k in keys
+    ]
+    vec_b = [_norm_tempo(candidate_scalars.get("tempo"))] + [
+        candidate_scalars.get(k, 0.5) for k in keys
+    ]
+
+    a = np.array(vec_a)
+    b = np.array(vec_b)
+    # Euclidean distance, normalized to [0, 1] then inverted so 1.0 = identical
+    dist = float(np.linalg.norm(a - b))
+    max_dist = float(np.sqrt(len(vec_a)))  # max possible distance
+    if max_dist == 0:
+        return 0.0
+    return max(0.0, 1.0 - dist / max_dist)
 
 
 def genre_jaccard(genres_a: list[str], genres_b: list[str]) -> float:
