@@ -930,8 +930,12 @@ async def _fill_library_gaps(engine, settings) -> int:
             r = await enrich_tracks(
                 engine, tracks, user_id=user_id,
                 lastfm_api_key=settings.lastfm_api_key,
+                modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
             )
-            enriched = r.get("deezer", 0) + r.get("reccobeats", 0) + r.get("soundstat", 0)
+            enriched = (
+                r.get("deezer", 0) + r.get("reccobeats", 0)
+                + r.get("soundstat", 0) + r.get("essentia", 0)
+            )
             total_enriched += enriched
         except Exception:
             logger.warning(

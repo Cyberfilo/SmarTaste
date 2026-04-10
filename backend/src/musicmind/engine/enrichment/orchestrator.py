@@ -1,9 +1,11 @@
-"""Audio enrichment orchestrator — fast batch processing with Retry-After.
+"""Audio enrichment orchestrator — multi-phase batch processing.
 
 Pipeline per track:
 1. Deezer: search by name → 30s preview MP3 + BPM (free)
-2. ReccoBeats: upload preview → 9 audio features (free)
-3. SoundStat: Spotify ID → complete features (paid, optional)
+2. Essentia: local audio features from preview (primary)
+3. ReccoBeats: fallback if Essentia unavailable (free API)
+4. Modal GPU: CLAP + MERT embeddings from preview (if configured)
+5. Last.fm: crowd-sourced tags (free)
 
 Features cached globally by ISRC (shared across all users).
 No artificial delays — only pauses on Retry-After headers from APIs.
@@ -23,7 +25,6 @@ import sqlalchemy as sa
 
 from musicmind.db.schema import audio_features_cache, audio_features_global
 from musicmind.engine.enrichment.deezer import fetch_deezer_features
-from musicmind.engine.enrichment.musicbrainz import resolve_spotify_id
 from musicmind.engine.enrichment.soundstat import fetch_soundstat_features
 
 logger = logging.getLogger(__name__)
@@ -48,20 +49,21 @@ async def enrich_tracks(
     budget_mode: bool = False,
     lastfm_api_key: str | None = None,
     openai_api_key: str | None = None,
+    modal_endpoint_url: str | None = None,
 ) -> dict[str, int]:
-    """Three-phase enrichment pipeline — each phase maxes its own concurrency.
+    """Multi-phase enrichment pipeline — each phase maxes its own concurrency.
 
-    Phase A: Audio features — Sem(15), fast (Essentia primary, ReccoBeats fallback)
-    Phase B: Last.fm tags  — Sem(15), fast (~20 req/s allowed)
-    Phase C: MusicBrainz   — Sem(2), slow (1 req/s strict limit)
+    Phase A:  Audio features — Sem(15), fast (Essentia primary, ReccoBeats fallback)
+    Phase A2: GPU embeddings — CLAP + MERT via Modal (if configured)
+    Phase B:  Last.fm tags  — Sem(15), fast (~20 req/s allowed)
 
     Each phase batch-checks cache BEFORE making any API calls.
-    Phases run sequentially but internally parallel. Audio never waits for credits.
+    Phases run sequentially but internally parallel.
     """
     stats = {
-        "deezer": 0, "reccobeats": 0, "soundstat": 0,
+        "deezer": 0, "reccobeats": 0, "soundstat": 0, "essentia": 0,
         "skipped": 0, "failed": 0, "total": len(tracks),
-        "tags": 0, "credits": 0,
+        "tags": 0, "gpu_enriched": 0,
     }
 
     # ── Phase A: Audio features (critical path — do this FAST) ─────
@@ -88,11 +90,106 @@ async def enrich_tracks(
                 stats["failed"] += 1
         gc.collect()
 
-    audio_done = stats["deezer"] + stats["reccobeats"] + stats["soundstat"]
+    audio_done = (
+        stats["deezer"] + stats["reccobeats"]
+        + stats["soundstat"] + stats["essentia"]
+    )
     logger.info(
         "Phase A done: %d/%d audio enriched (%d skipped, %d failed)",
         audio_done, stats["total"], stats["skipped"], stats["failed"],
     )
+
+    # ── Phase A2: GPU embeddings — CLAP + MERT via Modal ──────────
+    if modal_endpoint_url:
+        from musicmind.db.schema import audio_embeddings
+        from musicmind.engine.enrichment.gpu_client import enrich_batch_via_gpu
+
+        # Collect preview URLs for tracks that have them but lack CLAP embeddings
+        gpu_candidates: list[tuple[dict[str, Any], str]] = []
+        for t in tracks:
+            preview = t.get("preview_url", "")
+            if preview:
+                gpu_candidates.append((t, preview))
+
+        if gpu_candidates:
+            # Batch check which already have CLAP embeddings
+            catalog_ids = [t.get("catalog_id", "") for t, _ in gpu_candidates]
+            cached_clap: set[str] = set()
+            for i in range(0, len(catalog_ids), 500):
+                chunk = catalog_ids[i:i + 500]
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(audio_embeddings.c.catalog_id).where(
+                            sa.and_(
+                                audio_embeddings.c.user_id == user_id,
+                                audio_embeddings.c.catalog_id.in_(chunk),
+                                audio_embeddings.c.clap_embedding.isnot(None),
+                            )
+                        )
+                    )
+                    cached_clap.update(row.catalog_id for row in result)
+
+            uncached_gpu = [
+                (t, url) for t, url in gpu_candidates
+                if t.get("catalog_id", "") not in cached_clap
+            ]
+
+            if uncached_gpu:
+                logger.info(
+                    "Phase A2: %d tracks need GPU enrichment (CLAP + MERT)",
+                    len(uncached_gpu),
+                )
+                preview_urls = [url for _, url in uncached_gpu]
+                try:
+                    gpu_results = await enrich_batch_via_gpu(
+                        preview_urls, modal_endpoint_url,
+                    )
+                    for (t, _), gpu_data in zip(uncached_gpu, gpu_results):
+                        if gpu_data and not gpu_data.get("error"):
+                            cid = t.get("catalog_id", "")
+                            clap = gpu_data.get("clap_512")
+                            mert = gpu_data.get("mert_768")
+                            if clap or mert:
+                                async with engine.begin() as conn:
+                                    existing = await conn.execute(
+                                        sa.select(audio_embeddings.c.catalog_id).where(
+                                            sa.and_(
+                                                audio_embeddings.c.catalog_id == cid,
+                                                audio_embeddings.c.user_id == user_id,
+                                            )
+                                        )
+                                    )
+                                    if existing.first():
+                                        await conn.execute(
+                                            sa.update(audio_embeddings)
+                                            .where(sa.and_(
+                                                audio_embeddings.c.catalog_id == cid,
+                                                audio_embeddings.c.user_id == user_id,
+                                            ))
+                                            .values(
+                                                clap_embedding=clap,
+                                                mert_embedding=mert,
+                                            )
+                                        )
+                                    else:
+                                        await conn.execute(
+                                            audio_embeddings.insert().values(
+                                                catalog_id=cid,
+                                                user_id=user_id,
+                                                embedding=[],
+                                                clap_embedding=clap,
+                                                mert_embedding=mert,
+                                            )
+                                        )
+                                stats["gpu_enriched"] += 1
+                except Exception:
+                    logger.warning(
+                        "Phase A2 GPU batch enrichment failed", exc_info=True,
+                    )
+                logger.info(
+                    "Phase A2 done: %d CLAP/MERT embeddings stored",
+                    stats["gpu_enriched"],
+                )
 
     # ── Phase B: Last.fm tags (fast, batch cache check first) ──────
     if lastfm_api_key:
@@ -141,54 +238,14 @@ async def enrich_tracks(
                 stats["tags"] = sum(1 for r in tag_results if r is True)
                 logger.info("Phase B done: %d tags added", stats["tags"])
 
-    # ── Phase C: MusicBrainz credits (slow — 1 req/s) ─────────────
-    isrc_tracks = [t for t in tracks if t.get("isrc")]
-    if isrc_tracks:
-        # Batch check which ISRCs already have credits
-        from musicmind.db.schema import kg_relationships
-        all_mbids = [f"isrc:{t['isrc'].upper()}" for t in isrc_tracks]
-        cached_mbids: set[str] = set()
-        for i in range(0, len(all_mbids), 500):
-            chunk = all_mbids[i:i + 500]
-            async with engine.begin() as conn:
-                result = await conn.execute(
-                    sa.select(sa.distinct(kg_relationships.c.source_mbid)).where(
-                        kg_relationships.c.source_mbid.in_(chunk)
-                    )
-                )
-                cached_mbids.update(row[0] for row in result)
-
-        uncached_credits = [
-            t for t in isrc_tracks
-            if f"isrc:{t['isrc'].upper()}" not in cached_mbids
-        ]
-
-        if uncached_credits:
-            logger.info(
-                "Phase C: %d tracks need credits (out of %d with ISRC)",
-                len(uncached_credits), len(isrc_tracks),
-            )
-            # MusicBrainz: 2 concurrent (their limit is ~1 req/s but we can
-            # pipeline the next request while processing the response)
-            credit_sem = asyncio.Semaphore(2)
-
-            async def _fetch_credit(track: dict) -> bool:
-                async with credit_sem:
-                    return await _enrich_credits_single(
-                        engine, track, _skip_cache_check=True,
-                    )
-
-            credit_results = await asyncio.gather(
-                *[_fetch_credit(t) for t in uncached_credits],
-                return_exceptions=True,
-            )
-            stats["credits"] = sum(1 for r in credit_results if r is True)
-            logger.info("Phase C done: %d credits added", stats["credits"])
+    # Phase C (MusicBrainz credits) removed — kg_relationships data was collected
+    # but never consumed by the scoring engine. CLAP/MERT embeddings via Modal
+    # provide superior signal for recommendation quality.
 
     logger.info(
-        "Pipeline complete: %d audio, %d tags, %d credits "
+        "Pipeline complete: %d audio, %d gpu, %d tags "
         "(%d skipped, %d failed) out of %d tracks",
-        audio_done, stats["tags"], stats["credits"],
+        audio_done, stats["gpu_enriched"], stats["tags"],
         stats["skipped"], stats["failed"], stats["total"],
     )
     return stats
