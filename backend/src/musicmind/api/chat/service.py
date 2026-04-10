@@ -23,6 +23,9 @@ from musicmind.api.chat.system_prompt import build_system_prompt
 from musicmind.api.chat.tools import TOOL_DEFINITIONS, TOOL_EXECUTORS
 from musicmind.db.schema import chat_conversations, chat_messages
 
+# uuid7 is Python 3.14+ — fall back to uuid4 on 3.13 (Docker/Essentia compat)
+_uuid7 = getattr(uuid, "uuid7", uuid.uuid4)
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +113,7 @@ class ChatService:
         # 2. Conversation load/create
         conversation_messages: list[dict[str, Any]] = []
         if conversation_id is None:
-            conversation_id = str(uuid.uuid7())
+            conversation_id = str(_uuid7())
             title = message[:50]
             await self._create_conversation(engine, conversation_id, user_id, title)
             yield {"event": "conversation_id", "data": {"id": conversation_id}}

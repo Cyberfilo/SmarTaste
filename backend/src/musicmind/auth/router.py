@@ -24,6 +24,9 @@ from musicmind.auth.service import (
 )
 from musicmind.db.schema import refresh_tokens, users
 
+# uuid7 is Python 3.14+ — fall back to uuid4 on 3.13 (Docker/Essentia compat)
+_uuid7 = getattr(uuid, "uuid7", uuid.uuid4)
+
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ async def signup(request: Request, response: Response, body: SignupRequest) -> d
     settings = request.app.state.settings
 
     password_hash = hash_password(body.password)
-    user_id = str(uuid.uuid7())
+    user_id = str(_uuid7())
     display_name = body.display_name or body.email.split("@")[0]
 
     access_token = create_access_token(
