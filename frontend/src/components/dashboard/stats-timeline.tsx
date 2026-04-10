@@ -106,7 +106,7 @@ export function StatsTimeline() {
                     {song.artwork_url ? (
                       <img
                         src={String(song.artwork_url)}
-                        alt=""
+                        alt={`${String(song.name)} by ${String(song.artist_name)}`}
                         className="h-10 w-10 shrink-0 rounded object-cover"
                         loading="lazy"
                       />
