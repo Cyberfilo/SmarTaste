@@ -277,7 +277,7 @@ audio_features_cache = sa.Table(
     sa.Column("scale", sa.Text, nullable=True),
     sa.Column("instrumentalness", sa.Float, nullable=True),
     sa.Column("loudness", sa.Float, nullable=True),
-    # Per-field provenance: {"tempo": "deezer", "energy": "soundstat", ...}
+    # Per-field provenance: {"tempo": "essentia", "energy": "essentia", ...}
     sa.Column("feature_source", sa.JSON, server_default="{}"),
     sa.Column(
         "analyzed_at",

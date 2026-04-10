@@ -3,6 +3,8 @@
 Backend-managed indexing that runs when a user connects a service.
 All results are user-scoped (stored with user_id).
 
+Enrichment uses Essentia (local CPU) + Modal GPU for embeddings.
+
 6-step pipeline (in priority order):
   1. Library songs — enrich all songs in the user's library
   2. Top artist — 100% discography
@@ -332,16 +334,12 @@ async def _enrich_library_songs(
 
     tracks = _rows_to_track_dicts(rows)
 
-    # Full pipeline: audio + GPU embeddings + tags
+    # Full pipeline: Essentia audio + GPU embeddings
     r = await enrich_tracks(
         engine, tracks, user_id=user_id,
-        lastfm_api_key=settings.lastfm_api_key,
         modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
     )
-    enriched = (
-        r.get("deezer", 0) + r.get("reccobeats", 0)
-        + r.get("soundstat", 0) + r.get("essentia", 0)
-    )
+    enriched = r.get("essentia", 0)
 
     return enriched
 
@@ -474,10 +472,9 @@ async def _fetch_and_enrich_discography(
     if not new_tracks:
         return 0
 
-    # Full pipeline: audio + GPU embeddings + tags
+    # Full pipeline: Essentia audio + GPU embeddings
     await enrich_tracks(
         engine, new_tracks, user_id=user_id,
-        lastfm_api_key=settings.lastfm_api_key,
         modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
     )
 
@@ -493,8 +490,8 @@ async def _suggest_and_enrich_artists(
     ranked_artists: list[str],
     max_artists: int,
 ) -> int:
-    """Find and enrich suggested artists from feats and similar tracks."""
-    from musicmind.db.schema import lastfm_similar_tracks, song_metadata_cache
+    """Find and enrich suggested artists from featured collaborations."""
+    from musicmind.db.schema import song_metadata_cache
     from musicmind.engine.profile import parse_artists
 
     library_set = {a.lower() for a in ranked_artists}
@@ -521,27 +518,6 @@ async def _suggest_and_enrich_artists(
             key = name.strip().lower()
             if key and key not in library_set and len(key) > 1:
                 candidates[key] = candidates.get(key, 0) + weight * 2
-
-    # Source 2: Last.fm similar tracks' artists (filtered to THIS user's artists)
-    if ranked_artists:
-        async with engine.begin() as conn:
-            try:
-                result = await conn.execute(
-                    sa.select(
-                        lastfm_similar_tracks.c.similar_artist,
-                        sa.func.sum(lastfm_similar_tracks.c.similarity_score).label("score"),
-                    ).where(
-                        lastfm_similar_tracks.c.source_artist.in_(ranked_artists)
-                    ).group_by(lastfm_similar_tracks.c.similar_artist)
-                    .order_by(sa.text("score DESC"))
-                    .limit(max_artists * 3)
-                )
-                for row in result:
-                    key = row.similar_artist.strip().lower()
-                    if key and key not in library_set:
-                        candidates[key] = candidates.get(key, 0) + (row.score or 0)
-            except Exception:
-                logger.debug("Last.fm similar lookup failed for suggested artists")
 
     # Rank and cap
     sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1])
@@ -586,116 +562,3 @@ def _rows_to_track_dicts(rows) -> list[dict[str, Any]]:
     return tracks
 
 
-async def _backfill_tags_credits(
-    engine,
-    settings,
-    tracks: list[dict[str, Any]],
-) -> None:
-    """Run Last.fm tags + MusicBrainz credits on a batch of tracks.
-
-    Uses batch gap detection (single query) instead of per-song checks,
-    and concurrent Last.fm API calls (5 at a time) for speed.
-    """
-    import asyncio
-
-    from musicmind.db.schema import kg_relationships, lastfm_tags_cache
-
-    # ── Last.fm tags: batch gap detection ────────────────────────
-    if settings.lastfm_api_key:
-        from musicmind.engine.enrichment.lastfm import (
-            fetch_artist_tags,
-            fetch_track_tags,
-        )
-
-        # Build entity IDs for all tracks
-        track_eids: list[tuple[dict, str]] = []
-        for t in tracks:
-            if t.get("artist_name") and t.get("name"):
-                eid = f"track:{t['artist_name'].lower()}:{t['name'].lower()}"
-                track_eids.append((t, eid))
-
-        if track_eids:
-            # Single query: find which entity_ids already exist
-            all_eids = [eid for _, eid in track_eids]
-            async with engine.begin() as conn:
-                result = await conn.execute(
-                    sa.select(lastfm_tags_cache.c.entity_id).where(
-                        lastfm_tags_cache.c.entity_id.in_(all_eids)
-                    )
-                )
-                cached_eids = {row.entity_id for row in result}
-
-            uncached = [
-                (t, eid) for t, eid in track_eids if eid not in cached_eids
-            ]
-
-            if uncached:
-                sem = asyncio.Semaphore(5)
-
-                async def _fetch_and_store_tags(t: dict, eid: str) -> None:
-                    async with sem:
-                        try:
-                            tags = await fetch_track_tags(
-                                settings.lastfm_api_key,
-                                t["artist_name"], t["name"],
-                            )
-                            if not tags:
-                                tags = await fetch_artist_tags(
-                                    settings.lastfm_api_key,
-                                    t["artist_name"],
-                                )
-                            if tags:
-                                async with engine.begin() as conn:
-                                    await conn.execute(
-                                        sa.text(
-                                            "INSERT INTO lastfm_tags_cache"
-                                            " (entity_type, entity_id, tags)"
-                                            " VALUES (:t, :eid, :tags)"
-                                            " ON CONFLICT (entity_type, entity_id)"
-                                            " DO UPDATE SET tags = :tags"
-                                        ),
-                                        {
-                                            "t": "track",
-                                            "eid": eid,
-                                            "tags": json.dumps(tags),
-                                        },
-                                    )
-                        except Exception:
-                            logger.debug(
-                                "Tag fetch failed: %s - %s",
-                                t.get("artist_name"), t.get("name"),
-                            )
-
-                await asyncio.gather(
-                    *[_fetch_and_store_tags(t, eid) for t, eid in uncached]
-                )
-
-    # ── MusicBrainz credits: batch gap detection ─────────────────
-    isrc_tracks = [
-        (t, f"isrc:{t['isrc'].upper()}")
-        for t in tracks if t.get("isrc")
-    ]
-    if isrc_tracks:
-        all_mbids = [mbid for _, mbid in isrc_tracks]
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(sa.distinct(kg_relationships.c.source_mbid)).where(
-                    kg_relationships.c.source_mbid.in_(all_mbids)
-                )
-            )
-            cached_mbids = {row[0] for row in result}
-
-        uncached_isrc = [
-            (t, mbid) for t, mbid in isrc_tracks if mbid not in cached_mbids
-        ]
-
-        from musicmind.engine.enrichment.musicbrainz_credits import (
-            fetch_recording_credits,
-        )
-
-        for t, _source_mbid in uncached_isrc:
-            try:
-                # fetch_recording_credits handles its own storage
-                await fetch_recording_credits(t["isrc"], engine=engine)
-            except Exception:
-                logger.debug("MusicBrainz credit fetch failed for ISRC %s", t.get("isrc"))
