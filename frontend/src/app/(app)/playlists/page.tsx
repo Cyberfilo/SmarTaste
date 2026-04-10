@@ -99,7 +99,7 @@ function PlaylistGrid({
             {pl.artwork_url ? (
               <img
                 src={pl.artwork_url}
-                alt=""
+                alt={`${pl.name} cover art`}
                 className="h-14 w-14 shrink-0 rounded-lg object-cover"
                 loading="lazy"
               />
@@ -162,7 +162,7 @@ function PlaylistDetail({
           {playlist.artwork_url ? (
             <img
               src={playlist.artwork_url}
-              alt=""
+              alt={`${playlist.name} cover art`}
               className="h-20 w-20 shrink-0 rounded-xl object-cover sm:h-28 sm:w-28"
             />
           ) : (
@@ -222,7 +222,7 @@ function PlaylistDetail({
                 {track.artwork_url ? (
                   <img
                     src={track.artwork_url}
-                    alt=""
+                    alt={`${track.name} by ${track.artist_name}`}
                     className="h-9 w-9 shrink-0 rounded object-cover"
                     loading="lazy"
                   />
@@ -288,7 +288,7 @@ function PlaylistDetail({
                   {rec.artwork_url ? (
                     <img
                       src={rec.artwork_url}
-                      alt=""
+                      alt={`${rec.name} by ${rec.artist_name}`}
                       className="h-10 w-10 shrink-0 rounded object-cover"
                       loading="lazy"
                     />

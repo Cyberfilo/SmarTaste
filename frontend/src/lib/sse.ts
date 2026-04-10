@@ -68,9 +68,9 @@ function parseSSEEvents(
       currentData += line.slice(5).trim();
       hasData = true;
     } else if (line === "" && currentEvent && hasData) {
-      // Event boundary -- dispatch
+      // Event boundary -- dispatch (hasData ensures empty data: lines are valid)
       try {
-        const parsed = JSON.parse(currentData);
+        const parsed = currentData ? JSON.parse(currentData) : {};
         switch (currentEvent) {
           case "text":
           case "text_delta":
