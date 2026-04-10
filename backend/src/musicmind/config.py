@@ -89,10 +89,21 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "MUSICMIND_", "env_file": ".env"}
 
     def model_post_init(self, __context: object) -> None:
-        """Fix database URLs after loading from env.
+        """Validate required secrets and fix database URLs after loading from env.
 
         Railway/Heroku provide postgresql:// but asyncpg needs postgresql+asyncpg://.
         """
+        if not self.sandbox and not self.staging:
+            if not self.fernet_key:
+                raise ValueError(
+                    "MUSICMIND_FERNET_KEY is required in production. "
+                    "Generate with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+                )
+            if not self.jwt_secret_key:
+                raise ValueError(
+                    "MUSICMIND_JWT_SECRET_KEY is required in production. "
+                    "Generate with: python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+                )
         if self.database_url.startswith("postgresql://"):
             object.__setattr__(
                 self,

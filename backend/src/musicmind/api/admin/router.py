@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
-ADMIN_SECRET = os.environ.get("MUSICMIND_ADMIN_SECRET", "")
+ADMIN_SECRET = os.environ.get("MUSICMIND_ADMIN_SECRET") or None
 
 
 async def require_admin(request: Request) -> None:
