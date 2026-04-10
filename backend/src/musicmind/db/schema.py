@@ -610,7 +610,7 @@ generated_playlists = sa.Table(
     sa.Column(
         "taste_snapshot_id",
         sa.Integer,
-        sa.ForeignKey("taste_profile_snapshots.id"),
+        sa.ForeignKey("taste_profile_snapshots.id", ondelete="SET NULL"),
         nullable=True,
     ),
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
@@ -769,3 +769,15 @@ playlist_items = sa.Table(
     ),
     sa.Column("added_by", sa.Text, server_default="user"),  # user, ai_expand, ai_improve
 )
+
+# ── Performance Indexes ─────────────────────────────────────────────────────
+# Composite PK tables index only the first column; queries filtering by
+# user_id alone need explicit indexes to avoid full table scans.
+
+sa.Index("ix_song_metadata_cache_user_id", song_metadata_cache.c.user_id)
+sa.Index("ix_audio_features_cache_user_id", audio_features_cache.c.user_id)
+sa.Index("ix_artist_cache_user_id", artist_cache.c.user_id)
+sa.Index("ix_play_count_proxy_user_id", play_count_proxy.c.user_id)
+sa.Index("ix_sound_classification_cache_user_id", sound_classification_cache.c.user_id)
+sa.Index("ix_audio_embeddings_user_id", audio_embeddings.c.user_id)
+sa.Index("ix_lastfm_tags_cache_entity_id", lastfm_tags_cache.c.entity_id)
