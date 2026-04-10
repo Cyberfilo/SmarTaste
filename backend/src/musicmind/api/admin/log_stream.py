@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # Ring buffer of recent log entries (last 500)
 _log_buffer: deque[dict[str, Any]] = deque(maxlen=500)
 
+# Counter for dropped log entries (slow SSE consumers)
+_dropped_logs: int = 0
+
 # Connected admin SSE clients get notified of new logs
 _subscribers: list[asyncio.Queue[dict[str, Any]]] = []
 
@@ -38,7 +41,15 @@ class AdminLogHandler(logging.Handler):
             try:
                 queue.put_nowait(entry)
             except asyncio.QueueFull:
-                pass  # Drop if subscriber is slow
+                global _dropped_logs
+                _dropped_logs += 1
+                if _dropped_logs % 100 == 0:
+                    # Can't use logger here (recursive), write to stderr directly
+                    import sys
+                    print(
+                        f"WARNING: {_dropped_logs} admin log entries dropped (slow consumer)",
+                        file=sys.stderr,
+                    )
 
 
 def install_admin_handler() -> None:
