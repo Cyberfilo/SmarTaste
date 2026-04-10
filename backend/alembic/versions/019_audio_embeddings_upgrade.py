@@ -39,7 +39,7 @@ def upgrade() -> None:
         sa.Column("isrc", sa.Text, primary_key=True),
         sa.Column("embedding", sa.JSON, nullable=False, server_default="[]"),
         sa.Column("embedding_dim", sa.Integer, nullable=False, server_default="1280"),
-        sa.Column("model_version", sa.Text, server_default="'discogs-effnet-1280'"),
+        sa.Column("model_version", sa.Text, server_default="discogs-effnet-1280"),
         sa.Column(
             "analyzed_at",
             sa.DateTime(timezone=True),
