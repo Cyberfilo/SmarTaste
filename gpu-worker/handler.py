@@ -30,7 +30,7 @@ image = (
 )
 
 
-@app.cls(image=image, gpu="A100", timeout=300, keep_warm=0)
+@app.cls(image=image, gpu="A100", timeout=300, min_containers=0)
 class AudioEnricher:
     """GPU-accelerated audio enrichment with model caching."""
 
