@@ -311,7 +311,28 @@ async def _enrich_single_track(
             if row and row.preview_url:
                 preview_url = row.preview_url
 
-    # No preview URL → permanently mark as failed (no external API fallback)
+    # Fallback: search Deezer for preview URL if none from service
+    if not preview_url:
+        try:
+            from musicmind.engine.enrichment.deezer import search_preview_url
+            preview_url = await search_preview_url(
+                name=track.get("name", ""),
+                artist_name=track.get("artist_name", ""),
+                isrc=isrc or None,
+            )
+            if preview_url:
+                # Cache the Deezer URL for future use
+                async with engine.begin() as conn:
+                    from musicmind.db.schema import song_metadata_cache as smc
+                    await conn.execute(
+                        sa.update(smc)
+                        .where(sa.and_(smc.c.catalog_id == catalog_id))
+                        .values(preview_url=preview_url)
+                    )
+        except Exception:
+            logger.debug("Deezer preview fallback failed for %s", catalog_id)
+
+    # No preview URL from any source → permanently mark as failed
     if not preview_url:
         await _store_features(
             engine, catalog_id, user_id,
