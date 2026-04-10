@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     # SoundStat: paid API (0.01 EUR/track), used only for specific recommendations
     soundstat_api_key: str | None = None
 
+    # OpenAI API key for AI-generated track captions and recommendation explanations
+    openai_api_key: str | None = None
+
     # Staging mode: auto-resets DB on startup (clean slate for testing).
     # Set MUSICMIND_STAGING=true on the staging Railway environment.
     staging: bool = False
