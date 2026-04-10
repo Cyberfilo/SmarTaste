@@ -30,8 +30,6 @@ from musicmind.api.taste.fetch import (
     fetch_spotify_top_tracks,
 )
 from musicmind.db.schema import (
-    listening_history,
-    play_count_proxy,
     service_connections,
     song_metadata_cache,
     taste_profile_snapshots,
@@ -537,78 +535,15 @@ class TasteService:
     async def _cache_history(
         self, engine, *, user_id: str, service: str, history: list[dict]
     ) -> None:
-        """Cache listening history entries and update play count proxy.
+        """No-op: listening_history and play_count_proxy tables were removed.
 
-        Smart delta detection: compares current recently-played list against
-        existing play_count_proxy to detect replays. Songs that reappear
-        across multiple polling snapshots get their seen_count incremented.
+        Previously cached history entries and updated play count proxy.
+        Kept as a stub so callers don't break.
         """
-        # Get existing play count data for delta comparison
-        existing_songs: dict[str, int] = {}
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(
-                    play_count_proxy.c.song_id,
-                    play_count_proxy.c.seen_count,
-                ).where(play_count_proxy.c.user_id == user_id)
-            )
-            for row in result:
-                existing_songs[row.song_id] = row.seen_count
-
-        async with engine.begin() as conn:
-            for entry in history:
-                song_id = entry.get("song_id", "")
-                if not song_id:
-                    continue
-
-                await conn.execute(
-                    listening_history.insert().values(
-                        user_id=user_id,
-                        song_id=song_id,
-                        song_name=entry.get("song_name", ""),
-                        artist_name=entry.get("artist_name", ""),
-                        album_name=entry.get("album_name", ""),
-                        genre_names=json.dumps(entry.get("genre_names", [])),
-                        duration_ms=entry.get("duration_ms"),
-                        service_source=service,
-                    )
-                )
-
-                # Update play count proxy — upsert seen_count
-                existing = await conn.execute(
-                    sa.select(play_count_proxy.c.seen_count).where(
-                        sa.and_(
-                            play_count_proxy.c.song_id == song_id,
-                            play_count_proxy.c.user_id == user_id,
-                        )
-                    )
-                )
-                row = existing.first()
-                now = datetime.now(UTC)
-                if row:
-                    await conn.execute(
-                        play_count_proxy.update()
-                        .where(
-                            sa.and_(
-                                play_count_proxy.c.song_id == song_id,
-                                play_count_proxy.c.user_id == user_id,
-                            )
-                        )
-                        .values(
-                            seen_count=row.seen_count + 1,
-                            last_seen=now,
-                        )
-                    )
-                else:
-                    await conn.execute(
-                        play_count_proxy.insert().values(
-                            song_id=song_id,
-                            user_id=user_id,
-                            seen_count=1,
-                            first_seen=now,
-                            last_seen=now,
-                        )
-                    )
+        logger.debug(
+            "Skipping history cache for user %s (%d entries) — tables removed",
+            user_id, len(history),
+        )
 
     async def _apply_engagement_weights(
         self,
@@ -617,63 +552,13 @@ class TasteService:
         user_id: str,
         songs: list[dict],
     ) -> list[dict]:
-        """Weight songs by observed play frequency from play_count_proxy.
+        """Return songs with uniform weight (1.0 each).
 
-        Songs seen multiple times in recently-played polls are duplicated
-        proportionally. A song seen 5 times gets 5x the profile weight of
-        one seen once. Capped at 10x to prevent a single song from
-        dominating the entire profile.
-
-        Also applies recency boost: songs with last_seen in the past 7 days
-        get an extra 2x multiplier on top of their seen_count.
+        play_count_proxy table was removed. Previously weighted songs by
+        observed play frequency. Now returns the input list unchanged so
+        all songs contribute equally to the profile.
         """
-        catalog_ids = [s.get("catalog_id", "") for s in songs if s.get("catalog_id")]
-        if not catalog_ids:
-            return songs
-
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(play_count_proxy).where(
-                    sa.and_(
-                        play_count_proxy.c.user_id == user_id,
-                        play_count_proxy.c.song_id.in_(catalog_ids),
-                    )
-                )
-            )
-            rows = result.fetchall()
-
-        if not rows:
-            return songs
-
-        # Build play count map: catalog_id → (seen_count, last_seen)
-        play_map: dict[str, tuple[int, datetime | None]] = {}
-        for row in rows:
-            play_map[row.song_id] = (row.seen_count, row.last_seen)
-
-        now = datetime.now(UTC)
-        week_ago = now - timedelta(days=7)
-        engaged: list[dict] = []
-
-        for song in songs:
-            cid = song.get("catalog_id", "")
-            play_data = play_map.get(cid)
-
-            if play_data:
-                seen_count, last_seen = play_data
-                multiplier = min(10, seen_count)
-
-                # Recency boost: actively playing in last 7 days
-                if last_seen and last_seen.tzinfo is None:
-                    last_seen = last_seen.replace(tzinfo=UTC)
-                if last_seen and last_seen > week_ago:
-                    multiplier = min(10, multiplier * 2)
-
-                for _ in range(max(1, multiplier)):
-                    engaged.append(song)
-            else:
-                engaged.append(song)
-
-        return engaged
+        return songs
 
     async def _apply_calibration_weights(
         self,

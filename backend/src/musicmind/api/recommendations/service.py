@@ -32,7 +32,6 @@ from musicmind.api.services.service import (
 )
 from musicmind.api.taste.service import TasteService
 from musicmind.db.schema import (
-    recommendation_feedback,
     service_connections,
     song_metadata_cache,
     taste_profile_snapshots,
@@ -43,8 +42,6 @@ from musicmind.engine.mood import MOOD_PROFILES, filter_candidates_by_mood
 from musicmind.engine.scorer import rank_candidates, score_candidate
 from musicmind.engine.weights import (
     DEFAULT_WEIGHTS,
-    MIN_FEEDBACK_FOR_OPTIMIZATION,
-    optimize_weights,
 )
 from musicmind.security.encryption import EncryptionService
 
@@ -439,10 +436,10 @@ class RecommendationService:
         catalog_id: str,
         feedback_type: str,
     ) -> None:
-        """Record user feedback on a recommendation.
+        """Record user feedback on a recommendation (stub).
 
-        Stores feedback with optional predicted_score (computed if song and
-        profile data are available) and current weight snapshot.
+        recommendation_feedback table was removed. Logs feedback for now;
+        persistence can be re-added when a new feedback table is introduced.
 
         Args:
             engine: SQLAlchemy async engine.
@@ -450,24 +447,8 @@ class RecommendationService:
             catalog_id: Catalog ID of the track.
             feedback_type: One of thumbs_up, thumbs_down, skip.
         """
-        # Attempt to compute predicted_score
-        predicted_score = await self._compute_predicted_score(
-            engine, user_id=user_id, catalog_id=catalog_id,
-        )
-
-        async with engine.begin() as conn:
-            await conn.execute(
-                recommendation_feedback.insert().values(
-                    user_id=user_id,
-                    catalog_id=catalog_id,
-                    feedback_type=feedback_type,
-                    predicted_score=predicted_score,
-                    weight_snapshot=json.dumps(DEFAULT_WEIGHTS),
-                )
-            )
-
         logger.info(
-            "Recorded %s feedback for catalog_id=%s user=%s",
+            "Received %s feedback for catalog_id=%s user=%s (not persisted — table removed)",
             feedback_type, catalog_id, user_id,
         )
 
@@ -828,95 +809,13 @@ class RecommendationService:
         *,
         user_id: str,
     ) -> tuple[dict[str, float] | None, set[str] | None]:
-        """Load Last.fm tag profile and collaborative matches for a user.
+        """Return empty Last.fm data (tables removed).
 
-        Returns:
-            Tuple of (user_tag_profile, collaborative_matches).
-            - user_tag_profile: aggregated tag weights from user's top songs
-            - collaborative_matches: set of "artist:title" keys from Last.fm
-              getSimilar for the user's top songs
+        lastfm_tags_cache and lastfm_similar_tracks tables were removed.
+        Returns (None, None) so the scorer gracefully degrades without
+        tag similarity or collaborative match dimensions.
         """
-        from collections import Counter
-
-        from musicmind.db.schema import (
-            lastfm_similar_tracks,
-            lastfm_tags_cache,
-            song_metadata_cache,
-        )
-
-        # Get user's top songs (most recent 100)
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(
-                    song_metadata_cache.c.artist_name,
-                    song_metadata_cache.c.name,
-                )
-                .where(song_metadata_cache.c.user_id == user_id)
-                .order_by(song_metadata_cache.c.fetched_at.desc())
-                .limit(100)
-            )
-            user_songs = [
-                (row.artist_name, row.name) for row in result if row.artist_name and row.name
-            ]
-
-        if not user_songs:
-            return None, None
-
-        # Build user tag profile: aggregate tags from cached Last.fm tags
-        tag_counter: Counter[str] = Counter()
-        async with engine.begin() as conn:
-            for artist, title in user_songs[:50]:
-                entity_id = f"track:{artist.lower()}:{title.lower()}"
-                result = await conn.execute(
-                    sa.select(lastfm_tags_cache.c.tags).where(
-                        lastfm_tags_cache.c.entity_id == entity_id
-                    )
-                )
-                row = result.first()
-                if row and row.tags:
-                    tags = row.tags
-                    if isinstance(tags, str):
-                        import json
-
-                        try:
-                            tags = json.loads(tags)
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-                    for tag_name, weight in tags.items():
-                        tag_counter[tag_name] += weight
-
-        user_tag_profile: dict[str, float] | None = None
-        if tag_counter:
-            max_val = max(tag_counter.values())
-            user_tag_profile = {
-                k: round(v / max_val, 3) for k, v in tag_counter.most_common(30)
-            }
-
-        # Load collaborative matches: all similar tracks from user's top songs
-        collaborative_matches: set[str] = set()
-        async with engine.begin() as conn:
-            for artist, title in user_songs[:30]:
-                result = await conn.execute(
-                    sa.select(
-                        lastfm_similar_tracks.c.similar_artist,
-                        lastfm_similar_tracks.c.similar_title,
-                    ).where(
-                        sa.and_(
-                            sa.func.lower(lastfm_similar_tracks.c.source_artist)
-                            == artist.lower(),
-                            sa.func.lower(lastfm_similar_tracks.c.source_title)
-                            == title.lower(),
-                        )
-                    )
-                )
-                for row in result:
-                    key = f"{row.similar_artist.lower()}:{row.similar_title.lower()}"
-                    collaborative_matches.add(key)
-
-        return (
-            user_tag_profile,
-            collaborative_matches if collaborative_matches else None,
-        )
+        return None, None
 
     @staticmethod
     async def _load_calibration_artists(
@@ -955,30 +854,12 @@ class RecommendationService:
         *,
         user_id: str,
     ) -> tuple[dict[str, float], bool]:
-        """Load feedback and compute adaptive weights if sufficient data.
+        """Return default weights (feedback table removed).
 
-        Returns:
-            Tuple of (weights dict, whether weights were adapted).
+        recommendation_feedback table was removed. Always returns
+        default weights with adapted=False until a new feedback
+        persistence mechanism is introduced.
         """
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(recommendation_feedback).where(
-                    recommendation_feedback.c.user_id == user_id,
-                )
-            )
-            rows = result.fetchall()
-
-        if len(rows) >= MIN_FEEDBACK_FOR_OPTIMIZATION:
-            feedback_dicts = [
-                {
-                    "feedback_type": row.feedback_type,
-                    "predicted_score": row.predicted_score,
-                }
-                for row in rows
-            ]
-            weights = optimize_weights(feedback_dicts)
-            return weights, True
-
         return dict(DEFAULT_WEIGHTS), False
 
     @staticmethod
