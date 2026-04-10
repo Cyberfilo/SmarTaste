@@ -3,11 +3,12 @@
 Provides per-user enrichment status with library vs worker breakdown,
 library vs discovered artist counts, and pipeline-level enrichment breakdown.
 
-Pipeline stages (current):
-1. Audio features — Essentia (local) or ReccoBeats (fallback)
-2. GPU embeddings — CLAP + MERT via Modal (if configured)
-3. AI captions — OpenAI-generated track descriptions
-4. Last.fm tags — crowd-sourced tags
+Pipeline stages (5-stage Essentia-first pipeline):
+1. Audio features — Essentia scalar features (energy, tempo, etc.)
+2. EffNet embeddings — Essentia 1280-dim embeddings
+3. GPU embeddings — CLAP 512-dim + MERT 768-dim
+4. AI captions — OpenAI-generated track descriptions
+5. Classifier labels — Essentia mood/genre/acousticness heads
 
 IMPORTANT: enriched counts must only count audio_features_cache rows where the
 catalog_id also exists in song_metadata_cache for that user. Otherwise orphaned
@@ -25,7 +26,6 @@ from musicmind.db.schema import (
     artist_cobweb,
     audio_embeddings,
     audio_features_cache,
-    lastfm_tags_cache,
     song_metadata_cache,
     user_indexing_status,
     users,
@@ -131,7 +131,57 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
                 "progress_total": row.progress_total,
             }
 
-        # ── Batch 5: Users ─────────────────────────────────────────
+        # ── Batch 5: Embedding counts per user ────────────────────
+        embed_stats = await conn.execute(
+            sa.select(
+                audio_embeddings.c.user_id,
+                sa.func.count().filter(
+                    sa.and_(
+                        audio_embeddings.c.embedding.isnot(None),
+                        sa.cast(audio_embeddings.c.embedding, sa.Text) != "[]",
+                    )
+                ).label("effnet"),
+                sa.func.count().filter(
+                    audio_embeddings.c.clap_embedding.isnot(None)
+                ).label("clap"),
+                sa.func.count().filter(
+                    audio_embeddings.c.mert_embedding.isnot(None)
+                ).label("mert"),
+            ).group_by(audio_embeddings.c.user_id)
+        )
+        embed_map: dict[str, dict] = {
+            row.user_id: {
+                "effnet": row.effnet,
+                "clap": row.clap,
+                "mert": row.mert,
+            }
+            for row in embed_stats
+        }
+
+        # ── Batch 6: AI caption + AI tag counts per user ──────────
+        ai_stats = await conn.execute(
+            sa.select(
+                song_metadata_cache.c.user_id,
+                sa.func.count().filter(
+                    sa.and_(
+                        song_metadata_cache.c.ai_caption.isnot(None),
+                        song_metadata_cache.c.ai_caption != "",
+                    )
+                ).label("ai_captions"),
+                sa.func.count().filter(
+                    song_metadata_cache.c.ai_tags.isnot(None)
+                ).label("ai_tags"),
+            ).group_by(song_metadata_cache.c.user_id)
+        )
+        ai_map: dict[str, dict] = {
+            row.user_id: {
+                "ai_captions": row.ai_captions,
+                "ai_tags": row.ai_tags,
+            }
+            for row in ai_stats
+        }
+
+        # ── Batch 7: Users ─────────────────────────────────────────
         user_result = await conn.execute(
             sa.select(users.c.id, users.c.email, users.c.display_name)
         )
@@ -151,6 +201,8 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
         library_artists = songs.get("library_artists", 0)
         enriched = enriched_map.get(uid, 0)
         cobweb = cobweb_map.get(uid, {"cobweb_total": 0, "cobweb_enriched": 0})
+        embeds = embed_map.get(uid, {"effnet": 0, "clap": 0, "mert": 0})
+        ai = ai_map.get(uid, {"ai_captions": 0, "ai_tags": 0})
 
         progress.append({
             "user_id": uid,
@@ -160,6 +212,11 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
             "worker_songs": total_songs - library_songs,
             "total_songs": total_songs,
             "enriched_songs": enriched,
+            "effnet_embeddings": embeds["effnet"],
+            "clap_embeddings": embeds["clap"],
+            "mert_embeddings": embeds["mert"],
+            "ai_captions": ai["ai_captions"],
+            "ai_tags": ai["ai_tags"],
             "library_artists": library_artists,
             "discovered_artists": unique_artists - library_artists,
             "unique_artists": unique_artists,
@@ -178,13 +235,14 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
 async def get_enrichment_breakdown(engine) -> dict[str, Any]:
     """Get pipeline-level enrichment breakdown across all songs.
 
-    Enrichment pipeline stages (4 active):
-    1. Audio features (audio_features_cache with energy IS NOT NULL)
-    2. GPU embeddings — CLAP + MERT (audio_embeddings with clap_embedding IS NOT NULL)
-    3. AI captions (song_metadata_cache with ai_caption IS NOT NULL)
-    4. Last.fm tags (lastfm_tags_cache with entity_type='track')
+    Enrichment pipeline stages (5-stage Essentia-first pipeline):
+    1. Audio features — Essentia scalar features (energy IS NOT NULL)
+    2. EffNet embeddings — Essentia 1280-dim (embedding IS NOT NULL and not empty)
+    3. GPU embeddings — CLAP + MERT (clap_embedding IS NOT NULL)
+    4. AI captions — OpenAI-generated descriptions (ai_caption IS NOT NULL)
+    5. Classifier labels — Essentia mood/genre heads (ai_tags IS NOT NULL)
 
-    Fully enriched = has all 4 stages complete.
+    Fully enriched = has all 5 stages complete.
     All counts restricted to songs that exist in song_metadata_cache.
     """
     async with engine.begin() as conn:
@@ -207,7 +265,7 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
             sa.distinct(song_metadata_cache.c.catalog_id)
         ).correlate(None)
 
-        # Songs with audio features (only those that still exist)
+        # Stage 1: Songs with audio features (Essentia scalars)
         audio_q = await conn.execute(
             sa.select(
                 sa.func.count(sa.distinct(audio_features_cache.c.catalog_id))
@@ -220,7 +278,21 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         )
         has_audio = audio_q.scalar() or 0
 
-        # Songs with GPU embeddings (CLAP + MERT via Modal)
+        # Stage 2: Songs with EffNet embeddings (1280-dim, non-empty)
+        effnet_q = await conn.execute(
+            sa.select(
+                sa.func.count(sa.distinct(audio_embeddings.c.catalog_id))
+            ).where(
+                sa.and_(
+                    audio_embeddings.c.embedding.isnot(None),
+                    sa.cast(audio_embeddings.c.embedding, sa.Text) != "[]",
+                    audio_embeddings.c.catalog_id.in_(existing_songs),
+                )
+            )
+        )
+        has_effnet = effnet_q.scalar() or 0
+
+        # Stage 3: Songs with GPU embeddings (CLAP + MERT)
         gpu_q = await conn.execute(
             sa.select(
                 sa.func.count(sa.distinct(audio_embeddings.c.catalog_id))
@@ -233,7 +305,7 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         )
         has_gpu = gpu_q.scalar() or 0
 
-        # Songs with AI captions
+        # Stage 4: Songs with AI captions (OpenAI)
         caption_q = await conn.execute(
             sa.select(sa.func.count()).where(
                 sa.and_(
@@ -244,18 +316,18 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         )
         has_captions = caption_q.scalar() or 0
 
-        # Songs with Last.fm tags
-        tags_q = await conn.execute(
-            sa.select(sa.func.count()).select_from(lastfm_tags_cache).where(
-                lastfm_tags_cache.c.entity_type == "track"
+        # Stage 5: Songs with classifier labels (Essentia heads)
+        labels_q = await conn.execute(
+            sa.select(sa.func.count()).where(
+                song_metadata_cache.c.ai_tags.isnot(None)
             )
         )
-        has_tags = tags_q.scalar() or 0
+        has_labels = labels_q.scalar() or 0
 
         unenriched = max(0, total_songs - has_audio)
 
-        # Fully enriched = all 4 stages complete (bounded by smallest count)
-        fully_enriched = min(has_audio, has_gpu, has_captions, has_tags)
+        # Fully enriched = all 5 stages complete (bounded by smallest count)
+        fully_enriched = min(has_audio, has_effnet, has_gpu, has_captions, has_labels)
         partial = max(0, has_audio - fully_enriched)
 
     pct = lambda n: round(n / total_songs * 100, 1) if total_songs > 0 else 0  # noqa: E731
@@ -270,9 +342,10 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         "fully_enriched_pct": pct(fully_enriched),
         "stages": {
             "audio_features": has_audio,
+            "effnet_embeddings": has_effnet,
             "gpu_embeddings": has_gpu,
             "ai_captions": has_captions,
-            "lastfm_tags": has_tags,
+            "classifier_labels": has_labels,
         },
     }
 
