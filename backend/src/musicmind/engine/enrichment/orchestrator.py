@@ -403,7 +403,7 @@ async def enrich_candidates(
         if isinstance(item, Exception):
             continue
         cid, result = item
-        if result in ("deezer", "reccobeats", "soundstat"):
+        if result in ("deezer", "reccobeats", "soundstat", "essentia"):
             features = await _get_existing_features(engine, cid, user_id)
             if features:
                 clean = {k: v for k, v in features.items()
@@ -528,21 +528,54 @@ async def _enrich_single_track(
         except Exception:
             logger.debug("Deezer enrichment failed for %s - %s", artist_name, name)
 
-    # Stage 2: ReccoBeats (upload preview)
+    # Stage 2: Local Essentia analysis (preferred) or ReccoBeats fallback
     if preview_url:
         try:
             audio_bytes = await _download_preview(preview_url)
             if audio_bytes:
-                recco_result = await _reccobeats_with_retry(audio_bytes)
-                del audio_bytes
-                if recco_result:
-                    if _merge_features(features, feature_source, recco_result, "reccobeats"):
-                        enriched_by = "reccobeats"
-        except Exception:
-            logger.debug("ReccoBeats enrichment failed for %s", catalog_id)
+                # Try Essentia first (local, fast, no API limits)
+                from musicmind.engine.audio.essentia_extractor import (
+                    is_essentia_available,
+                )
+                if is_essentia_available():
+                    try:
+                        from musicmind.engine.audio.essentia_extractor import (
+                            extract_all,
+                        )
+                        extracted, embedding = extract_all(audio_bytes)
+                        if extracted:
+                            scalar = extracted.to_scalar_dict()
+                            if _merge_features(
+                                features, feature_source, scalar, "essentia",
+                            ):
+                                enriched_by = "essentia"
+                        # Store embedding if extracted
+                        if embedding and len(embedding) >= 128:
+                            await _store_embedding(
+                                engine, catalog_id, user_id,
+                                embedding, isrc=isrc,
+                            )
+                    except Exception:
+                        logger.debug("Essentia failed for %s, trying ReccoBeats", catalog_id)
 
-    # Stage 3: SoundStat (paid, gap-fill)
-    if _missing_fields(features) and soundstat_api_key:
+                # Fallback: ReccoBeats (external API) if Essentia unavailable or failed
+                if enriched_by == "failed" or _missing_fields(features):
+                    try:
+                        recco_result = await _reccobeats_with_retry(audio_bytes)
+                        if recco_result:
+                            if _merge_features(
+                                features, feature_source, recco_result, "reccobeats",
+                            ):
+                                enriched_by = "reccobeats"
+                    except Exception:
+                        logger.debug("ReccoBeats fallback failed for %s", catalog_id)
+
+                del audio_bytes
+        except Exception:
+            logger.debug("Audio enrichment failed for %s", catalog_id)
+
+    # Stage 3: SoundStat (paid, gap-fill — only if Essentia unavailable)
+    if _missing_fields(features) and soundstat_api_key and enriched_by != "essentia":
         try:
             spotify_id = await _get_spotify_id(engine, track, isrc, service_source)
             if spotify_id:
@@ -863,6 +896,63 @@ async def _store_features(
             "feature_source": json.dumps(feature_source),
             "enriched_at": now, "analyzed_at": now,
         })
+
+
+async def _store_embedding(
+    engine: Any,
+    catalog_id: str,
+    user_id: str,
+    embedding: list[float],
+    *,
+    isrc: str = "",
+) -> None:
+    """Store embedding in per-user + global (ISRC) tables."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    dim = len(embedding)
+    model = f"discogs-effnet-{dim}"
+    emb_json = json.dumps(embedding)
+
+    # Per-user storage
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text(
+                "INSERT INTO audio_embeddings"
+                " (catalog_id, user_id, embedding, isrc, model_version,"
+                "  embedding_dim, analyzed_at)"
+                " VALUES (:cid, :uid, :emb, :isrc, :model, :dim, :now)"
+                " ON CONFLICT (catalog_id, user_id) DO UPDATE SET"
+                " embedding = :emb, model_version = :model,"
+                " embedding_dim = :dim, analyzed_at = :now"
+            ), {
+                "cid": catalog_id, "uid": user_id, "emb": emb_json,
+                "isrc": isrc, "model": model, "dim": dim, "now": now,
+            })
+    except Exception:
+        logger.debug("Failed to store per-user embedding for %s", catalog_id)
+
+    # Global ISRC storage
+    if isrc:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(
+                    "INSERT INTO audio_embeddings_global"
+                    " (isrc, embedding, embedding_dim, model_version, analyzed_at)"
+                    " VALUES (:isrc, :emb, :dim, :model, :now)"
+                    " ON CONFLICT (isrc) DO UPDATE SET"
+                    " embedding = CASE WHEN :dim > audio_embeddings_global.embedding_dim"
+                    "   THEN :emb ELSE audio_embeddings_global.embedding END,"
+                    " embedding_dim = GREATEST(:dim, audio_embeddings_global.embedding_dim),"
+                    " model_version = CASE WHEN :dim > audio_embeddings_global.embedding_dim"
+                    "   THEN :model ELSE audio_embeddings_global.model_version END,"
+                    " analyzed_at = :now"
+                ), {
+                    "isrc": isrc, "emb": emb_json,
+                    "dim": dim, "model": model, "now": now,
+                })
+        except Exception:
+            logger.debug("Failed to store global embedding for ISRC %s", isrc)
 
 
 async def _get_spotify_id(
