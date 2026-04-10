@@ -789,6 +789,7 @@ async def _fill_library_gaps(engine, settings) -> int:
                 "name": row.name or "",
                 "artist_name": row.artist_name or "",
                 "isrc": row.isrc or "",
+                "preview_url": getattr(row, "preview_url", "") or "",
                 "service_source": getattr(row, "service_source", ""),
                 "genre_names": genres,
             })

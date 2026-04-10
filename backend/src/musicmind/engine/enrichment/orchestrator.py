@@ -311,6 +311,14 @@ async def _enrich_single_track(
             if row and row.preview_url:
                 preview_url = row.preview_url
 
+    # No preview URL → permanently mark as failed (no external API fallback)
+    if not preview_url:
+        await _store_features(
+            engine, catalog_id, user_id,
+            {}, {"_status": "no_data_available", "_reason": "no_preview_url"}, isrc="",
+        )
+        return "failed"
+
     # Essentia analysis (local, no API limits)
     if preview_url:
         try:
