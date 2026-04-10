@@ -136,7 +136,6 @@ async def get_system_status(
     )
 
     engine = request.app.state.engine
-    settings = request.app.state.settings
 
     # Fast direct counts — no expensive per-user subqueries
     async with engine.begin() as conn:
