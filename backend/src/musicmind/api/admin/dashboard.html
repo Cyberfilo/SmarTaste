@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmarTaste Admin</title>
+<style>
+  :root { --bg: #0a0a0f; --card: #13131a; --border: #1e1e2e; --text: #e0e0e8; --dim: #6b6b80; --accent: #6366f1; --green: #22c55e; --yellow: #eab308; --red: #ef4444; --blue: #3b82f6; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 600; }
+  h2 { font-size: 15px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+  .header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+  .header .badge { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: var(--accent); color: white; }
+  .header .refresh { font-size: 12px; color: var(--dim); margin-left: auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .stat-card .label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .stat-card .sub { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  .pipeline { display: flex; flex-direction: column; gap: 12px; }
+  .stage { display: flex; align-items: center; gap: 12px; }
+  .stage .name { width: 160px; font-size: 13px; color: var(--dim); flex-shrink: 0; }
+  .stage .bar-bg { flex: 1; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .stage .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+  .stage .pct { width: 50px; text-align: right; font-size: 13px; font-weight: 600; }
+  .stage .count { width: 80px; text-align: right; font-size: 12px; color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 10px; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  tr:hover { background: rgba(99, 102, 241, 0.05); }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+  .tag-green { background: rgba(34, 197, 94, 0.15); color: var(--green); }
+  .tag-yellow { background: rgba(234, 179, 8, 0.15); color: var(--yellow); }
+  .tag-red { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+  .tag-blue { background: rgba(59, 130, 246, 0.15); color: var(--blue); }
+  .insights { display: flex; flex-direction: column; gap: 8px; }
+  .insight { padding: 10px 14px; border-radius: 8px; font-size: 13px; border-left: 3px solid; }
+  .insight-warning { background: rgba(234, 179, 8, 0.08); border-color: var(--yellow); }
+  .insight-critical { background: rgba(239, 68, 68, 0.08); border-color: var(--red); }
+  .insight-info { background: rgba(59, 130, 246, 0.08); border-color: var(--blue); }
+  .worker-status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-yellow { background: var(--yellow); }
+  .dot-dim { background: var(--dim); }
+  .empty { color: var(--dim); font-style: italic; padding: 20px; text-align: center; }
+  #auth-gate { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 60vh; gap: 16px; }
+  #auth-gate input { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 16px; color: var(--text); font-size: 14px; width: 300px; }
+  #auth-gate button { background: var(--accent); color: white; border: none; border-radius: 8px; padding: 10px 24px; font-size: 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div id="auth-gate">
+  <h1>SmarTaste Admin</h1>
+  <input type="password" id="secret-input" placeholder="Admin secret" autofocus>
+  <button onclick="authenticate()">Enter</button>
+</div>
+
+<div id="dashboard" style="display:none">
+  <div class="header">
+    <h1>SmarTaste Admin</h1>
+    <span class="badge" id="worker-badge">loading...</span>
+    <span class="refresh" id="last-refresh"></span>
+  </div>
+
+  <div class="grid" id="stats-grid"></div>
+
+  <div class="card">
+    <h2>Pipeline Stages</h2>
+    <div class="pipeline" id="pipeline"></div>
+  </div>
+
+  <div class="card">
+    <h2>Per-User Enrichment</h2>
+    <div id="user-table"></div>
+  </div>
+
+  <div class="card">
+    <h2>Insights</h2>
+    <div class="insights" id="insights"></div>
+  </div>
+
+  <div class="card">
+    <h2>Worker Status</h2>
+    <div id="worker-detail"></div>
+  </div>
+</div>
+
+<script>
+let SECRET = '';
+const API = '/api/admin';
+
+function authenticate() {
+  SECRET = document.getElementById('secret-input').value;
+  document.getElementById('auth-gate').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  refresh();
+  setInterval(refresh, 30000);
+}
+
+async function apiFetch(path) {
+  const r = await fetch(API + path, { headers: { 'x-admin-secret': SECRET }, credentials: 'include' });
+  if (r.status === 403) { document.getElementById('auth-gate').style.display = 'flex'; document.getElementById('dashboard').style.display = 'none'; return null; }
+  return r.ok ? r.json() : null;
+}
+
+async function refresh() {
+  const [stats, progress, breakdown, diagnostics, worker] = await Promise.all([
+    apiFetch('/status'), apiFetch('/progress'), apiFetch('/enrichment-breakdown'),
+    apiFetch('/diagnostics'), apiFetch('/worker-status'),
+  ]);
+  if (!stats) return;
+  document.getElementById('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  renderStats(stats);
+  renderPipeline(breakdown);
+  renderUsers(progress ? progress.users || progress : null);
+  renderInsights(diagnostics);
+  renderWorker(worker);
+}
+
+function renderStats(s) {
+  const items = [
+    { label: 'Users', value: s.total_users || 0 },
+    { label: 'Total Songs', value: (s.total_songs || 0).toLocaleString() },
+    { label: 'Enriched', value: `${s.enrichment_pct || 0}%`, sub: `${(s.total_enriched || 0).toLocaleString()} songs` },
+    { label: 'Connected', value: s.connected_users || 0 },
+    { label: 'Calibrated', value: s.calibrated_users || 0 },
+  ];
+  document.getElementById('stats-grid').innerHTML = items.map(i =>
+    `<div class="stat-card"><div class="label">${i.label}</div><div class="value">${i.value}</div>${i.sub ? `<div class="sub">${i.sub}</div>` : ''}</div>`
+  ).join('');
+}
+
+function renderPipeline(b) {
+  if (!b || !b.stages) { document.getElementById('pipeline').innerHTML = '<div class="empty">No data</div>'; return; }
+  const total = b.total || 1;
+  const stages = [
+    { name: 'Audio Features', key: 'audio_features', color: '#6366f1' },
+    { name: 'EffNet Embeddings', key: 'effnet_embeddings', color: '#8b5cf6' },
+    { name: 'GPU (CLAP+MERT)', key: 'gpu_embeddings', color: '#a855f7' },
+    { name: 'AI Captions', key: 'ai_captions', color: '#3b82f6' },
+    { name: 'Classifier Labels', key: 'classifier_labels', color: '#22c55e' },
+  ];
+  document.getElementById('pipeline').innerHTML = stages.map(s => {
+    const count = b.stages[s.key] || 0;
+    const pct = Math.round(count / total * 100);
+    return `<div class="stage">
+      <div class="name">${s.name}</div>
+      <div class="bar-bg"><div class="bar-fill" style="width:${pct}%;background:${s.color}"></div></div>
+      <div class="pct">${pct}%</div>
+      <div class="count">${count.toLocaleString()}/${total.toLocaleString()}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderUsers(users) {
+  if (!users || !users.length) { document.getElementById('user-table').innerHTML = '<div class="empty">No users with data</div>'; return; }
+  const headers = ['User','Library','Enriched','EffNet','CLAP','MERT','Captions','Tags','%'];
+  document.getElementById('user-table').innerHTML = `<table>
+    <tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr>
+    ${users.map(u => `<tr>
+      <td>${u.display_name || u.email}</td>
+      <td>${u.library_songs}</td>
+      <td>${u.enriched_songs}</td>
+      <td>${u.effnet_embeddings || 0}</td>
+      <td>${u.clap_embeddings || 0}</td>
+      <td>${u.mert_embeddings || 0}</td>
+      <td>${u.ai_captions || 0}</td>
+      <td>${u.ai_tags || 0}</td>
+      <td><span class="tag ${u.percentage >= 90 ? 'tag-green' : u.percentage >= 50 ? 'tag-yellow' : 'tag-red'}">${u.percentage}%</span></td>
+    </tr>`).join('')}
+  </table>`;
+}
+
+function renderInsights(d) {
+  if (!d || !d.insights || !d.insights.length) { document.getElementById('insights').innerHTML = '<div class="empty">No insights</div>'; return; }
+  document.getElementById('insights').innerHTML = d.insights.slice(0, 10).map(i =>
+    `<div class="insight insight-${i.level}"><strong>${i.user}:</strong> ${i.message}</div>`
+  ).join('');
+}
+
+function renderWorker(w) {
+  if (!w) { document.getElementById('worker-detail').innerHTML = '<div class="empty">Worker offline</div>'; return; }
+  const isActive = w.phase && w.phase !== 'idle';
+  document.getElementById('worker-badge').innerHTML = `<span class="dot ${isActive ? 'dot-green' : 'dot-dim'}"></span> ${w.phase || 'idle'}`;
+  document.getElementById('worker-badge').className = 'badge';
+  document.getElementById('worker-detail').innerHTML = `
+    <div class="worker-status"><span class="dot ${isActive ? 'dot-green' : 'dot-dim'}"></span>
+      <strong>Phase:</strong> ${w.phase || 'idle'} &nbsp;|&nbsp;
+      <strong>Cycle:</strong> ${w.cycle || 0} &nbsp;|&nbsp;
+      <strong>Detail:</strong> ${w.detail || '-'} &nbsp;|&nbsp;
+      <strong>Progress:</strong> ${w.progress_current || 0}/${w.progress_total || 0}
+    </div>`;
+}
+
+// Auto-auth if URL has ?secret= param
+const params = new URLSearchParams(location.search);
+if (params.get('secret')) { document.getElementById('secret-input').value = params.get('secret'); authenticate(); }
+</script>
+</body>
+</html>

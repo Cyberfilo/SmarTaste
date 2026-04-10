@@ -1,6 +1,7 @@
-"""Admin API endpoints — live logs, enrichment progress, system status.
+"""Admin API endpoints + static dashboard — enrichment progress, system status.
 
 Protected by ADMIN_SECRET header or is_admin user flag.
+Dashboard served at /admin as static HTML.
 """
 
 from __future__ import annotations
@@ -9,10 +10,11 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from starlette.responses import StreamingResponse
+from starlette.responses import HTMLResponse, StreamingResponse
 
 from musicmind.api.admin.log_stream import get_recent_logs, subscribe, unsubscribe
 from musicmind.api.admin.progress import (
@@ -25,6 +27,17 @@ from musicmind.db.schema import users
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+# Static dashboard served at /admin (outside /api/admin prefix)
+_DASHBOARD_HTML = (Path(__file__).parent / "dashboard.html").read_text()
+dashboard_router = APIRouter(tags=["admin"], include_in_schema=False)
+
+
+@dashboard_router.get("/admin")
+async def admin_dashboard() -> HTMLResponse:
+    """Serve the static admin dashboard."""
+    return HTMLResponse(_DASHBOARD_HTML)
+
 
 ADMIN_SECRET = os.environ.get("MUSICMIND_ADMIN_SECRET") or None
 
@@ -127,9 +140,8 @@ async def get_system_status(
     """Get system health + enrichment summary."""
     from musicmind import __version__
     from musicmind.db.schema import (
+        audio_embeddings,
         audio_features_cache,
-        audio_features_global,
-        listening_history,
         service_connections,
         song_metadata_cache,
         user_calibration,
@@ -143,15 +155,15 @@ async def get_system_status(
             sa.select(sa.func.count()).select_from(users)
         )).scalar() or 0
 
-        connections_count = (await conn.execute(
-            sa.select(sa.func.count()).select_from(service_connections)
+        connected_users = (await conn.execute(
+            sa.select(sa.func.count(sa.distinct(service_connections.c.user_id)))
         )).scalar() or 0
 
         total_songs = (await conn.execute(
             sa.select(sa.func.count()).select_from(song_metadata_cache)
         )).scalar() or 0
 
-        # Enriched = audio_features_cache rows that have a matching song
+        # Enriched = audio_features_cache rows with real features
         existing_ids = sa.select(song_metadata_cache.c.catalog_id).correlate(None)
         total_enriched = (await conn.execute(
             sa.select(sa.func.count()).select_from(audio_features_cache).where(
@@ -162,12 +174,10 @@ async def get_system_status(
             )
         )).scalar() or 0
 
-        global_cache_count = (await conn.execute(
-            sa.select(sa.func.count()).select_from(audio_features_global)
-        )).scalar() or 0
-
-        history_count = (await conn.execute(
-            sa.select(sa.func.count()).select_from(listening_history)
+        gpu_count = (await conn.execute(
+            sa.select(sa.func.count()).select_from(audio_embeddings).where(
+                audio_embeddings.c.clap_embedding.isnot(None)
+            )
         )).scalar() or 0
 
         calibrated_users = (await conn.execute(
@@ -176,16 +186,15 @@ async def get_system_status(
 
     return {
         "version": __version__,
-        "users": user_count,
-        "connections": connections_count,
+        "total_users": user_count,
+        "connected_users": connected_users,
         "calibrated_users": calibrated_users,
         "total_songs": total_songs,
         "total_enriched": total_enriched,
         "enrichment_pct": round(
             min(total_enriched / total_songs, 1.0) * 100, 1
         ) if total_songs > 0 else 0,
-        "global_isrc_cache": global_cache_count,
-        "listening_history_entries": history_count,
+        "gpu_embeddings": gpu_count,
     }
 
 
