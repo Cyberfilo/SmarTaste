@@ -224,6 +224,7 @@ taste_profile_snapshots = sa.Table(
     sa.Column("listening_hours_estimated", sa.Float, server_default="0.0"),
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
     sa.Column("audio_centroid", sa.JSON, server_default="{}"),
+    sa.Column("embedding_centroid", sa.JSON, nullable=True),
 )
 
 recommendation_feedback = sa.Table(
@@ -430,7 +431,8 @@ audio_embeddings = sa.Table(
     ),
     sa.Column("embedding", sa.JSON, nullable=False, server_default="[]"),
     sa.Column("isrc", sa.Text, nullable=True),
-    sa.Column("model_version", sa.Text, server_default="discogs-effnet-bs64"),
+    sa.Column("model_version", sa.Text, server_default="discogs-effnet-1280"),
+    sa.Column("embedding_dim", sa.Integer, server_default="128"),
     sa.Column(
         "analyzed_at",
         sa.DateTime(timezone=True),
@@ -438,6 +440,21 @@ audio_embeddings = sa.Table(
         server_default=sa.func.now(),
     ),
     sa.PrimaryKeyConstraint("catalog_id", "user_id"),
+)
+
+audio_embeddings_global = sa.Table(
+    "audio_embeddings_global",
+    metadata,
+    sa.Column("isrc", sa.Text, primary_key=True),
+    sa.Column("embedding", sa.JSON, nullable=False, server_default="[]"),
+    sa.Column("embedding_dim", sa.Integer, nullable=False, server_default="1280"),
+    sa.Column("model_version", sa.Text, server_default="discogs-effnet-1280"),
+    sa.Column(
+        "analyzed_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
 )
 
 # ── Knowledge Graph Tables ─────────────────────────────────────────────────
