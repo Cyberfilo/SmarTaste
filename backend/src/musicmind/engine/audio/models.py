@@ -33,6 +33,18 @@ class ExtractedFeatures:
     # Discogs-EffNet embedding (1,280-dim via ONNX, 128-dim via TF, or None)
     embedding: list[float] | None = None
 
+    # Classifier head outputs (populated from embedding when models available)
+    mood_aggressive: float | None = None
+    mood_happy: float | None = None
+    mood_party: float | None = None
+    mood_relaxed: float | None = None
+    mood_sad: float | None = None
+    voice_instrumental: float | None = None  # probability track is instrumental
+    mood_acoustic: float | None = None
+
+    # Genre tags (Discogs400 multi-label, tag -> probability)
+    genre_tags: dict[str, float] | None = None
+
     def to_scalar_dict(self) -> dict[str, float | None]:
         """Convert scalar features to audio_features_cache format."""
         return {
@@ -47,14 +59,23 @@ class ExtractedFeatures:
             "loudness": self.loudness,
             "key": self.key,
             "scale": self.scale,
+            # Classifier head outputs
+            "mood_aggressive": self.mood_aggressive,
+            "mood_happy": self.mood_happy,
+            "mood_party": self.mood_party,
+            "mood_relaxed": self.mood_relaxed,
+            "mood_sad": self.mood_sad,
+            "voice_instrumental": self.voice_instrumental,
+            "mood_acoustic": self.mood_acoustic,
         }
 
     def to_full_dict(self) -> dict[str, Any]:
-        """Full serialization including embedding."""
+        """Full serialization including embedding and genre tags."""
         d: dict[str, Any] = self.to_scalar_dict()
         d["arousal"] = self.arousal
         d["loudness_lufs"] = self.loudness_lufs
         d["embedding"] = self.embedding
+        d["genre_tags"] = self.genre_tags
         return d
 
     @classmethod
