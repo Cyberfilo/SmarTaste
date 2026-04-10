@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from musicmind.api.rate_limit import limiter
+from musicmind.api.rate_limit import SEARCH_LIMIT, limiter
 from musicmind.auth.dependencies import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def _get_service():
 
 
 @router.get("")
-@limiter.limit("30/minute")
+@limiter.limit(SEARCH_LIMIT)
 async def semantic_search(
     request: Request,
     q: str = Query(..., min_length=2, max_length=200, description="Search query"),

@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field
 
+from musicmind.api.rate_limit import SESSION_LIMIT, limiter
 from musicmind.auth.dependencies import get_current_user
 from musicmind.engine.session import session_manager
 
@@ -41,6 +42,7 @@ class SessionContextResponse(BaseModel):
 
 
 @router.post("/played", status_code=status.HTTP_200_OK)
+@limiter.limit(SESSION_LIMIT)
 async def record_played(
     request: Request,
     body: PlayedRequest,
@@ -79,7 +81,9 @@ async def record_played(
 
 
 @router.get("/context")
+@limiter.limit(SESSION_LIMIT)
 async def get_session_context(
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ) -> SessionContextResponse:
     """Get the current session context for the authenticated user."""
@@ -98,7 +102,9 @@ async def get_session_context(
 
 
 @router.delete("", status_code=status.HTTP_200_OK)
+@limiter.limit(SESSION_LIMIT)
 async def clear_session(
+    request: Request,
     current_user: dict = Depends(get_current_user),
 ) -> dict[str, str]:
     """Clear the user's current listening session."""

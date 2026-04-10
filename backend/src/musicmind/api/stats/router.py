@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
+from musicmind.api.rate_limit import STATS_LIMIT, limiter
 from musicmind.api.stats.schemas import (
     StatArtistEntry,
     StatGenreEntry,
@@ -28,6 +29,7 @@ VALID_PERIODS = ("month", "6months", "alltime")
 
 
 @router.get("/tracks")
+@limiter.limit(STATS_LIMIT)
 async def get_top_tracks(
     request: Request,
     period: str = Query(default="month"),
@@ -90,6 +92,7 @@ async def get_top_tracks(
 
 
 @router.get("/artists")
+@limiter.limit(STATS_LIMIT)
 async def get_top_artists(
     request: Request,
     period: str = Query(default="month"),
@@ -151,6 +154,7 @@ async def get_top_artists(
 
 
 @router.get("/genres")
+@limiter.limit(STATS_LIMIT)
 async def get_top_genres(
     request: Request,
     period: str = Query(default="month"),
@@ -212,6 +216,7 @@ async def get_top_genres(
 
 
 @router.get("/timeline")
+@limiter.limit(STATS_LIMIT)
 async def get_timeline(
     request: Request,
     service: str | None = Query(default=None),

@@ -362,6 +362,7 @@ async def get_audio_traits(
 
 
 @router.get("/enrichment-status")
+@limiter.limit(TASTE_LIMIT)
 async def enrichment_status(
     request: Request,
     current_user: dict = Depends(get_current_user),
