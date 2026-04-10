@@ -217,3 +217,37 @@ async def store_embedding(
             )
 
     logger.info("Stored audio embedding for %s", catalog_id)
+
+
+async def load_embeddings_batch(
+    engine,
+    catalog_ids: list[str],
+    user_id: str,
+) -> dict[str, list[float]]:
+    """Batch-load embeddings for multiple tracks. Returns catalog_id -> vector."""
+    if not catalog_ids:
+        return {}
+
+    from musicmind.db.schema import audio_embeddings
+
+    result_map: dict[str, list[float]] = {}
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(
+                audio_embeddings.c.catalog_id,
+                audio_embeddings.c.embedding,
+            ).where(
+                sa.and_(
+                    audio_embeddings.c.catalog_id.in_(catalog_ids),
+                    audio_embeddings.c.user_id == user_id,
+                )
+            )
+        )
+        for row in result:
+            vector = row.embedding
+            if isinstance(vector, str):
+                vector = json.loads(vector)
+            if vector and len(vector) > 0:
+                result_map[row.catalog_id] = vector
+
+    return result_map
