@@ -196,6 +196,8 @@ def score_candidate(
     weights: dict[str, float] | None = None,
     audio_features: dict[str, Any] | None = None,
     user_audio_centroid: dict[str, float] | None = None,
+    candidate_embedding: list[float] | None = None,
+    user_embedding_centroid: list[float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     staleness_index: dict[str, dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
@@ -224,11 +226,14 @@ def score_candidate(
         candidate.get("genre_names", []), genre_vector
     )
 
-    # 3. Audio similarity
+    # 3. Audio similarity (hybrid: 70% embedding + 30% scalar when available)
     audio_sim = 0.5  # neutral default when no features available
-    if audio_features and user_audio_centroid:
-        from musicmind.engine.similarity import audio_feature_similarity
-        audio_sim = audio_feature_similarity(audio_features, user_audio_centroid)
+    if audio_features or candidate_embedding:
+        from musicmind.engine.similarity import combined_audio_similarity
+        audio_sim = combined_audio_similarity(
+            audio_features, user_audio_centroid,
+            candidate_embedding, user_embedding_centroid,
+        )
 
     # 4. Artist match — penalized if known artist but wrong genre
     artist_name = candidate.get("artist_name", "").lower()
@@ -386,6 +391,8 @@ def rank_candidates(
     weights: dict[str, float] | None = None,
     audio_features_map: dict[str, dict[str, Any]] | None = None,
     user_audio_centroid: dict[str, float] | None = None,
+    embedding_map: dict[str, list[float]] | None = None,
+    user_embedding_centroid: list[float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
     user_tag_profile: dict[str, float] | None = None,
@@ -400,6 +407,7 @@ def rank_candidates(
         return []
 
     af_map = audio_features_map or {}
+    emb_map = embedding_map or {}
     staleness_idx = _build_staleness_index(recent_recommendations or [])
 
     # Step 1: Precompute base scores for all candidates (no diversity penalty)
@@ -407,12 +415,15 @@ def rank_candidates(
     for c in candidates:
         # Get candidate's Last.fm tags if available
         c_tags = c.get("_lastfm_tags")
+        cid = c.get("catalog_id", "")
 
         scored = score_candidate(
             c, profile, already_selected=None,
             weights=weights,
-            audio_features=af_map.get(c.get("catalog_id", "")),
+            audio_features=af_map.get(cid),
             user_audio_centroid=user_audio_centroid,
+            candidate_embedding=emb_map.get(cid),
+            user_embedding_centroid=user_embedding_centroid,
             staleness_index=staleness_idx,
             calibration_artists=calibration_artists,
             candidate_tags=c_tags,

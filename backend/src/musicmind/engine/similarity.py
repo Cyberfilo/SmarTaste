@@ -118,7 +118,7 @@ def embedding_cosine_similarity(
     embedding_a: list[float] | None,
     embedding_b: list[float] | None,
 ) -> float:
-    """Cosine similarity between two audio embeddings (128-dim).
+    """Cosine similarity between two audio embeddings (128 or 1,280-dim).
 
     Primary similarity metric when Discogs-EffNet embeddings are available.
     Returns 0.5 (neutral) if either embedding is None or mismatched length.
