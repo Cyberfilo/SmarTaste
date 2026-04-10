@@ -1,0 +1,8 @@
+modal>=0.60
+laion-clap==1.1.6
+transformers>=4.40
+torch>=2.0
+torchaudio>=2.0
+numpy
+httpx
+soundfile
