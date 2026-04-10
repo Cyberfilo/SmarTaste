@@ -98,8 +98,16 @@ def _get_onnx_session():
 
     import onnxruntime as ort
 
+    # Pin to 1 thread per inference — with CONCURRENCY=25 async tasks,
+    # each fighting for 8 vCPU causes contention. 1 thread × 25 concurrent
+    # gives better aggregate throughput than 8 threads × 15 concurrent.
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+
     _onnx_session = ort.InferenceSession(
         model_path,
+        sess_options=opts,
         providers=["CPUExecutionProvider"],
     )
     logger.info("Loaded ONNX EffNet model from %s", model_path)
