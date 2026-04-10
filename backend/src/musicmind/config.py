@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     # OpenAI API key for AI-generated track captions and recommendation explanations
     openai_api_key: str | None = None
 
+    # Modal GPU worker endpoint URL for Tier 2 enrichment (CLAP + MERT)
+    modal_endpoint_url: str | None = None
+
     # Staging mode: auto-resets DB on startup (clean slate for testing).
     # Set MUSICMIND_STAGING=true on the staging Railway environment.
     staging: bool = False
