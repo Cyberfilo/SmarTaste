@@ -28,8 +28,8 @@ async def get_enrichment_diagnostics(
     """
     from musicmind.db.schema import (
         artist_cobweb,
+        audio_embeddings,
         audio_features_cache,
-        kg_relationships,
         lastfm_tags_cache,
         song_metadata_cache,
         user_indexing_status,
@@ -172,41 +172,31 @@ async def get_enrichment_diagnostics(
             )
             total_tags = tags_count_q.scalar() or 0
 
-            # ── MusicBrainz credits for user's ISRCs ───────────────
-            user_isrcs_q = await conn.execute(
-                sa.select(sa.func.count(sa.distinct(
-                    song_metadata_cache.c.isrc
-                ))).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == uid,
-                        song_metadata_cache.c.isrc.isnot(None),
-                        song_metadata_cache.c.isrc != "",
-                    )
-                )
+            # ── GPU embeddings (CLAP + MERT) for this user ─────────
+            gpu_q = await conn.execute(
+                sa.select(
+                    sa.func.count().label("total"),
+                    sa.func.count().filter(
+                        audio_embeddings.c.clap_embedding.isnot(None)
+                    ).label("clap"),
+                    sa.func.count().filter(
+                        audio_embeddings.c.mert_embedding.isnot(None)
+                    ).label("mert"),
+                ).where(audio_embeddings.c.user_id == uid)
             )
-            user_isrcs = user_isrcs_q.scalar() or 0
+            gpu = gpu_q.first()
 
-            user_missing_isrc_q = await conn.execute(
+            # ── AI captions for this user ─────────────────────────
+            caption_q = await conn.execute(
                 sa.select(sa.func.count()).where(
                     sa.and_(
                         song_metadata_cache.c.user_id == uid,
-                        sa.or_(
-                            song_metadata_cache.c.isrc.is_(None),
-                            song_metadata_cache.c.isrc == "",
-                        ),
+                        song_metadata_cache.c.ai_caption.isnot(None),
+                        song_metadata_cache.c.ai_caption != "",
                     )
                 )
             )
-            missing_isrc = user_missing_isrc_q.scalar() or 0
-
-            credits_q = await conn.execute(
-                sa.select(sa.func.count(sa.distinct(
-                    kg_relationships.c.source_mbid
-                ))).where(
-                    kg_relationships.c.source_mbid.like("isrc:%")
-                )
-            )
-            total_credits = credits_q.scalar() or 0
+            ai_captions = caption_q.scalar() or 0
 
             # ── Cobweb stats ───────────────────────────────────────
             cobweb_q = await conn.execute(
@@ -240,7 +230,6 @@ async def get_enrichment_diagnostics(
                     "total": total_songs,
                     "library": library_songs,
                     "non_library": non_library,
-                    "missing_isrc": missing_isrc,
                 },
                 "audio_features": {
                     "enriched": audio_enriched,
@@ -259,10 +248,12 @@ async def get_enrichment_diagnostics(
                     "possible": total_possible_tags,
                     "global_cached": total_tags,
                 },
-                "credits": {
-                    "songs_with_isrc": user_isrcs,
-                    "global_credits": total_credits,
+                "gpu_embeddings": {
+                    "total": gpu.total or 0,
+                    "clap": gpu.clap or 0,
+                    "mert": gpu.mert or 0,
                 },
+                "ai_captions": ai_captions,
                 "cobweb": {
                     "total": cw.total or 0,
                     "enriched": cw.enriched or 0,

@@ -332,12 +332,16 @@ async def _enrich_library_songs(
 
     tracks = _rows_to_track_dicts(rows)
 
-    # Full pipeline per song: audio + tags + credits concurrently
+    # Full pipeline: audio + GPU embeddings + tags
     r = await enrich_tracks(
         engine, tracks, user_id=user_id,
         lastfm_api_key=settings.lastfm_api_key,
+        modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
     )
-    enriched = r.get("deezer", 0) + r.get("reccobeats", 0) + r.get("soundstat", 0)
+    enriched = (
+        r.get("deezer", 0) + r.get("reccobeats", 0)
+        + r.get("soundstat", 0) + r.get("essentia", 0)
+    )
 
     return enriched
 
@@ -470,10 +474,11 @@ async def _fetch_and_enrich_discography(
     if not new_tracks:
         return 0
 
-    # Full pipeline per song: audio + tags + credits concurrently
+    # Full pipeline: audio + GPU embeddings + tags
     await enrich_tracks(
         engine, new_tracks, user_id=user_id,
         lastfm_api_key=settings.lastfm_api_key,
+        modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
     )
 
     return len(new_tracks)

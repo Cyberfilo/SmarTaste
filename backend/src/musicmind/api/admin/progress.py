@@ -3,6 +3,12 @@
 Provides per-user enrichment status with library vs worker breakdown,
 library vs discovered artist counts, and pipeline-level enrichment breakdown.
 
+Pipeline stages (current):
+1. Audio features — Essentia (local) or ReccoBeats (fallback)
+2. GPU embeddings — CLAP + MERT via Modal (if configured)
+3. AI captions — OpenAI-generated track descriptions
+4. Last.fm tags — crowd-sourced tags
+
 IMPORTANT: enriched counts must only count audio_features_cache rows where the
 catalog_id also exists in song_metadata_cache for that user. Otherwise orphaned
 audio_features_cache rows (from deleted songs) inflate the count.
@@ -17,8 +23,8 @@ import sqlalchemy as sa
 
 from musicmind.db.schema import (
     artist_cobweb,
+    audio_embeddings,
     audio_features_cache,
-    kg_relationships,
     lastfm_tags_cache,
     song_metadata_cache,
     user_indexing_status,
@@ -172,12 +178,13 @@ async def get_enrichment_progress(engine) -> list[dict[str, Any]]:
 async def get_enrichment_breakdown(engine) -> dict[str, Any]:
     """Get pipeline-level enrichment breakdown across all songs.
 
-    Enrichment pipeline stages (3 active):
+    Enrichment pipeline stages (4 active):
     1. Audio features (audio_features_cache with energy IS NOT NULL)
-    2. Last.fm tags (lastfm_tags_cache with entity_type='track')
-    3. MusicBrainz credits (kg_relationships with source_mbid LIKE 'isrc:%')
+    2. GPU embeddings — CLAP + MERT (audio_embeddings with clap_embedding IS NOT NULL)
+    3. AI captions (song_metadata_cache with ai_caption IS NOT NULL)
+    4. Last.fm tags (lastfm_tags_cache with entity_type='track')
 
-    Fully enriched = has all 3 stages complete.
+    Fully enriched = has all 4 stages complete.
     All counts restricted to songs that exist in song_metadata_cache.
     """
     async with engine.begin() as conn:
@@ -213,6 +220,30 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         )
         has_audio = audio_q.scalar() or 0
 
+        # Songs with GPU embeddings (CLAP + MERT via Modal)
+        gpu_q = await conn.execute(
+            sa.select(
+                sa.func.count(sa.distinct(audio_embeddings.c.catalog_id))
+            ).where(
+                sa.and_(
+                    audio_embeddings.c.clap_embedding.isnot(None),
+                    audio_embeddings.c.catalog_id.in_(existing_songs),
+                )
+            )
+        )
+        has_gpu = gpu_q.scalar() or 0
+
+        # Songs with AI captions
+        caption_q = await conn.execute(
+            sa.select(sa.func.count()).where(
+                sa.and_(
+                    song_metadata_cache.c.ai_caption.isnot(None),
+                    song_metadata_cache.c.ai_caption != "",
+                )
+            )
+        )
+        has_captions = caption_q.scalar() or 0
+
         # Songs with Last.fm tags
         tags_q = await conn.execute(
             sa.select(sa.func.count()).select_from(lastfm_tags_cache).where(
@@ -221,18 +252,10 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         )
         has_tags = tags_q.scalar() or 0
 
-        # Songs with MusicBrainz credits
-        credits_q = await conn.execute(
-            sa.select(
-                sa.func.count(sa.distinct(kg_relationships.c.source_mbid))
-            ).where(kg_relationships.c.source_mbid.like("isrc:%"))
-        )
-        has_credits = credits_q.scalar() or 0
-
         unenriched = max(0, total_songs - has_audio)
 
-        # Fully enriched = all 3 stages complete (bounded by smallest count)
-        fully_enriched = min(has_audio, has_tags, has_credits)
+        # Fully enriched = all 4 stages complete (bounded by smallest count)
+        fully_enriched = min(has_audio, has_gpu, has_captions, has_tags)
         partial = max(0, has_audio - fully_enriched)
 
     pct = lambda n: round(n / total_songs * 100, 1) if total_songs > 0 else 0  # noqa: E731
@@ -247,8 +270,9 @@ async def get_enrichment_breakdown(engine) -> dict[str, Any]:
         "fully_enriched_pct": pct(fully_enriched),
         "stages": {
             "audio_features": has_audio,
+            "gpu_embeddings": has_gpu,
+            "ai_captions": has_captions,
             "lastfm_tags": has_tags,
-            "musicbrainz_credits": has_credits,
         },
     }
 
