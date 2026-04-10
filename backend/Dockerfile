@@ -27,7 +27,8 @@ discogs-effnet-bsdynamic-1.onnx', '/models/discogs-effnet-bsdynamic-1.onnx')" \
     2>/dev/null || echo "Model download skipped (will use ReccoBeats fallback)"
 
 # Non-root user for security
-RUN useradd --create-home appuser
+RUN useradd --create-home appuser && \
+    chown -R appuser:appuser /app /models
 USER appuser
 
 # Railway provides PORT env var; default to 8000 for local docker
