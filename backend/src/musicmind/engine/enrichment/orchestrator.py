@@ -47,6 +47,7 @@ async def enrich_tracks(
     soundstat_api_key: str | None = None,
     budget_mode: bool = False,
     lastfm_api_key: str | None = None,
+    openai_api_key: str | None = None,
 ) -> dict[str, int]:
     """Three-phase enrichment pipeline — each phase maxes its own concurrency.
 
@@ -71,6 +72,7 @@ async def enrich_tracks(
             return await _enrich_single_track(
                 engine, track, user_id=user_id,
                 soundstat_api_key=soundstat_api_key,
+                openai_api_key=openai_api_key,
             )
 
     for batch_start in range(0, len(tracks), BATCH_SIZE):
@@ -420,6 +422,7 @@ async def _enrich_single_track(
     *,
     user_id: str,
     soundstat_api_key: str | None = None,
+    openai_api_key: str | None = None,
 ) -> str:
     """Enrich one track. Returns result category string."""
     catalog_id = track.get("catalog_id", "")
@@ -549,6 +552,33 @@ async def _enrich_single_track(
                                 features, feature_source, scalar, "essentia",
                             ):
                                 enriched_by = "essentia"
+                            # Generate AI caption from extracted features
+                            if openai_api_key:
+                                try:
+                                    from musicmind.engine.explanations import (
+                                        generate_track_caption,
+                                    )
+                                    caption = await generate_track_caption(
+                                        scalar, openai_api_key,
+                                    )
+                                    if caption:
+                                        await _store_caption(
+                                            engine, catalog_id, user_id, caption,
+                                        )
+                                except Exception:
+                                    logger.debug(
+                                        "Caption generation failed for %s", catalog_id,
+                                    )
+                            # Store structured Essentia tags as ai_tags
+                            if scalar:
+                                try:
+                                    await _store_ai_tags(
+                                        engine, catalog_id, user_id, scalar,
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "AI tags storage failed for %s", catalog_id,
+                                    )
                         # Store embedding if extracted
                         if embedding and len(embedding) >= 128:
                             await _store_embedding(
@@ -963,3 +993,37 @@ async def _get_spotify_id(
     if isrc:
         return await resolve_spotify_id(isrc, engine=engine)
     return None
+
+
+async def _store_caption(
+    engine: Any, catalog_id: str, user_id: str, caption: str,
+) -> None:
+    """Store AI-generated caption in song_metadata_cache."""
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "UPDATE song_metadata_cache SET ai_caption = :caption"
+                    " WHERE catalog_id = :cid AND user_id = :uid"
+                ),
+                {"caption": caption, "cid": catalog_id, "uid": user_id},
+            )
+    except Exception:
+        logger.debug("Failed to store caption for %s", catalog_id)
+
+
+async def _store_ai_tags(
+    engine: Any, catalog_id: str, user_id: str, tags: dict,
+) -> None:
+    """Store structured AI tags in song_metadata_cache."""
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "UPDATE song_metadata_cache SET ai_tags = :tags"
+                    " WHERE catalog_id = :cid AND user_id = :uid"
+                ),
+                {"tags": json.dumps(tags), "cid": catalog_id, "uid": user_id},
+            )
+    except Exception:
+        logger.debug("Failed to store AI tags for %s", catalog_id)
