@@ -158,7 +158,7 @@ class AudioEnricher:
 # ── HTTP endpoints for Railway ─────────────────────────────────────────────────
 
 @app.function(image=image, timeout=30)
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def enrich(data: dict) -> dict:
     """HTTP endpoint for Railway worker to call.
 
@@ -179,7 +179,7 @@ def enrich(data: dict) -> dict:
 
 
 @app.function(image=image, timeout=30)
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def encode_text(data: dict) -> dict:
     """HTTP endpoint for text-to-CLAP encoding (for search)."""
     enricher = AudioEnricher()
