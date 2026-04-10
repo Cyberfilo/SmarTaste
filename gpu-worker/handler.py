@@ -25,6 +25,7 @@ image = (
         "torchaudio>=2.0",
         "numpy",
         "httpx",
+        "fastapi[standard]",
         "soundfile",
     )
 )
