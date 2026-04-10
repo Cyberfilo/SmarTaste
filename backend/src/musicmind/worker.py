@@ -1,11 +1,13 @@
 """Global enrichment worker — builds artist cobwebs and enriches globally.
 
 Separate from per-user indexing (see indexer.py). The worker:
-1. For each user, builds an artist cobweb (related artists via feats, similarity)
+1. For each user, builds an artist cobweb (related artists via feats)
 2. Enriches each cobweb artist's top 50 songs GLOBALLY (no user_id)
 3. Stores songs in global_song_cache, features in audio_features_global
 4. Promotes featured artists who appear alongside library artists
 5. Caps discovered artists at library_artists * 0.2 per user
+
+Enrichment uses Essentia (local CPU) + Modal GPU for embeddings.
 
 Results are available to ALL users for recommendation scoring.
 The worker does NOT touch per-user tables (song_metadata_cache, audio_features_cache).
@@ -17,7 +19,6 @@ Environment variables:
     DATABASE_URL              — PostgreSQL connection string
     MUSICMIND_FERNET_KEY      — Fernet key for decrypting service tokens
     MUSICMIND_LOGS_DATABASE_URL — Optional logging database
-    MUSICMIND_LASTFM_API_KEY  — Last.fm API key for tags + similar
     WORKER_POLL_INTERVAL      — Seconds between cycles (default 120)
 """
 
@@ -154,7 +155,7 @@ async def main() -> None:
     except Exception:
         logger.exception("Excess discovery cleanup failed")
 
-    # ── Main loop: library gaps → cobwebs → global enrich → backfill ──
+    # ── Main loop: library gaps → cobwebs → global enrich ──
     cycle = 0
     while True:
         cycle += 1
@@ -171,61 +172,8 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d library gap-fill failed", cycle)
 
-        # ── Phase 1a: Reset failed songs that have ISRC (first cycle only) ──
-        # New Deezer ISRC lookup can now find songs that name-search missed.
-        if cycle == 1:
-            try:
-                async with engine.begin() as conn:
-                    reset = await conn.execute(
-                        sa.text(
-                            "DELETE FROM audio_features_cache"
-                            " WHERE energy IS NULL"
-                            "   AND feature_source::text LIKE '%no_data_available%'"
-                            "   AND catalog_id IN ("
-                            "     SELECT catalog_id FROM song_metadata_cache"
-                            "     WHERE isrc IS NOT NULL AND isrc != ''"
-                            "   )"
-                        )
-                    )
-                    if reset.rowcount > 0:
-                        logger.info(
-                            "Reset %d failed songs with ISRC for re-enrichment",
-                            reset.rowcount,
-                        )
-            except Exception:
-                logger.debug("Failed to reset ISRC songs for retry")
-
-        # ── Phase 1b: Backfill missing ISRCs via Deezer ──────────────
-        await _set_status(
-            engine, "isrc_backfill", "Resolving missing ISRCs", cycle=cycle,
-        )
-        try:
-            isrc_filled = await _backfill_missing_isrcs(engine)
-            if isrc_filled > 0:
-                logger.info("Cycle %d: resolved %d missing ISRCs", cycle, isrc_filled)
-        except Exception:
-            logger.exception("Cycle %d ISRC backfill failed", cycle)
-
-        # ── Phase 1c: Complete partially enriched songs (tags + credits) ──
-        # Songs with audio features but missing Last.fm tags or MusicBrainz
-        # credits. These are user-linked songs that should finish before
-        # any new cobweb expansion or global enrichment starts.
-        await _set_status(
-            engine, "partial_completion",
-            "Completing tags + credits for user songs", cycle=cycle,
-        )
-        try:
-            partial_done = await _complete_partial_enrichment(engine, settings)
-            if partial_done > 0:
-                logger.info(
-                    "Cycle %d: completed tags/credits for %d songs",
-                    cycle, partial_done,
-                )
-        except Exception:
-            logger.exception("Cycle %d partial completion failed", cycle)
-
         # ── Check if user-linked work is done ──────────────────────
-        user_work_remaining = await _count_user_linked_gaps(engine, settings)
+        user_work_remaining = await _count_user_linked_gaps(engine)
 
         if user_work_remaining > 0:
             # User-linked work remains — skip cobweb, short sleep, loop back
@@ -269,22 +217,6 @@ async def main() -> None:
                 )
         except Exception:
             logger.exception("Cycle %d failed", cycle)
-
-        # ── Phase 3: Backfill tags + credits on global songs ────────
-        await _set_status(engine, "backfill", "Tags + credits on all songs", cycle=cycle)
-        try:
-            bf = await _backfill_global_songs(engine, settings)
-            if bf > 0:
-                logger.info("Cycle %d backfill: %d songs updated", cycle, bf)
-                if log_writer:
-                    log_writer.log_enrichment(
-                        user_id="system",
-                        catalog_id=f"backfill_cycle_{cycle}",
-                        stage="backfill",
-                        result=f"updated_{bf}",
-                    )
-        except Exception:
-            logger.exception("Cycle %d backfill FAILED", cycle)
 
         await _set_status(engine, "idle", f"Sleeping {POLL_INTERVAL}s", cycle=cycle)
         await asyncio.sleep(POLL_INTERVAL)
@@ -353,16 +285,13 @@ async def _build_user_cobweb(
 ) -> dict[str, int]:
     """Build/expand the artist cobweb for one user.
 
-    Cobweb sources (in priority order):
-    1. Featured artists from library songs (highest priority — direct collaboration)
-    2. Last.fm similar artists
-    3. Same-genre artists from catalog
+    Cobweb sources:
+    1. Featured artists from library songs (direct collaboration)
 
     Caps at library_artists * 0.2 non-library artists.
     """
     from musicmind.db.schema import (
         artist_cobweb,
-        lastfm_similar_tracks,
         song_metadata_cache,
     )
     from musicmind.engine.profile import parse_artists
@@ -428,30 +357,6 @@ async def _build_user_cobweb(
                     if key and key not in library_set and key not in existing_set:
                         old_priority = candidates.get(key, ("", 0))[1]
                         candidates[key] = (name.strip(), max(old_priority, weight * 2))
-
-        # Source 2: Last.fm similar tracks' artists
-        try:
-            async with engine.begin() as conn:
-                result = await conn.execute(
-                    sa.select(
-                        lastfm_similar_tracks.c.similar_artist,
-                        sa.func.avg(lastfm_similar_tracks.c.similarity_score).label("s"),
-                    ).where(
-                        lastfm_similar_tracks.c.source_artist.in_(library_artist_names)
-                    ).group_by(lastfm_similar_tracks.c.similar_artist)
-                    .order_by(sa.text("s DESC"))
-                    .limit(max_discovered * 2)
-                )
-                for row in result:
-                    key = row.similar_artist.strip().lower()
-                    if key and key not in library_set and key not in existing_set:
-                        old_priority = candidates.get(key, ("", 0))[1]
-                        candidates[key] = (
-                            row.similar_artist.strip(),
-                            max(old_priority, float(row.s or 0)),
-                        )
-        except Exception:
-            logger.debug("Last.fm similar lookup failed for user %s", user_id[:8])
 
         # Rank and cap
         sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1][1])
@@ -769,22 +674,15 @@ async def _unlink_excess_discoveries(engine) -> int:
 # ── User-Linked Gap Detection ───────────────────────────────────────────
 
 
-async def _count_user_linked_gaps(engine, settings) -> int:
-    """Count user-linked songs that still need any enrichment stage.
+async def _count_user_linked_gaps(engine) -> int:
+    """Count user-linked songs that still need audio enrichment.
 
-    Returns the total number of gaps across all users:
-    - Songs missing audio features (excluding permanently failed)
-    - Songs missing Last.fm tags
-    - Songs missing MusicBrainz credits (for those with ISRC)
-
-    When this returns 0, all user-linked work is done and the worker
-    can move to cobweb/global enrichment.
+    Returns the total number of songs across all users missing audio
+    features (excluding permanently failed). When this returns 0, all
+    user-linked work is done and the worker can move to cobweb/global
+    enrichment.
     """
-    gaps = 0
-    tags_gap = 0
-
     async with engine.begin() as conn:
-        # 1. Songs missing audio features (not permanently failed)
         audio_gap = (await conn.execute(sa.text("""
             SELECT count(*) FROM song_metadata_cache s
             WHERE NOT EXISTS (
@@ -795,42 +693,11 @@ async def _count_user_linked_gaps(engine, settings) -> int:
                        OR af.feature_source::text LIKE '%no_data_available%')
             )
         """))).scalar() or 0
-        gaps += audio_gap
 
-        # 2. Songs missing Last.fm tags (only if lastfm key configured)
-        if settings.lastfm_api_key:
-            tags_gap = (await conn.execute(sa.text("""
-                SELECT count(*) FROM (
-                    SELECT DISTINCT artist_name, name FROM song_metadata_cache
-                    WHERE artist_name IS NOT NULL AND artist_name != ''
-                      AND name IS NOT NULL AND name != ''
-                ) sub
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM lastfm_tags_cache lt
-                    WHERE lt.entity_id = 'track:' || lower(sub.artist_name)
-                                         || ':' || lower(sub.name)
-                )
-            """))).scalar() or 0
-            gaps += tags_gap
+    if audio_gap > 0:
+        logger.debug("User-linked gaps: %d songs missing audio features", audio_gap)
 
-        # 3. Songs missing MusicBrainz credits (only those with ISRC)
-        credits_gap = (await conn.execute(sa.text("""
-            SELECT count(DISTINCT isrc) FROM song_metadata_cache
-            WHERE isrc IS NOT NULL AND isrc != ''
-              AND NOT EXISTS (
-                SELECT 1 FROM kg_relationships kg
-                WHERE kg.source_mbid = 'isrc:' || upper(song_metadata_cache.isrc)
-            )
-        """))).scalar() or 0
-        gaps += credits_gap
-
-    if gaps > 0:
-        logger.debug(
-            "User-linked gaps: %d audio, %d tags, %d credits",
-            audio_gap, tags_gap if settings.lastfm_api_key else 0, credits_gap,
-        )
-
-    return gaps
+    return audio_gap
 
 
 # ── Library Gap Fill (priority enrichment) ──────────────────────────────
@@ -929,14 +796,9 @@ async def _fill_library_gaps(engine, settings) -> int:
         try:
             r = await enrich_tracks(
                 engine, tracks, user_id=user_id,
-                lastfm_api_key=settings.lastfm_api_key,
                 modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
             )
-            enriched = (
-                r.get("deezer", 0) + r.get("reccobeats", 0)
-                + r.get("soundstat", 0) + r.get("essentia", 0)
-            )
-            total_enriched += enriched
+            total_enriched += r.get("essentia", 0)
         except Exception:
             logger.warning(
                 "User %s: library gap-fill enrichment failed", user_id[:8], exc_info=True,
@@ -945,223 +807,13 @@ async def _fill_library_gaps(engine, settings) -> int:
     return total_enriched
 
 
-# ── Partial Enrichment Completion ────────────────────────────────────────
-
-
-async def _complete_partial_enrichment(engine, settings) -> int:
-    """Complete tags + credits for songs already enriched for audio.
-
-    Three-phase approach matching the main pipeline:
-    Phase B: Tags at Sem(15) with batch cache check
-    Phase C: Credits at Sem(2) with batch cache check
-    """
-    from musicmind.db.schema import (
-        kg_relationships,
-        lastfm_tags_cache,
-        song_metadata_cache,
-    )
-    from musicmind.engine.enrichment.orchestrator import (
-        _enrich_credits_single,
-        _enrich_tags_single,
-    )
-
-    updated = 0
-
-    # Get all user songs (deduplicated by name+artist)
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(
-                song_metadata_cache.c.artist_name,
-                song_metadata_cache.c.name,
-                song_metadata_cache.c.isrc,
-            ).where(
-                sa.and_(
-                    song_metadata_cache.c.artist_name.isnot(None),
-                    song_metadata_cache.c.artist_name != "",
-                    song_metadata_cache.c.name.isnot(None),
-                    song_metadata_cache.c.name != "",
-                )
-            ).distinct().limit(2000)
-        )
-        tracks = [
-            {"artist_name": r.artist_name, "name": r.name, "isrc": r.isrc}
-            for r in result
-        ]
-
-    if not tracks:
-        return 0
-
-    # ── Phase B: Tags (batch cache check, then Sem(15)) ────────
-    if settings.lastfm_api_key:
-        tag_eids = {
-            f"track:{t['artist_name'].lower()}:{t['name'].lower()}": t
-            for t in tracks
-        }
-        cached_eids: set[str] = set()
-        eid_list = list(tag_eids.keys())
-        for i in range(0, len(eid_list), 500):
-            chunk = eid_list[i:i + 500]
-            async with engine.begin() as conn:
-                result = await conn.execute(
-                    sa.select(lastfm_tags_cache.c.entity_id).where(
-                        lastfm_tags_cache.c.entity_id.in_(chunk)
-                    )
-                )
-                cached_eids.update(row.entity_id for row in result)
-
-        uncached_tags = [(eid, tag_eids[eid]) for eid in eid_list if eid not in cached_eids]
-        if uncached_tags:
-            logger.info("Partial: %d tracks need tags", len(uncached_tags))
-            tag_sem = asyncio.Semaphore(15)
-
-            async def _tag(eid: str, t: dict) -> bool:
-                async with tag_sem:
-                    return await _enrich_tags_single(
-                        engine, t, lastfm_api_key=settings.lastfm_api_key,
-                        _skip_cache_check=True,
-                    )
-
-            tag_results = await asyncio.gather(
-                *[_tag(eid, t) for eid, t in uncached_tags],
-                return_exceptions=True,
-            )
-            tag_count = sum(1 for r in tag_results if r is True)
-            updated += tag_count
-            if tag_count:
-                logger.info("Partial: %d tags added", tag_count)
-
-    # ── Phase C: Credits (batch cache check, then Sem(2)) ──────
-    isrc_tracks = [t for t in tracks if t.get("isrc")]
-    if isrc_tracks:
-        all_mbids = [f"isrc:{t['isrc'].upper()}" for t in isrc_tracks]
-        cached_mbids: set[str] = set()
-        for i in range(0, len(all_mbids), 500):
-            chunk = all_mbids[i:i + 500]
-            async with engine.begin() as conn:
-                result = await conn.execute(
-                    sa.select(sa.distinct(kg_relationships.c.source_mbid)).where(
-                        kg_relationships.c.source_mbid.in_(chunk)
-                    )
-                )
-                cached_mbids.update(row[0] for row in result)
-
-        uncached = [t for t in isrc_tracks if f"isrc:{t['isrc'].upper()}" not in cached_mbids]
-        if uncached:
-            logger.info("Partial: %d tracks need credits", len(uncached))
-            credit_sem = asyncio.Semaphore(2)
-
-            async def _credit(t: dict) -> bool:
-                async with credit_sem:
-                    return await _enrich_credits_single(
-                        engine, t, _skip_cache_check=True,
-                    )
-
-            credit_results = await asyncio.gather(
-                *[_credit(t) for t in uncached],
-                return_exceptions=True,
-            )
-            credit_count = sum(1 for r in credit_results if r is True)
-            updated += credit_count
-            if credit_count:
-                logger.info("Partial: %d credits added", credit_count)
-
-    return updated
-
-
-# ── ISRC Backfill ───────────────────────────────────────────────────────
-
-
-async def _backfill_missing_isrcs(engine) -> int:
-    """Resolve missing ISRCs by searching Deezer for name + artist.
-
-    Deezer's /track/{id} endpoint includes ISRC in the response.
-    This lets songs participate in the global audio features cache.
-    Caps at 100 per cycle to avoid rate limits (~5 req/s).
-    """
-    from musicmind.db.schema import song_metadata_cache
-    from musicmind.engine.enrichment.deezer import fetch_deezer_features
-
-    # Find songs missing ISRC (prioritize library songs)
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(
-                song_metadata_cache.c.catalog_id,
-                song_metadata_cache.c.user_id,
-                song_metadata_cache.c.name,
-                song_metadata_cache.c.artist_name,
-            ).where(
-                sa.and_(
-                    sa.or_(
-                        song_metadata_cache.c.isrc.is_(None),
-                        song_metadata_cache.c.isrc == "",
-                    ),
-                    song_metadata_cache.c.name.isnot(None),
-                    song_metadata_cache.c.name != "",
-                    song_metadata_cache.c.artist_name.isnot(None),
-                    song_metadata_cache.c.artist_name != "",
-                )
-            ).order_by(
-                # Library songs first (those with library_id or date_added)
-                sa.case(
-                    (sa.or_(
-                        song_metadata_cache.c.library_id.isnot(None),
-                        song_metadata_cache.c.date_added_to_library.isnot(None),
-                    ), 0),
-                    else_=1,
-                ),
-            ).limit(100)
-        )
-        rows = result.fetchall()
-
-    if not rows:
-        return 0
-
-    logger.info("ISRC backfill: resolving %d songs via Deezer", len(rows))
-
-    filled = 0
-    sem = asyncio.Semaphore(10)
-
-    async def _resolve_one(catalog_id: str, user_id: str, name: str, artist: str) -> bool:
-        async with sem:
-            try:
-                deezer_result = await fetch_deezer_features(
-                    name=name, artist_name=artist,
-                )
-                if deezer_result and deezer_result.get("isrc"):
-                    async with engine.begin() as conn:
-                        await conn.execute(
-                            sa.text(
-                                "UPDATE song_metadata_cache"
-                                " SET isrc = :isrc"
-                                " WHERE catalog_id = :cid AND user_id = :uid"
-                                "   AND (isrc IS NULL OR isrc = '')"
-                            ),
-                            {
-                                "isrc": deezer_result["isrc"],
-                                "cid": catalog_id,
-                                "uid": user_id,
-                            },
-                        )
-                    return True
-            except Exception:
-                logger.debug("ISRC resolve failed for %s - %s", artist, name)
-            return False
-
-    results = await asyncio.gather(
-        *[_resolve_one(r.catalog_id, r.user_id, r.name, r.artist_name) for r in rows],
-        return_exceptions=True,
-    )
-    filled = sum(1 for r in results if r is True)
-    return filled
-
-
 # ── Global Enrichment ────────────────────────────────────────────────────
 
 
 async def _enrich_global_songs(engine, settings) -> int:
     """Enrich global_song_cache songs that are missing audio features."""
     from musicmind.db.schema import audio_features_global, global_song_cache
-    from musicmind.engine.enrichment.orchestrator import enrich_tracks_global
+    from musicmind.engine.enrichment.orchestrator import enrich_tracks
 
     # Find songs with ISRC not yet in audio_features_global
     async with engine.begin() as conn:
@@ -1194,203 +846,24 @@ async def _enrich_global_songs(engine, settings) -> int:
             "isrc": row.isrc or "",
             "service_source": row.service_source or "",
             "genre_names": genres,
+            "preview_url": getattr(row, "preview_url", "") or "",
         })
 
     logger.info("Enriching %d global songs", len(tracks))
 
     try:
-        result = await enrich_tracks_global(engine, tracks)
-        return result.get("enriched", 0)
+        # Use enrich_tracks with a system user_id for global enrichment.
+        # Features are also stored globally by ISRC via _store_global_features.
+        r = await enrich_tracks(
+            engine, tracks, user_id="__global__",
+            modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
+        )
+        return r.get("essentia", 0)
     except Exception:
-        # Fallback: try the per-user enrichment with a dummy user_id
-        # that we'll clean up. This handles the case where
-        # enrich_tracks_global doesn't exist yet.
-        logger.debug("enrich_tracks_global not available, using fallback")
+        logger.debug("Global song enrichment failed", exc_info=True)
         return 0
 
 
-async def _backfill_global_songs(engine, settings) -> int:
-    """Run Last.fm tags + MusicBrainz credits on all songs missing them.
-
-    Uses SQL to find gaps directly (no loading all songs into memory),
-    then concurrent API calls for Last.fm (5 at a time).
-    """
-    from musicmind.db.schema import (
-        kg_relationships,
-        lastfm_tags_cache,
-        song_metadata_cache,
-    )
-
-    updated = 0
-
-    # ── Last.fm tags ─────────────────────────────────────────────
-    if settings.lastfm_api_key:
-        from musicmind.engine.enrichment.lastfm import (
-            fetch_artist_tags,
-            fetch_track_tags,
-        )
-
-        # Get (artist, name) pairs from per-user songs, deduplicate in Python
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(
-                    song_metadata_cache.c.artist_name,
-                    song_metadata_cache.c.name,
-                ).where(
-                    sa.and_(
-                        song_metadata_cache.c.artist_name.isnot(None),
-                        song_metadata_cache.c.artist_name != "",
-                        song_metadata_cache.c.name.isnot(None),
-                        song_metadata_cache.c.name != "",
-                    )
-                ).distinct()
-            )
-            all_pairs = [
-                (row.artist_name, row.name) for row in result
-            ]
-
-        if all_pairs:
-            # Build entity IDs and batch-check which exist
-            pairs_with_eid = [
-                (a, n, f"track:{a.lower()}:{n.lower()}")
-                for a, n in all_pairs
-            ]
-            all_eids = [eid for _, _, eid in pairs_with_eid]
-
-            cached_eids: set[str] = set()
-            for i in range(0, len(all_eids), 500):
-                chunk = all_eids[i:i + 500]
-                async with engine.begin() as conn:
-                    result = await conn.execute(
-                        sa.select(lastfm_tags_cache.c.entity_id).where(
-                            lastfm_tags_cache.c.entity_id.in_(chunk)
-                        )
-                    )
-                    cached_eids.update(row.entity_id for row in result)
-
-            uncached = [
-                (a, n, eid)
-                for a, n, eid in pairs_with_eid
-                if eid not in cached_eids
-            ]
-
-            if uncached:
-                # Cap at 1000 per cycle (~100s at 10 req/s with Semaphore(10))
-                total_uncached = len(uncached)
-                uncached = uncached[:1000]
-                logger.info(
-                    "Last.fm backfill: %d need tags, processing %d this cycle (%d cached)",
-                    total_uncached, len(uncached), len(cached_eids),
-                )
-
-                sem = asyncio.Semaphore(10)
-
-                async def _fetch_tag(
-                    artist: str, name: str, eid: str,
-                ) -> bool:
-                    async with sem:
-                        try:
-                            tags = await fetch_track_tags(
-                                settings.lastfm_api_key,
-                                artist, name,
-                            )
-                            if not tags:
-                                tags = await fetch_artist_tags(
-                                    settings.lastfm_api_key,
-                                    artist,
-                                )
-                            if tags:
-                                async with engine.begin() as conn:
-                                    await conn.execute(
-                                        sa.text(
-                                            "INSERT INTO lastfm_tags_cache"
-                                            " (entity_type, entity_id,"
-                                            "  tags)"
-                                            " VALUES (:t, :eid, :tags)"
-                                            " ON CONFLICT (entity_type, entity_id)"
-                                            " DO UPDATE SET tags = :tags"
-                                        ),
-                                        {
-                                            "t": "track",
-                                            "eid": eid,
-                                            "tags": json.dumps(tags),
-                                        },
-                                    )
-                                return True
-                        except Exception:
-                            logger.debug("Tag fetch failed: %s - %s", artist, name)
-                        return False
-
-                for i in range(0, len(uncached), 100):
-                    batch = uncached[i:i + 100]
-                    results = await asyncio.gather(
-                        *[_fetch_tag(a, n, eid) for a, n, eid in batch]
-                    )
-                    updated += sum(1 for r in results if r)
-                    if i > 0 and i % 500 == 0:
-                        logger.info(
-                            "Last.fm progress: %d/%d",
-                            i, len(uncached),
-                        )
-
-    # ── MusicBrainz credits ──────────────────────────────────────
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(
-                sa.distinct(song_metadata_cache.c.isrc)
-            ).where(
-                sa.and_(
-                    song_metadata_cache.c.isrc.isnot(None),
-                    song_metadata_cache.c.isrc != "",
-                )
-            )
-        )
-        all_isrcs = [row[0] for row in result]
-
-    if all_isrcs:
-        all_mbids = [f"isrc:{isrc.upper()}" for isrc in all_isrcs]
-        cached_mbids: set[str] = set()
-        for i in range(0, len(all_mbids), 500):
-            chunk = all_mbids[i:i + 500]
-            async with engine.begin() as conn:
-                result = await conn.execute(
-                    sa.select(
-                        sa.distinct(kg_relationships.c.source_mbid)
-                    ).where(
-                        kg_relationships.c.source_mbid.in_(chunk)
-                    )
-                )
-                cached_mbids.update(row[0] for row in result)
-
-        uncached_isrc = [
-            (isrc, f"isrc:{isrc.upper()}")
-            for isrc in all_isrcs
-            if f"isrc:{isrc.upper()}" not in cached_mbids
-        ]
-
-        if uncached_isrc:
-            # Cap at 200 per cycle (MusicBrainz = 1 req/sec, ~7 min max)
-            batch = uncached_isrc[:200]
-            logger.info(
-                "MusicBrainz backfill: %d need credits, processing %d this cycle",
-                len(uncached_isrc), len(batch),
-            )
-
-            from musicmind.engine.enrichment.musicbrainz_credits import (
-                fetch_recording_credits,
-            )
-
-            for isrc, _source_mbid in batch:
-                try:
-                    credits = await fetch_recording_credits(
-                        isrc, engine=engine,
-                    )
-                    if credits:
-                        updated += 1
-                except Exception:
-                    logger.debug("MusicBrainz credit fetch failed for ISRC %s", isrc)
-
-    return updated
 
 
 # ── Entry Point ──────────────────────────────────────────────────────────
