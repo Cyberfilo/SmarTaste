@@ -7,6 +7,39 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.000 — 2026-04-10
+
+### Local Audio Intelligence (Essentia + ONNX)
+
+Major architecture change: audio enrichment moves from external APIs to local processing.
+
+#### Replaced ReccoBeats + SoundStat with Essentia
+- **Local analysis**: Essentia + ONNX Runtime replaces the Deezer→ReccoBeats→SoundStat API chain
+- **DSP scalar features**: BPM (RhythmExtractor2013), key/scale (KeyExtractor), energy (RMS), danceability, brightness (SpectralCentroid), loudness (EBUR128) — all extracted locally
+- **1,280-dim EffNet embeddings**: Discogs-EffNet ONNX model (~18MB) produces rich embeddings trained on 2M+ recordings. Captures genre, mood, timbral qualities that scalar features miss
+- **Graceful fallback**: If Essentia unavailable (e.g., CI), ReccoBeats is used as fallback
+- **Zero API cost**: No more ReccoBeats uploads or SoundStat charges
+
+#### Hybrid Scoring Pipeline
+- **0.7 embedding + 0.3 scalar**: `combined_audio_similarity()` (existed but was unused) now wired into `score_candidate()`
+- **Embedding centroid**: `build_taste_profile()` computes L2-normalized mean of all library track embeddings
+- **Per-candidate embeddings**: `rank_candidates()` passes embeddings through to scoring
+- **Backward compatible**: 128-dim legacy embeddings still work, 1,280-dim preferred
+
+#### New Infrastructure
+- **essentia_extractor.py**: Single-responsibility module — audio bytes in, features + embedding out
+- **audio_embeddings_global**: ISRC-keyed table for cross-user embedding sharing
+- **Migration 019**: embedding_dim column, global embeddings table, taste profile centroid
+- **Docker**: ffmpeg + Essentia + ONNX Runtime, model downloaded at build time
+- **Optional deps**: `[audio]` group in pyproject.toml
+
+#### GPU Worker Architecture Prepared (Tier 2, future)
+- Architecture supports external GPU worker (RunPod Serverless) for CLAP, MERT, Music Flamingo
+- ~$0.018/track on A100 40GB, scale-to-zero when idle
+- Not implemented in this version — Essentia on CPU is sufficient for current catalog
+
+---
+
 ## V 5.300 — 2026-04-09
 
 ### Unified Per-Song Enrichment Pipeline
