@@ -66,7 +66,7 @@ async def enrich_tracks(
     Returns stats dict with enrichment counts.
     """
     stats = {
-        "essentia": 0, "reccobeats": 0, "captions": 0,
+        "essentia": 0, "captions": 0,
         "skipped": 0, "failed": 0, "total": len(tracks),
         "gpu_enriched": 0,
     }
@@ -340,10 +340,33 @@ async def _enrich_single_track(
         )
         return "failed"
 
-    # Audio analysis: Essentia (local) → ReccoBeats (API fallback)
+    # Audio analysis via Essentia (local, no API limits)
     if preview_url:
         try:
             audio_bytes = await _download_preview(preview_url)
+
+            # Cached Deezer URL expired (403)? Get a fresh one
+            if audio_bytes is None and "dzcdn.net" in preview_url:
+                try:
+                    from musicmind.engine.enrichment.deezer import search_preview_url
+                    fresh_url = await search_preview_url(
+                        name=track.get("name", ""),
+                        artist_name=track.get("artist_name", ""),
+                        isrc=isrc or None,
+                    )
+                    if fresh_url:
+                        audio_bytes = await _download_preview(fresh_url)
+                        if audio_bytes:
+                            # Update cached URL
+                            async with engine.begin() as conn:
+                                from musicmind.db.schema import song_metadata_cache as smc
+                                await conn.execute(
+                                    sa.update(smc)
+                                    .where(sa.and_(smc.c.catalog_id == catalog_id))
+                                    .values(preview_url=fresh_url)
+                                )
+                except Exception:
+                    pass
             if audio_bytes:
                 from musicmind.engine.audio.essentia_extractor import (
                     is_essentia_available,
@@ -393,18 +416,6 @@ async def _enrich_single_track(
                     except Exception:
                         logger.debug("Essentia failed for %s", catalog_id)
 
-                # Fallback: ReccoBeats API when Essentia unavailable or failed
-                if enriched_by == "failed" or _missing_fields(features):
-                    try:
-                        recco_result = await _reccobeats_with_retry(audio_bytes)
-                        if recco_result:
-                            if _merge_features(
-                                features, feature_source, recco_result, "reccobeats",
-                            ):
-                                enriched_by = "reccobeats"
-                    except Exception:
-                        logger.debug("ReccoBeats fallback failed for %s", catalog_id)
-
                 del audio_bytes
         except Exception:
             logger.debug("Audio enrichment failed for %s", catalog_id)
@@ -420,56 +431,6 @@ async def _enrich_single_track(
         )
 
     return enriched_by
-
-
-# ── ReccoBeats API fallback (when Essentia unavailable) ──────────────────────
-
-RECCOBEATS_URL = "https://api.reccobeats.com/v1/audio-features"
-
-
-async def _reccobeats_with_retry(
-    audio_bytes: bytes, max_retries: int = 3,
-) -> dict[str, Any] | None:
-    """Upload audio to ReccoBeats API for feature extraction.
-
-    Free API, no auth. Returns dict with tempo, energy, danceability, etc.
-    Used as fallback when Essentia is not installed (e.g., missing wheel).
-    """
-    import httpx
-
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    RECCOBEATS_URL,
-                    files={"file": ("preview.mp3", audio_bytes, "audio/mpeg")},
-                )
-                if resp.status_code == 429:
-                    wait = 2.0 * (2 ** attempt)
-                    logger.debug("ReccoBeats rate limited, waiting %.0fs", wait)
-                    await asyncio.sleep(wait)
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                if not data:
-                    return None
-                # Map ReccoBeats response to our feature schema
-                result: dict[str, Any] = {}
-                for key in (
-                    "tempo", "energy", "danceability", "acousticness",
-                    "valence_proxy", "beat_strength", "brightness",
-                    "key", "scale", "instrumentalness", "loudness",
-                ):
-                    val = data.get(key)
-                    if val is not None:
-                        result[key] = float(val) if isinstance(val, (int, float)) else val
-                return result if result else None
-        except Exception:
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2.0 * (2 ** attempt))
-            else:
-                logger.debug("ReccoBeats failed after %d retries", max_retries)
-    return None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
