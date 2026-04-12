@@ -115,7 +115,14 @@ async def main() -> None:
         except Exception:
             logger.warning("Failed to connect logging database", exc_info=True)
 
-    logger.info("Worker started: poll=%ds, max_songs=%d", POLL_INTERVAL, MAX_COBWEB_SONGS)
+    # Log enrichment capability at startup
+    from musicmind.engine.audio.essentia_extractor import is_essentia_available, is_onnx_available
+    logger.info(
+        "Worker started: poll=%ds, max_songs=%d, essentia=%s, onnx=%s, modal=%s",
+        POLL_INTERVAL, MAX_COBWEB_SONGS,
+        is_essentia_available(), is_onnx_available(),
+        bool(getattr(settings, "modal_endpoint_url", None)),
+    )
 
     # Ensure worker_status row exists
     try:
