@@ -218,10 +218,12 @@ def _extract_dsp_features(es: Any, audio: Any) -> ExtractedFeatures:
         brightness_raw = float(centroid(audio))
         brightness = min(1.0, brightness_raw / 8000)
 
-        # Beat strength
-        beat_strength = (
-            float(beats_confidence.mean()) if len(beats_confidence) > 0 else 0.5
-        )
+        # Beat strength (may be scalar or array depending on Essentia version)
+        try:
+            bc = beats_confidence
+            beat_strength = float(bc.mean() if hasattr(bc, "mean") else bc)
+        except (TypeError, ValueError):
+            beat_strength = 0.5
 
         # Loudness (EBUR128)
         loudness_lufs = None
