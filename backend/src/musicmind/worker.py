@@ -704,11 +704,11 @@ async def _count_user_linked_gaps(engine) -> int:
 
 
 async def _fill_library_gaps(engine, settings) -> int:
-    """Find user library songs missing audio features and enrich them first.
+    """Find ALL user songs missing audio features and enrich them.
 
-    This ensures user-scoped library songs always get enriched before the
-    worker spends time on global cobweb songs. Only enriches the exact
-    count of missing songs — no wasted work.
+    Processes every song in song_metadata_cache that lacks audio_features_cache
+    entries — library AND discography. This matches _count_user_linked_gaps()
+    so the main loop doesn't get stuck when non-library songs have gaps.
     """
     from musicmind.db.schema import (
         audio_features_cache,
@@ -738,16 +738,13 @@ async def _fill_library_gaps(engine, settings) -> int:
         except Exception:
             pass
 
-        # Find library songs missing enrichment (skip permanently failed ones)
+        # Find ALL user songs missing enrichment (skip permanently failed ones)
         async with engine.begin() as conn:
-            # Songs that are either successfully enriched OR permanently failed
             attempted_ids = sa.select(audio_features_cache.c.catalog_id).where(
                 sa.and_(
                     audio_features_cache.c.user_id == user_id,
                     sa.or_(
-                        # Successfully enriched (has real features)
                         audio_features_cache.c.energy.isnot(None),
-                        # Permanently failed (marker row with no_data_available)
                         sa.cast(
                             audio_features_cache.c.feature_source, sa.Text
                         ).like('%no_data_available%'),
@@ -758,10 +755,6 @@ async def _fill_library_gaps(engine, settings) -> int:
                 sa.select(song_metadata_cache).where(
                     sa.and_(
                         song_metadata_cache.c.user_id == user_id,
-                        sa.or_(
-                            song_metadata_cache.c.library_id.isnot(None),
-                            song_metadata_cache.c.date_added_to_library.isnot(None),
-                        ),
                         song_metadata_cache.c.catalog_id.notin_(attempted_ids),
                     )
                 )
