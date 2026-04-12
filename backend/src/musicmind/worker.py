@@ -682,12 +682,11 @@ async def _unlink_excess_discoveries(engine) -> int:
 
 
 async def _count_user_linked_gaps(engine) -> int:
-    """Count user-linked songs that still need audio enrichment.
+    """Count user-linked songs that still need Essentia enrichment.
 
-    Returns the total number of songs across all users missing audio
-    features (excluding permanently failed). When this returns 0, all
-    user-linked work is done and the worker can move to cobweb/global
-    enrichment.
+    Includes: songs with no features, AND songs with stale features
+    from deprecated sources (deezer, reccobeats, soundstat).
+    Excludes: permanently failed (no_data_available) and already Essentia-enriched.
     """
     async with engine.begin() as conn:
         audio_gap = (await conn.execute(sa.text("""
@@ -696,8 +695,10 @@ async def _count_user_linked_gaps(engine) -> int:
                 SELECT 1 FROM audio_features_cache af
                 WHERE af.catalog_id = s.catalog_id
                   AND af.user_id = s.user_id
-                  AND (af.energy IS NOT NULL
-                       OR af.feature_source::text LIKE '%no_data_available%')
+                  AND (
+                    af.feature_source::text LIKE '%essentia%'
+                    OR af.feature_source::text LIKE '%no_data_available%'
+                  )
             )
         """))).scalar() or 0
 
@@ -745,13 +746,16 @@ async def _fill_library_gaps(engine, settings) -> int:
         except Exception:
             pass
 
-        # Find ALL user songs missing enrichment (skip permanently failed ones)
+        # Find songs needing Essentia enrichment: no features, OR stale
+        # (deezer/reccobeats/soundstat). Skip permanently failed + already Essentia.
         async with engine.begin() as conn:
             attempted_ids = sa.select(audio_features_cache.c.catalog_id).where(
                 sa.and_(
                     audio_features_cache.c.user_id == user_id,
                     sa.or_(
-                        audio_features_cache.c.energy.isnot(None),
+                        sa.cast(
+                            audio_features_cache.c.feature_source, sa.Text
+                        ).like('%essentia%'),
                         sa.cast(
                             audio_features_cache.c.feature_source, sa.Text
                         ).like('%no_data_available%'),

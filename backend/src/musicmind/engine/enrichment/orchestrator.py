@@ -377,42 +377,52 @@ async def _enrich_single_track(
                             extract_all,
                         )
                         extracted, embedding = extract_all(audio_bytes)
-                        if extracted:
-                            scalar = extracted.to_scalar_dict()
-                            if _merge_features(
-                                features, feature_source, scalar, "essentia",
-                            ):
-                                enriched_by = "essentia"
-                            if openai_api_key:
-                                try:
-                                    from musicmind.engine.explanations import (
-                                        generate_track_caption,
-                                    )
-                                    caption = await generate_track_caption(
-                                        scalar, openai_api_key,
-                                    )
-                                    if caption:
-                                        await _store_caption(
-                                            engine, catalog_id, user_id, caption,
-                                        )
-                                except Exception:
-                                    logger.debug(
-                                        "Caption generation failed for %s", catalog_id,
-                                    )
-                            if scalar:
-                                try:
-                                    await _store_ai_tags(
-                                        engine, catalog_id, user_id, scalar,
-                                    )
-                                except Exception:
-                                    logger.debug(
-                                        "AI tags storage failed for %s", catalog_id,
-                                    )
+
+                        # DSP scalar features (may partially fail — best effort)
+                        scalar = extracted.to_scalar_dict() if extracted else {}
+                        if scalar and _merge_features(
+                            features, feature_source, scalar, "essentia",
+                        ):
+                            enriched_by = "essentia"
+
+                        # EffNet embedding (1280-dim) — independent of DSP
                         if embedding and len(embedding) >= 128:
                             await _store_embedding(
                                 engine, catalog_id, user_id,
                                 embedding, isrc=isrc,
                             )
+                            # Embedding alone counts as enrichment
+                            if enriched_by == "failed":
+                                enriched_by = "essentia"
+
+                        # AI caption from extracted features
+                        if scalar and openai_api_key:
+                            try:
+                                from musicmind.engine.explanations import (
+                                    generate_track_caption,
+                                )
+                                caption = await generate_track_caption(
+                                    scalar, openai_api_key,
+                                )
+                                if caption:
+                                    await _store_caption(
+                                        engine, catalog_id, user_id, caption,
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "Caption generation failed for %s", catalog_id,
+                                )
+
+                        # Store Essentia classifier labels as ai_tags
+                        if scalar:
+                            try:
+                                await _store_ai_tags(
+                                    engine, catalog_id, user_id, scalar,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "AI tags storage failed for %s", catalog_id,
+                                )
                     except Exception:
                         logger.debug("Essentia failed for %s", catalog_id)
 
