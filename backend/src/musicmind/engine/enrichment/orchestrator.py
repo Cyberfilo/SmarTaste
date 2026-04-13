@@ -761,7 +761,9 @@ async def _store_embedding(
             else:
                 await conn.execute(audio_embeddings.insert().values(**values))
     except Exception:
-        logger.warning("Failed to store embedding for %s: %s", catalog_id, exc_info=True)
+        logger.warning(
+            "Failed to store embedding for %s", catalog_id, exc_info=True,
+        )
 
     # Global ISRC storage
     if isrc:
