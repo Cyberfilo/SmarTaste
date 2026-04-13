@@ -684,9 +684,9 @@ async def _unlink_excess_discoveries(engine) -> int:
 async def _count_user_linked_gaps(engine) -> int:
     """Count user-linked songs that still need Essentia enrichment.
 
-    Includes: songs with no features, AND songs with stale features
+    Includes: songs with no features, AND songs with stale/mixed features
     from deprecated sources (deezer, reccobeats, soundstat).
-    Excludes: permanently failed (no_data_available) and already Essentia-enriched.
+    Excludes: purely essentia-enriched AND purely permanently-failed.
     """
     async with engine.begin() as conn:
         audio_gap = (await conn.execute(sa.text("""
@@ -696,8 +696,12 @@ async def _count_user_linked_gaps(engine) -> int:
                 WHERE af.catalog_id = s.catalog_id
                   AND af.user_id = s.user_id
                   AND (
-                    af.feature_source::text LIKE '%essentia%'
-                    OR af.feature_source::text LIKE '%no_data_available%'
+                    (af.feature_source::text LIKE '%essentia%'
+                     AND af.feature_source::text NOT LIKE '%reccobeats%'
+                     AND af.feature_source::text NOT LIKE '%deezer%'
+                     AND af.feature_source::text NOT LIKE '%soundstat%')
+                    OR (af.feature_source::text LIKE '%no_data_available%'
+                        AND af.feature_source::text NOT LIKE '%reccobeats%')
                   )
             )
         """))).scalar() or 0
@@ -763,19 +767,37 @@ async def _fill_library_gaps(engine, settings) -> int:
         except Exception:
             pass
 
-        # Find songs needing Essentia enrichment: no features, OR stale
-        # (deezer/reccobeats/soundstat). Skip permanently failed + already Essentia.
+        # Find songs needing Essentia enrichment.
+        # Skip: permanently failed OR fully essentia (no stale sources mixed in).
         async with engine.begin() as conn:
             attempted_ids = sa.select(audio_features_cache.c.catalog_id).where(
                 sa.and_(
                     audio_features_cache.c.user_id == user_id,
                     sa.or_(
-                        sa.cast(
-                            audio_features_cache.c.feature_source, sa.Text
-                        ).like('%essentia%'),
-                        sa.cast(
-                            audio_features_cache.c.feature_source, sa.Text
-                        ).like('%no_data_available%'),
+                        # Fully essentia: has essentia AND no stale sources
+                        sa.and_(
+                            sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%essentia%'),
+                            ~sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%reccobeats%'),
+                            ~sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%deezer%'),
+                            ~sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%soundstat%'),
+                        ),
+                        # Permanently failed (no preview available)
+                        sa.and_(
+                            sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%no_data_available%'),
+                            ~sa.cast(
+                                audio_features_cache.c.feature_source, sa.Text
+                            ).like('%reccobeats%'),
+                        ),
                     ),
                 )
             )
