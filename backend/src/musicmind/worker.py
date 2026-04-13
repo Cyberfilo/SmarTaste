@@ -925,11 +925,12 @@ async def _enrich_global_songs(engine, settings) -> int:
 
 
 async def _backfill_embeddings(engine, settings) -> int:
-    """Backfill EffNet + CLAP/MERT embeddings for tracks that have scalar
-    features but are missing embeddings. Runs once per deploy.
+    """Embedding-only backfill: extract EffNet embeddings for tracks that
+    have Essentia scalars but are missing embeddings. Runs once per deploy.
 
-    Priority: user-linked songs first, then global.
-    Skips permanently failed tracks (no_data_available).
+    Does NOT use enrich_tracks (which skips already-enriched tracks).
+    Instead: download preview → ONNX EffNet → store embedding directly.
+    User-linked songs have top priority.
     """
     from musicmind.db.schema import (
         audio_embeddings,
@@ -937,42 +938,44 @@ async def _backfill_embeddings(engine, settings) -> int:
         song_metadata_cache,
         users,
     )
+    from musicmind.engine.audio.essentia_extractor import (
+        is_essentia_available,
+        is_onnx_available,
+    )
+
+    if not is_essentia_available() or not is_onnx_available():
+        logger.warning("Backfill skipped: essentia=%s onnx=%s",
+                        is_essentia_available(), is_onnx_available())
+        return 0
 
     total = 0
-    modal_url = getattr(settings, "modal_endpoint_url", None)
-    batch_size = 25
+    concurrency = 10
 
-    # ── Priority 1: User-linked songs with Essentia but no embedding ──
     async with engine.begin() as conn:
         user_rows = await conn.execute(sa.select(users.c.id))
         user_ids = [r.id for r in user_rows if r.id != "__global__"]
 
     for user_id in user_ids:
         async with engine.begin() as conn:
-            # Songs with essentia features but no embedding row
             has_embed = sa.select(audio_embeddings.c.catalog_id).where(
                 sa.and_(
                     audio_embeddings.c.user_id == user_id,
-                    sa.or_(
-                        sa.cast(
-                            audio_embeddings.c.embedding, sa.Text,
-                        ) != "[]",
-                        audio_embeddings.c.clap_embedding.isnot(None),
-                    ),
+                    sa.cast(audio_embeddings.c.embedding, sa.Text) != "[]",
                 )
             )
             result = await conn.execute(
-                sa.select(song_metadata_cache).where(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.preview_url,
+                    song_metadata_cache.c.isrc,
+                ).where(
                     sa.and_(
                         song_metadata_cache.c.user_id == user_id,
                         song_metadata_cache.c.preview_url.isnot(None),
                         song_metadata_cache.c.preview_url != "",
                         song_metadata_cache.c.catalog_id.notin_(has_embed),
-                        # Only songs that already have essentia scalars
                         song_metadata_cache.c.catalog_id.in_(
-                            sa.select(
-                                audio_features_cache.c.catalog_id,
-                            ).where(
+                            sa.select(audio_features_cache.c.catalog_id).where(
                                 sa.and_(
                                     audio_features_cache.c.user_id == user_id,
                                     sa.cast(
@@ -991,39 +994,56 @@ async def _backfill_embeddings(engine, settings) -> int:
             continue
 
         logger.info(
-            "Backfill: %d tracks for user %s need embeddings",
+            "Embedding backfill: %d tracks for user %s",
             len(rows), user_id[:8],
         )
 
-        # Process in batches
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _extract_one(catalog_id: str, preview_url: str, isrc: str) -> bool:
+            async with sem:
+                try:
+                    from musicmind.engine.audio.essentia_extractor import (
+                        extract_all,
+                    )
+                    from musicmind.engine.enrichment.orchestrator import (
+                        _download_preview,
+                        _store_embedding,
+                    )
+
+                    audio_bytes = await _download_preview(preview_url)
+                    if not audio_bytes:
+                        return False
+
+                    _, embedding = extract_all(audio_bytes)
+                    del audio_bytes
+
+                    if embedding and len(embedding) >= 128:
+                        await _store_embedding(
+                            engine, catalog_id, user_id,
+                            embedding, isrc=isrc or "",
+                        )
+                        return True
+                except Exception:
+                    logger.debug("Embedding backfill failed for %s", catalog_id)
+                return False
+
+        # Process in batches of 50
+        batch_size = 50
         for i in range(0, len(rows), batch_size):
             batch = rows[i:i + batch_size]
-            tracks = []
-            for row in batch:
-                tracks.append({
-                    "catalog_id": row.catalog_id,
-                    "name": row.name or "",
-                    "artist_name": row.artist_name or "",
-                    "isrc": row.isrc or "",
-                    "preview_url": row.preview_url or "",
-                    "service_source": getattr(row, "service_source", ""),
-                    "genre_names": [],
-                })
-
-            from musicmind.engine.enrichment.orchestrator import (
-                enrich_tracks,
+            results = await asyncio.gather(
+                *[_extract_one(r.catalog_id, r.preview_url, r.isrc or "")
+                  for r in batch],
+                return_exceptions=True,
             )
-            r = await enrich_tracks(
-                engine, tracks, user_id=user_id,
-                modal_endpoint_url=modal_url,
-            )
-            enriched = r.get("essentia", 0)
-            total += enriched
+            ok = sum(1 for r in results if r is True)
+            total += ok
             logger.info(
-                "Backfill batch %d/%d: %d enriched",
+                "Embedding backfill %d/%d: %d/%d stored",
                 i // batch_size + 1,
                 (len(rows) + batch_size - 1) // batch_size,
-                enriched,
+                ok, len(batch),
             )
 
     logger.info("Embedding backfill complete: %d total", total)
