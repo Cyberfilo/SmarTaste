@@ -284,18 +284,28 @@ async def _enrich_single_track(
     if not catalog_id:
         return "skipped"
 
-    # Skip fully enriched (per-user cache)
+    # Check existing features — skip only if FULLY enriched by Essentia
     existing = await _get_existing_features(engine, catalog_id, user_id)
-    if existing and not _missing_fields(existing):
+    existing_source = _get_source_dict(existing)
+    stale_sources = {"deezer", "reccobeats", "soundstat"}
+    has_stale = bool(
+        existing_source and any(s in stale_sources for s in existing_source.values())
+    )
+
+    if existing and not _missing_fields(existing) and not has_stale:
         return "skipped"
 
-    # Check global ISRC cache — if another user already enriched this song, reuse it
-    if isrc:
+    # Check global ISRC cache — reuse if enriched by Essentia (not stale)
+    if isrc and not has_stale:
         global_hit = await _get_global_features(engine, isrc)
-        if global_hit and not _missing_fields(global_hit):
+        global_source = _get_source_dict(global_hit)
+        global_stale = bool(
+            global_source and any(s in stale_sources for s in global_source.values())
+        )
+        if global_hit and not _missing_fields(global_hit) and not global_stale:
             await _store_features(
                 engine, catalog_id, user_id,
-                dict(global_hit), _get_source_dict(global_hit),
+                dict(global_hit), global_source,
             )
             return "skipped"
 
