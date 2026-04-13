@@ -317,7 +317,7 @@ def _extract_embedding_onnx(tmp_path: Path) -> list[float] | None:
             return [round(float(v), 6) for v in embedding]
 
     except Exception:
-        logger.debug("ONNX EffNet extraction failed", exc_info=True)
+        logger.warning("ONNX EffNet extraction failed", exc_info=True)
 
     return None
 
