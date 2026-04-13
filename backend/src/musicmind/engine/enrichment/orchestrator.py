@@ -465,13 +465,26 @@ def _merge_features(
     features: dict[str, Any], feature_source: dict[str, str],
     new_data: dict[str, Any], source_name: str,
 ) -> int:
+    """Merge new features into existing, OVERWRITING stale sources.
+
+    Essentia always overwrites deezer/reccobeats/soundstat values.
+    Only skips fields already set by the SAME source.
+    """
     filled = 0
+    # Sources that should be overwritten by newer data
+    stale_sources = {"deezer", "reccobeats", "soundstat"}
     for field, value in new_data.items():
-        if field not in ENRICHABLE_FIELDS or features.get(field) is not None:
+        if field not in ENRICHABLE_FIELDS:
             continue
-        features[field] = value
-        feature_source[field] = source_name
-        filled += 1
+        existing_source = feature_source.get(field, "")
+        # Skip if same source already set this field
+        if features.get(field) is not None and existing_source == source_name:
+            continue
+        # Overwrite stale sources or fill empty
+        if features.get(field) is None or existing_source in stale_sources:
+            features[field] = value
+            feature_source[field] = source_name
+            filled += 1
     return filled
 
 
@@ -695,48 +708,71 @@ async def _store_embedding(
     isrc: str = "",
 ) -> None:
     """Store embedding in per-user + global (ISRC) tables."""
+    from musicmind.db.schema import audio_embeddings
+
     now = datetime.now(UTC)
     dim = len(embedding)
     model = f"discogs-effnet-{dim}"
-    emb_json = json.dumps(embedding)
 
-    # Per-user storage
+    # Per-user storage (SQLAlchemy Core handles JSON serialization correctly)
     try:
+        values = {
+            "catalog_id": catalog_id, "user_id": user_id,
+            "embedding": embedding, "isrc": isrc,
+            "model_version": model, "embedding_dim": dim, "analyzed_at": now,
+        }
         async with engine.begin() as conn:
-            await conn.execute(sa.text(
-                "INSERT INTO audio_embeddings"
-                " (catalog_id, user_id, embedding, isrc, model_version,"
-                "  embedding_dim, analyzed_at)"
-                " VALUES (:cid, :uid, :emb, :isrc, :model, :dim, :now)"
-                " ON CONFLICT (catalog_id, user_id) DO UPDATE SET"
-                " embedding = :emb, model_version = :model,"
-                " embedding_dim = :dim, analyzed_at = :now"
-            ), {
-                "cid": catalog_id, "uid": user_id, "emb": emb_json,
-                "isrc": isrc, "model": model, "dim": dim, "now": now,
-            })
+            existing = await conn.execute(
+                sa.select(audio_embeddings.c.catalog_id).where(
+                    sa.and_(
+                        audio_embeddings.c.catalog_id == catalog_id,
+                        audio_embeddings.c.user_id == user_id,
+                    )
+                )
+            )
+            if existing.first():
+                await conn.execute(
+                    sa.update(audio_embeddings).where(
+                        sa.and_(
+                            audio_embeddings.c.catalog_id == catalog_id,
+                            audio_embeddings.c.user_id == user_id,
+                        )
+                    ).values(
+                        embedding=embedding, model_version=model,
+                        embedding_dim=dim, analyzed_at=now,
+                    )
+                )
+            else:
+                await conn.execute(audio_embeddings.insert().values(**values))
     except Exception:
-        logger.debug("Failed to store per-user embedding for %s", catalog_id)
+        logger.warning("Failed to store embedding for %s: %s", catalog_id, exc_info=True)
 
     # Global ISRC storage
     if isrc:
         try:
+            from musicmind.db.schema import audio_embeddings_global
             async with engine.begin() as conn:
-                await conn.execute(sa.text(
-                    "INSERT INTO audio_embeddings_global"
-                    " (isrc, embedding, embedding_dim, model_version, analyzed_at)"
-                    " VALUES (:isrc, :emb, :dim, :model, :now)"
-                    " ON CONFLICT (isrc) DO UPDATE SET"
-                    " embedding = CASE WHEN :dim > audio_embeddings_global.embedding_dim"
-                    "   THEN :emb ELSE audio_embeddings_global.embedding END,"
-                    " embedding_dim = GREATEST(:dim, audio_embeddings_global.embedding_dim),"
-                    " model_version = CASE WHEN :dim > audio_embeddings_global.embedding_dim"
-                    "   THEN :model ELSE audio_embeddings_global.model_version END,"
-                    " analyzed_at = :now"
-                ), {
-                    "isrc": isrc, "emb": emb_json,
-                    "dim": dim, "model": model, "now": now,
-                })
+                existing = await conn.execute(
+                    sa.select(audio_embeddings_global.c.isrc).where(
+                        audio_embeddings_global.c.isrc == isrc
+                    )
+                )
+                if existing.first():
+                    await conn.execute(
+                        sa.update(audio_embeddings_global).where(
+                            audio_embeddings_global.c.isrc == isrc
+                        ).values(
+                            embedding=embedding, embedding_dim=dim,
+                            model_version=model, analyzed_at=now,
+                        )
+                    )
+                else:
+                    await conn.execute(
+                        audio_embeddings_global.insert().values(
+                            isrc=isrc, embedding=embedding, embedding_dim=dim,
+                            model_version=model, analyzed_at=now,
+                        )
+                    )
         except Exception:
             logger.debug("Failed to store global embedding for ISRC %s", isrc)
 
