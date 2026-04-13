@@ -39,8 +39,16 @@ class AudioEnricher:
     @modal.enter()
     def load_models(self) -> None:
         """Load models once at container startup (cached across calls)."""
-        import laion_clap
         import torch
+
+        # PyTorch 2.6+ defaults weights_only=True which breaks CLAP checkpoints
+        # (they contain numpy globals). Patch torch.load to allow unsafe loading.
+        _orig_load = torch.load
+        torch.load = lambda *a, **kw: _orig_load(
+            *a, **{**kw, "weights_only": False},
+        )
+
+        import laion_clap
         from transformers import AutoModel, Wav2Vec2FeatureExtractor
 
         # CLAP — music checkpoint
