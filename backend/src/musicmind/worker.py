@@ -733,16 +733,33 @@ async def _fill_library_gaps(engine, settings) -> int:
         user_ids = [row.id for row in result]
 
     for user_id in user_ids:
-        # Skip users with active backend indexing (it handles its own enrichment)
+        # Skip users with ACTIVELY running indexing (updated in last 5 min).
+        # Stale indexing (stuck from a previous crash) should not block the worker.
         try:
+            from datetime import UTC, datetime, timedelta
             async with engine.begin() as conn:
                 idx_row = (await conn.execute(
-                    sa.select(user_indexing_status.c.step).where(
-                        user_indexing_status.c.user_id == user_id
-                    )
+                    sa.select(
+                        user_indexing_status.c.step,
+                        user_indexing_status.c.updated_at,
+                    ).where(user_indexing_status.c.user_id == user_id)
                 )).first()
                 if idx_row and idx_row.step < 7:
-                    continue
+                    updated = idx_row.updated_at
+                    if updated and updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=UTC)
+                    if updated and (datetime.now(UTC) - updated) < timedelta(minutes=5):
+                        continue  # Actively running — yield
+                    # Stale indexing — force to complete so worker can proceed
+                    await conn.execute(
+                        sa.update(user_indexing_status)
+                        .where(user_indexing_status.c.user_id == user_id)
+                        .values(step=7, step_name="complete", updated_at=datetime.now(UTC))
+                    )
+                    logger.info(
+                        "User %s: stale indexing (step %d) force-completed",
+                        user_id[:8], idx_row.step,
+                    )
         except Exception:
             pass
 

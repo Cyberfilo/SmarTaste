@@ -708,12 +708,11 @@
           const s = await statusResp.json();
           document.getElementById('version').textContent = `v${s.version}`;
           document.getElementById('stats').innerHTML = [
-            kpiCard('Users', s.users, `${s.calibrated_users} calibrated`, 'users', 'blue'),
-            kpiCard('Connections', s.connections, '', 'connections', 'purple'),
-            kpiCard('Songs', s.total_songs.toLocaleString(), `${s.total_enriched.toLocaleString()} enriched`, 'songs', 'green'),
-            kpiCard('Enrichment', `${Math.min(100, s.enrichment_pct)}%`, s.soundstat_configured ? 'SoundStat active' : 'Free tier', 'enrichment', 'amber'),
-            kpiCard('ISRC Cache', s.global_isrc_cache.toLocaleString(), 'Global shared', 'cache', 'blue'),
-            kpiCard('History', s.listening_history_entries.toLocaleString(), 'Entries', 'history', 'purple'),
+            kpiCard('Users', s.total_users || s.users || 0, `${s.calibrated_users || 0} calibrated`, 'users', 'blue'),
+            kpiCard('Connected', s.connected_users || s.connections || 0, '', 'connections', 'purple'),
+            kpiCard('Songs', (s.total_songs || 0).toLocaleString(), `${(s.total_enriched || 0).toLocaleString()} enriched`, 'songs', 'green'),
+            kpiCard('Enrichment', `${Math.min(100, s.enrichment_pct || 0)}%`, 'Essentia + Modal', 'enrichment', 'amber'),
+            kpiCard('GPU', (s.gpu_embeddings || 0).toLocaleString(), 'CLAP + MERT', 'cache', 'blue'),
           ].join('');
         }
 
@@ -851,7 +850,7 @@
           const badge = document.getElementById('pipelineTotal');
           badge.textContent = `${b.total.toLocaleString()} songs`;
 
-          const stageNames = { audio_features: 'Audio Features', lastfm_tags: 'Last.fm Tags', musicbrainz_credits: 'MusicBrainz Credits' };
+          const stageNames = { audio_features: 'Audio Features', effnet_embeddings: 'EffNet Embeddings', gpu_embeddings: 'GPU (CLAP+MERT)', ai_captions: 'AI Captions', classifier_labels: 'Classifier Labels' };
           const stages = b.stages || {};
 
           el.innerHTML = `
