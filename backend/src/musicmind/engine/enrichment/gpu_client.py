@@ -29,7 +29,7 @@ async def enrich_via_gpu(
     if not modal_endpoint_url:
         return None
 
-    url = f"{modal_endpoint_url.rstrip('/')}/enrich"
+    url = modal_endpoint_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(url, json={"preview_url": preview_url})
@@ -74,7 +74,7 @@ async def enrich_batch_via_gpu(
     if not modal_endpoint_url:
         return []
 
-    url = f"{modal_endpoint_url.rstrip('/')}/enrich"
+    url = modal_endpoint_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=600.0) as client:
             resp = await client.post(url, json={"preview_urls": preview_urls})
