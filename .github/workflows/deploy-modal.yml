@@ -1,0 +1,29 @@
+name: Deploy Modal GPU Worker
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - 'gpu-worker/**'
+  workflow_dispatch: # Manual trigger from GitHub UI
+
+jobs:
+  deploy:
+    name: Deploy smartaste-gpu-worker to Modal
+    runs-on: ubuntu-latest
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Modal CLI
+        run: pip install modal
+
+      - name: Deploy to Modal
+        run: modal deploy gpu-worker/handler.py

@@ -159,7 +159,36 @@ class AudioEnricher:
 
 # ── HTTP endpoints for Railway ─────────────────────────────────────────────────
 
-@app.function(image=image, timeout=30)
+
+def _log_to_backend(
+    stage: str, result: str, detail: str = "", duration_ms: int = 0,
+) -> None:
+    """Fire-and-forget log to Railway backend logs DB."""
+    import os
+
+    backend_url = os.environ.get("BACKEND_URL", "")
+    admin_secret = os.environ.get("ADMIN_SECRET", "")
+    if not backend_url:
+        return
+    try:
+        import httpx
+        httpx.post(
+            f"{backend_url}/api/admin/gpu-log",
+            json={
+                "stage": stage, "result": result,
+                "detail": detail, "duration_ms": duration_ms,
+            },
+            headers={"x-admin-secret": admin_secret},
+            timeout=5.0,
+        )
+    except Exception:
+        pass  # Best-effort logging
+
+
+@app.function(
+    image=image, timeout=600,
+    secrets=[modal.Secret.from_name("smartaste-secrets", required_hint=False)],
+)
 @modal.fastapi_endpoint(method="POST")
 def enrich(data: dict) -> dict:
     """HTTP endpoint for Railway worker to call.
@@ -167,12 +196,29 @@ def enrich(data: dict) -> dict:
     Body: {"preview_url": "https://..."} or {"preview_urls": ["..."]}
     Returns: enrichment result(s)
     """
+    import time
+
     enricher = AudioEnricher()
+    start = time.time()
 
     if "preview_urls" in data:
-        return {"results": enricher.enrich_batch.remote(data["preview_urls"])}
+        results = enricher.enrich_batch.remote(data["preview_urls"])
+        ok = sum(1 for r in results if r.get("clap_512"))
+        _log_to_backend(
+            "gpu_batch", f"{ok}/{len(results)}",
+            f"{len(data['preview_urls'])} urls",
+            int((time.time() - start) * 1000),
+        )
+        return {"results": results}
     elif "preview_url" in data:
-        return enricher.enrich_track.remote(data["preview_url"])
+        result = enricher.enrich_track.remote(data["preview_url"])
+        _log_to_backend(
+            "gpu_single",
+            "ok" if result.get("clap_512") else "fail",
+            data["preview_url"][:80],
+            int((time.time() - start) * 1000),
+        )
+        return result
     elif "text" in data:
         embedding = enricher.encode_text_clap.remote(data["text"])
         return {"clap_512": embedding}
@@ -180,7 +226,10 @@ def enrich(data: dict) -> dict:
         return {"error": "Provide preview_url, preview_urls, or text"}
 
 
-@app.function(image=image, timeout=30)
+@app.function(
+    image=image, timeout=30,
+    secrets=[modal.Secret.from_name("smartaste-secrets", required_hint=False)],
+)
 @modal.fastapi_endpoint(method="POST")
 def encode_text(data: dict) -> dict:
     """HTTP endpoint for text-to-CLAP encoding (for search)."""
