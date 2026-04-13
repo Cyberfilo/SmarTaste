@@ -246,26 +246,24 @@ class LogWriter:
 
 
 class DatabaseLogHandler(logging.Handler):
-    """Python logging handler that forwards log records to LogWriter.
+    """Python logging handler that forwards WARNING+ log records to LogWriter.
 
-    Captures WARNING+ logs from all loggers and persists them to the
-    error_logs table via the batched LogWriter. INFO logs from the
-    musicmind namespace are also captured for observability.
+    Only persists WARNING, ERROR, CRITICAL to error_logs table.
+    INFO logs are NOT stored (they were flooding the table — 28K rows of noise).
 
     Usage:
         handler = DatabaseLogHandler(log_writer)
         logging.getLogger().addHandler(handler)
     """
 
-    def __init__(self, log_writer: LogWriter, level: int = logging.INFO) -> None:
+    def __init__(self, log_writer: LogWriter, level: int = logging.WARNING) -> None:
         super().__init__(level)
         self._writer = log_writer
 
     def emit(self, record: logging.LogRecord) -> None:
-        # Only persist WARNING+ globally, or INFO+ from musicmind namespace
+        # Only persist WARNING+ (no INFO — it floods the table)
         if record.levelno < logging.WARNING:
-            if not record.name.startswith("musicmind"):
-                return
+            return
 
         try:
             tb = None
@@ -276,7 +274,8 @@ class DatabaseLogHandler(logging.Handler):
             self._writer.log_error(
                 level=record.levelname,
                 logger_name=record.name,
-                message=self.format(record),
+                # Use just the message, not the formatted version with timestamp
+                message=record.getMessage()[:2000],
                 traceback=tb,
             )
         except Exception:

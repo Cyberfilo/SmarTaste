@@ -87,11 +87,17 @@ async def enrich_tracks(
             *[_bounded_audio(t) for t in batch],
             return_exceptions=True,
         )
-        for r in results:
+        for i, r in enumerate(results):
             if isinstance(r, str):
                 stats[r] = stats.get(r, 0) + 1
             else:
                 stats["failed"] += 1
+                t = batch[i] if i < len(batch) else {}
+                logger.warning(
+                    "Track enrichment failed: %s — %s (%s)",
+                    t.get("name", "?"), t.get("artist_name", "?"),
+                    type(r).__name__ if isinstance(r, Exception) else r,
+                )
         gc.collect()
 
     logger.info(
