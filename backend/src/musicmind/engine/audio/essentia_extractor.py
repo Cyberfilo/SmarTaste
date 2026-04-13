@@ -293,10 +293,10 @@ def _extract_embedding_onnx(tmp_path: Path) -> list[float] | None:
         patches = []
         for start in range(0, len(mel_array) - patch_size + 1, patch_size // 2):
             patch = mel_array[start:start + patch_size]
-            patches.append(patch[np.newaxis, np.newaxis, :, :])
+            patches.append(patch[np.newaxis, :, :])
 
         if not patches:
-            patches = [mel_array[:patch_size][np.newaxis, np.newaxis, :, :]]
+            patches = [mel_array[:patch_size][np.newaxis, :, :]]
 
         # Run ONNX on each patch, average embeddings
         input_name = session.get_inputs()[0].name
