@@ -23,6 +23,7 @@ image = (
         "transformers>=4.40",
         "torch>=2.0",
         "torchaudio>=2.0",
+        "torchvision>=0.15",
         "numpy",
         "httpx",
         "fastapi[standard]",

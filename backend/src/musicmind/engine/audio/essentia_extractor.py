@@ -251,10 +251,11 @@ def _extract_dsp_features(es: Any, audio: Any) -> ExtractedFeatures:
 
 
 def _extract_embedding_onnx(tmp_path: Path) -> list[float] | None:
-    """Extract 1,280-dim EffNet embedding via ONNX Runtime.
+    """Extract EffNet embedding via ONNX Runtime.
 
-    Uses mel-spectrogram preprocessing compatible with the Discogs-EffNet model.
-    Returns None if ONNX model unavailable.
+    The discogs-effnet model expects [batch, 1, 128, 96] patches
+    (128 time frames × 96 mel bands). We split the full spectrogram
+    into overlapping patches, run inference on each, and average.
     """
     session = _get_onnx_session()
     if session is None:
@@ -266,7 +267,7 @@ def _extract_embedding_onnx(tmp_path: Path) -> list[float] | None:
 
         audio = es.MonoLoader(filename=str(tmp_path), sampleRate=16000)()
 
-        # Compute mel spectrogram (96 bands, matching EffNet training)
+        # Compute mel spectrogram (96 bands)
         w = es.Windowing(type="hann", size=512)
         spectrum = es.Spectrum(size=512)
         mel = es.MelBands(
@@ -276,45 +277,48 @@ def _extract_embedding_onnx(tmp_path: Path) -> list[float] | None:
             highFrequencyBound=8000,
         )
 
-        # Frame-by-frame mel extraction
         mel_frames = []
-        frame_size = 512
-        hop_size = 256
-        for i in range(0, len(audio) - frame_size, hop_size):
-            frame = audio[i:i + frame_size]
-            windowed = w(frame)
-            spec = spectrum(windowed)
-            mel_band = mel(spec)
-            mel_frames.append(mel_band)
+        for i in range(0, len(audio) - 512, 256):
+            frame = audio[i:i + 512]
+            mel_frames.append(mel(spectrum(w(frame))))
 
-        if not mel_frames:
+        if len(mel_frames) < 128:
             return None
 
         mel_array = np.array(mel_frames, dtype=np.float32)
-
-        # Log-compress (standard for EffNet)
         mel_array = np.log1p(mel_array * 10000)
 
-        # EffNet expects [batch, 1, time, mel_bands]
-        mel_input = mel_array[np.newaxis, np.newaxis, :, :]
+        # Split into patches of 128 frames (model's expected input)
+        patch_size = 128
+        patches = []
+        for start in range(0, len(mel_array) - patch_size + 1, patch_size // 2):
+            patch = mel_array[start:start + patch_size]
+            patches.append(patch[np.newaxis, np.newaxis, :, :])
 
-        # Run ONNX inference
+        if not patches:
+            patches = [mel_array[:patch_size][np.newaxis, np.newaxis, :, :]]
+
+        # Run ONNX on each patch, average embeddings
         input_name = session.get_inputs()[0].name
         output_name = session.get_outputs()[0].name
-        result = session.run([output_name], {input_name: mel_input})
+        embeddings = []
+        for patch in patches:
+            result = session.run([output_name], {input_name: patch})
+            emb = result[0]
+            if len(emb.shape) == 2:
+                embeddings.append(emb[0])
+            elif len(emb.shape) == 1:
+                embeddings.append(emb)
 
-        embeddings = result[0]  # Shape: [1, embedding_dim] or [batch, embedding_dim]
+        if not embeddings:
+            return None
 
-        if embeddings.shape[-1] >= 128:
-            # Average pool if multiple frames
-            if len(embeddings.shape) > 2:
-                embedding = embeddings.mean(axis=1)[0]
-            elif len(embeddings.shape) == 2:
-                embedding = embeddings[0]
-            else:
-                embedding = embeddings
-
-            return [round(float(v), 6) for v in embedding]
+        avg_embedding = np.mean(embeddings, axis=0)
+        logger.info(
+            "ONNX EffNet: %d-dim embedding from %d patches",
+            len(avg_embedding), len(patches),
+        )
+        return [round(float(v), 6) for v in avg_embedding]
 
     except Exception:
         logger.warning("ONNX EffNet extraction failed", exc_info=True)
