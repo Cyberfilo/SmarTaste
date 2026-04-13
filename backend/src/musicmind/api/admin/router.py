@@ -717,3 +717,26 @@ async def reindex_user(
             "Indexing will re-fetch library and reuse cached data."
         ),
     }
+
+
+@router.post("/gpu-log")
+async def receive_gpu_log(
+    request: Request,
+    data: dict,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Receive enrichment log from Modal GPU worker.
+
+    Called by the Modal handler after each enrichment to forward logs
+    to the Railway logs DB.
+    """
+    log_writer = getattr(request.app.state, "log_writer", None)
+    if log_writer:
+        log_writer.log_enrichment(
+            user_id="modal-gpu",
+            catalog_id=data.get("detail", "")[:50],
+            stage=data.get("stage", "gpu"),
+            result=data.get("result", "unknown"),
+            duration_ms=data.get("duration_ms"),
+        )
+    return {"ok": True}
