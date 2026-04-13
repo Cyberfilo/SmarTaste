@@ -187,7 +187,6 @@ def _log_to_backend(
 
 @app.function(
     image=image, timeout=600,
-    secrets=[modal.Secret.from_name("smartaste-secrets", required_hint=False)],
 )
 @modal.fastapi_endpoint(method="POST")
 def enrich(data: dict) -> dict:
@@ -228,7 +227,7 @@ def enrich(data: dict) -> dict:
 
 @app.function(
     image=image, timeout=30,
-    secrets=[modal.Secret.from_name("smartaste-secrets", required_hint=False)],
+    secrets=[modal.Secret.from_name("smartaste-secrets")],
 )
 @modal.fastapi_endpoint(method="POST")
 def encode_text(data: dict) -> dict:
