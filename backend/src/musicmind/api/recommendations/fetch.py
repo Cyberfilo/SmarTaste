@@ -452,6 +452,7 @@ async def discover_editorial(
                         candidates.append(track)
 
                 elif service == "apple_music":
+                    genre_term = genre.replace("/", " ")
                     headers = {
                         "Authorization": f"Bearer {developer_token or access_token}"
                     }
@@ -459,7 +460,7 @@ async def discover_editorial(
                         f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
                         headers=headers,
                         params={
-                            "term": query,
+                            "term": genre_term,
                             "types": "songs",
                             "limit": limit,
                         },
