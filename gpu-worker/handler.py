@@ -66,34 +66,18 @@ class AudioEnricher:
         if torch.cuda.is_available():
             self.mert_model = self.mert_model.cuda()
 
-    @modal.method()
-    def enrich_track(self, preview_url: str) -> dict:
-        """Full Tier 2 enrichment for a single track.
+    def _process_audio_bytes(self, audio_bytes: bytes) -> dict:
+        """Core enrichment logic: audio bytes → CLAP + MERT embeddings.
 
-        Args:
-            preview_url: URL to 30-second M4A/MP3 preview.
-
-        Returns:
-            Dict with clap_512 and mert_768 embedding lists.
+        Plain method (no @modal.method) so it can be called directly
+        from other methods within the same class.
         """
         import tempfile
         from pathlib import Path
 
-        import httpx
-        import numpy as np  # noqa: F401
-
-        # Download preview
-        try:
-            resp = httpx.get(preview_url, timeout=30.0, follow_redirects=True)
-            resp.raise_for_status()
-            audio_bytes = resp.content
-        except Exception as e:
-            return {"error": f"Download failed: {e}", "clap_512": None, "mert_768": None}
-
         if len(audio_bytes) < 1000:
             return {"error": "Audio too small", "clap_512": None, "mert_768": None}
 
-        # Write to tempfile
         with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp:
             tmp.write(audio_bytes)
             tmp_path = Path(tmp.name)
@@ -119,7 +103,6 @@ class AudioEnricher:
                 audio, sr = sf.read(str(tmp_path))
                 if len(audio.shape) > 1:
                     audio = audio.mean(axis=1)  # mono
-                # Resample to 24kHz for MERT
                 if sr != 24000:
                     import torchaudio
                     audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
@@ -136,7 +119,6 @@ class AudioEnricher:
                 with torch.no_grad():
                     outputs = self.mert_model(**inputs, output_hidden_states=True)
 
-                # Average last hidden state across time
                 last_hidden = outputs.hidden_states[-1]
                 embedding = last_hidden.mean(dim=1).squeeze(0).cpu().numpy()
                 result["mert_768"] = [round(float(v), 6) for v in embedding]
@@ -149,6 +131,32 @@ class AudioEnricher:
 
         finally:
             tmp_path.unlink(missing_ok=True)
+
+    @modal.method()
+    def enrich_track(self, preview_url: str) -> dict:
+        """Enrichment from a preview URL (downloads then processes)."""
+        import httpx
+
+        try:
+            resp = httpx.get(preview_url, timeout=30.0, follow_redirects=True)
+            resp.raise_for_status()
+            audio_bytes = resp.content
+        except Exception as e:
+            return {"error": f"Download failed: {e}", "clap_512": None, "mert_768": None}
+
+        return self._process_audio_bytes(audio_bytes)
+
+    @modal.method()
+    def enrich_track_from_bytes(self, audio_b64: str) -> dict:
+        """Enrichment from base64-encoded audio bytes (no download)."""
+        import base64
+
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception as e:
+            return {"error": f"Base64 decode failed: {e}", "clap_512": None, "mert_768": None}
+
+        return self._process_audio_bytes(audio_bytes)
 
     @modal.method()
     def encode_text_clap(self, text: str) -> list[float] | None:
@@ -160,84 +168,33 @@ class AudioEnricher:
             return None
 
     @modal.method()
-    def enrich_track_from_bytes(self, audio_b64: str) -> dict:
-        """Enrichment from base64-encoded audio bytes (no URL download).
-
-        Used when Railway has cached the preview audio locally,
-        avoiding expired Deezer CDN URLs.
-        """
-        import base64
-        import tempfile
-        from pathlib import Path
-
-        try:
-            audio_bytes = base64.b64decode(audio_b64)
-        except Exception as e:
-            return {"error": f"Base64 decode failed: {e}", "clap_512": None, "mert_768": None}
-
-        if len(audio_bytes) < 1000:
-            return {"error": "Audio too small", "clap_512": None, "mert_768": None}
-
-        with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = Path(tmp.name)
-
-        try:
-            result: dict = {"error": None}
-
-            try:
-                embedding = self.clap_model.get_audio_embedding_from_filelist(
-                    [str(tmp_path)], use_tensor=False,
-                )
-                result["clap_512"] = [round(float(v), 6) for v in embedding[0]]
-            except Exception as e:
-                result["clap_512"] = None
-                result["error"] = f"CLAP failed: {e}"
-
-            try:
-                import soundfile as sf
-                import torch
-
-                audio, sr = sf.read(str(tmp_path))
-                if len(audio.shape) > 1:
-                    audio = audio.mean(axis=1)
-                if sr != 24000:
-                    import torchaudio
-                    audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
-                    resampler = torchaudio.transforms.Resample(sr, 24000)
-                    audio_tensor = resampler(audio_tensor)
-                    audio = audio_tensor.squeeze(0).numpy()
-
-                inputs = self.mert_processor(
-                    audio, sampling_rate=24000, return_tensors="pt",
-                )
-                if torch.cuda.is_available():
-                    inputs = {k: v.cuda() for k, v in inputs.items()}
-
-                with torch.no_grad():
-                    outputs = self.mert_model(**inputs, output_hidden_states=True)
-
-                last_hidden = outputs.hidden_states[-1]
-                embedding = last_hidden.mean(dim=1).squeeze(0).cpu().numpy()
-                result["mert_768"] = [round(float(v), 6) for v in embedding]
-            except Exception as e:
-                result["mert_768"] = None
-                if not result["error"]:
-                    result["error"] = f"MERT failed: {e}"
-
-            return result
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-    @modal.method()
     def enrich_batch(self, preview_urls: list[str]) -> list[dict]:
-        """Batch enrichment for efficiency."""
-        return [self.enrich_track(url) for url in preview_urls]
+        """Batch enrichment from URLs."""
+        import httpx
+
+        results = []
+        for url in preview_urls:
+            try:
+                resp = httpx.get(url, timeout=30.0, follow_redirects=True)
+                resp.raise_for_status()
+                results.append(self._process_audio_bytes(resp.content))
+            except Exception as e:
+                results.append({"error": f"Download failed: {e}", "clap_512": None, "mert_768": None})
+        return results
 
     @modal.method()
     def enrich_batch_from_bytes(self, audio_items: list[str]) -> list[dict]:
         """Batch enrichment from base64-encoded audio bytes."""
-        return [self.enrich_track_from_bytes(b64) for b64 in audio_items]
+        import base64
+
+        results = []
+        for b64 in audio_items:
+            try:
+                audio_bytes = base64.b64decode(b64)
+                results.append(self._process_audio_bytes(audio_bytes))
+            except Exception as e:
+                results.append({"error": f"Decode failed: {e}", "clap_512": None, "mert_768": None})
+        return results
 
 
 # ── HTTP endpoints for Railway ─────────────────────────────────────────────────
