@@ -28,6 +28,8 @@ image = (
         "httpx",
         "fastapi[standard]",
         "soundfile",
+        "librosa>=0.10",
+        "audioread",
     )
 )
 
@@ -97,12 +99,12 @@ class AudioEnricher:
 
             # MERT embedding (768-dim)
             try:
-                import soundfile as sf
+                import librosa
                 import torch
 
-                audio, sr = sf.read(str(tmp_path))
-                if len(audio.shape) > 1:
-                    audio = audio.mean(axis=1)  # mono
+                # Use librosa instead of soundfile — handles M4A/AAC
+                # via audioread fallback (soundfile only reads WAV/FLAC)
+                audio, sr = librosa.load(str(tmp_path), sr=None, mono=True)
                 if sr != 24000:
                     import torchaudio
                     audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)

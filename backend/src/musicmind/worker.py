@@ -1605,29 +1605,38 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
                     for (cid, _), gpu_data in zip(
                         bytes_chunk, results,
                     ):
-                        if gpu_data and not gpu_data.get("error"):
-                            clap = gpu_data.get("clap_512")
-                            mert = gpu_data.get("mert_768")
-                            if clap or mert:
-                                async with engine.begin() as conn:
-                                    await conn.execute(sa.text(
-                                        "UPDATE audio_embeddings"
-                                        " SET clap_embedding = :clap,"
-                                        "     mert_embedding = :mert"
-                                        " WHERE catalog_id = :cid"
-                                        "   AND user_id = :uid"
-                                    ), {
-                                        "cid": cid, "uid": user_id,
-                                        "clap": json.dumps(clap)
-                                        if clap else None,
-                                        "mert": json.dumps(mert)
-                                        if mert else None,
-                                    })
-                                total_stored += 1
-                        elif gpu_data and gpu_data.get("error"):
-                            logger.warning(
-                                "GPU backfill error for %s: %s",
-                                cid, gpu_data["error"][:100],
+                        if not gpu_data:
+                            continue
+                        # Store CLAP/MERT independently — one may
+                        # succeed while the other fails (e.g., MERT
+                        # can't read M4A via soundfile)
+                        clap = gpu_data.get("clap_512")
+                        mert = gpu_data.get("mert_768")
+                        if clap or mert:
+                            async with engine.begin() as conn:
+                                await conn.execute(sa.text(
+                                    "UPDATE audio_embeddings"
+                                    " SET clap_embedding ="
+                                    "   COALESCE(:clap,"
+                                    "     clap_embedding),"
+                                    "     mert_embedding ="
+                                    "   COALESCE(:mert,"
+                                    "     mert_embedding)"
+                                    " WHERE catalog_id = :cid"
+                                    "   AND user_id = :uid"
+                                ), {
+                                    "cid": cid, "uid": user_id,
+                                    "clap": json.dumps(clap)
+                                    if clap else None,
+                                    "mert": json.dumps(mert)
+                                    if mert else None,
+                                })
+                            total_stored += 1
+                        if gpu_data.get("error"):
+                            logger.debug(
+                                "GPU partial error for %s: %s",
+                                cid,
+                                gpu_data["error"][:100],
                             )
                 except Exception:
                     logger.warning(

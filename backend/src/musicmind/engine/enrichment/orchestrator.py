@@ -188,12 +188,17 @@ async def enrich_tracks(
         async def _store_gpu_result(
             t: dict[str, Any], gpu_data: dict[str, Any],
         ) -> bool:
-            if not gpu_data or gpu_data.get("error"):
+            if not gpu_data:
                 return False
             cid = t.get("catalog_id", "")
             clap = gpu_data.get("clap_512")
             mert = gpu_data.get("mert_768")
             if not (clap or mert):
+                if gpu_data.get("error"):
+                    logger.debug(
+                        "GPU enrichment failed for %s: %s",
+                        cid, gpu_data["error"][:100],
+                    )
                 return False
             async with engine.begin() as conn:
                 await conn.execute(sa.text(
