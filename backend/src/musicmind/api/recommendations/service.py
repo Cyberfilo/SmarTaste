@@ -206,6 +206,9 @@ class RecommendationService:
         )
 
         user_audio_centroid = profile.get("audio_centroid") or None
+        user_clap_centroid = profile.get("clap_centroid") or None
+        user_mert_centroid = profile.get("mert_centroid") or None
+        user_embedding_centroid = profile.get("embedding_centroid") or None
 
         # Step 6b: Load Last.fm tag profile + collaborative matches
         user_tag_profile, collaborative_matches = await self._load_lastfm_data(
@@ -264,10 +267,21 @@ class RecommendationService:
             max_to_enrich=min(limit * 2, 30),
         )
 
+        # Load CLAP/MERT/EffNet embedding maps for candidates
+        clap_map, mert_map, embedding_map = await self._load_embeddings(
+            engine, pre_ranked, user_id=user_id,
+        )
+
         ranked = rank_candidates(
             pre_ranked, profile, count=limit, weights=weights,
             audio_features_map=audio_features_map,
             user_audio_centroid=user_audio_centroid,
+            embedding_map=embedding_map or None,
+            user_embedding_centroid=user_embedding_centroid,
+            clap_map=clap_map or None,
+            user_clap_centroid=user_clap_centroid,
+            mert_map=mert_map or None,
+            user_mert_centroid=user_mert_centroid,
             calibration_artists=calibration_artists,
             user_tag_profile=user_tag_profile,
             collaborative_matches=collaborative_matches,
@@ -847,6 +861,119 @@ class RecommendationService:
             return None
 
         return {row.item_id: row.weight for row in rows}
+
+    @staticmethod
+    async def _load_embeddings(
+        engine,
+        candidates: list[dict[str, Any]],
+        *,
+        user_id: str,
+    ) -> tuple[
+        dict[str, list[float]],
+        dict[str, list[float]],
+        dict[str, list[float]],
+    ]:
+        """Load CLAP/MERT/EffNet embeddings for candidate tracks.
+
+        Checks user-scoped audio_embeddings first, then falls back to
+        global audio_embeddings_global via ISRC for cross-user sharing.
+
+        Returns (clap_map, mert_map, effnet_map) — catalog_id keyed.
+        """
+        from musicmind.db.schema import audio_embeddings, audio_embeddings_global
+
+        clap_map: dict[str, list[float]] = {}
+        mert_map: dict[str, list[float]] = {}
+        effnet_map: dict[str, list[float]] = {}
+
+        catalog_ids = [
+            c.get("catalog_id", "") for c in candidates
+            if c.get("catalog_id")
+        ]
+        if not catalog_ids:
+            return clap_map, mert_map, effnet_map
+
+        # User-scoped embeddings
+        for i in range(0, len(catalog_ids), 500):
+            chunk = catalog_ids[i:i + 500]
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(
+                            audio_embeddings.c.catalog_id,
+                            audio_embeddings.c.embedding,
+                            audio_embeddings.c.clap_embedding,
+                            audio_embeddings.c.mert_embedding,
+                        ).where(
+                            sa.and_(
+                                audio_embeddings.c.user_id == user_id,
+                                audio_embeddings.c.catalog_id.in_(chunk),
+                            )
+                        )
+                    )
+                    for row in result:
+                        cid = row.catalog_id
+                        emb = row.embedding
+                        if emb and isinstance(emb, list) and len(emb) > 10:
+                            effnet_map[cid] = emb
+                        clap = row.clap_embedding
+                        if clap and isinstance(clap, list) and len(clap) > 10:
+                            clap_map[cid] = clap
+                        mert = row.mert_embedding
+                        if mert and isinstance(mert, list) and len(mert) > 10:
+                            mert_map[cid] = mert
+            except Exception:
+                logger.debug("Failed to load user embeddings", exc_info=True)
+
+        # Global ISRC fallback for candidates not found in user table
+        missing = [
+            c for c in candidates
+            if c.get("catalog_id", "") not in clap_map
+            and c.get("isrc")
+        ]
+        if missing:
+            isrcs = [c["isrc"] for c in missing]
+            isrc_to_cid = {c["isrc"]: c["catalog_id"] for c in missing}
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(
+                            audio_embeddings_global.c.isrc,
+                            audio_embeddings_global.c.embedding,
+                            audio_embeddings_global.c.clap_embedding,
+                            audio_embeddings_global.c.mert_embedding,
+                        ).where(
+                            audio_embeddings_global.c.isrc.in_(isrcs)
+                        )
+                    )
+                    for row in result:
+                        cid = isrc_to_cid.get(row.isrc, "")
+                        if not cid:
+                            continue
+                        emb = row.embedding
+                        if (
+                            emb and isinstance(emb, list)
+                            and len(emb) > 10 and cid not in effnet_map
+                        ):
+                            effnet_map[cid] = emb
+                        clap = row.clap_embedding
+                        if (
+                            clap and isinstance(clap, list)
+                            and len(clap) > 10 and cid not in clap_map
+                        ):
+                            clap_map[cid] = clap
+                        mert = row.mert_embedding
+                        if (
+                            mert and isinstance(mert, list)
+                            and len(mert) > 10 and cid not in mert_map
+                        ):
+                            mert_map[cid] = mert
+            except Exception:
+                logger.debug(
+                    "Failed to load global embeddings", exc_info=True,
+                )
+
+        return clap_map, mert_map, effnet_map
 
     @staticmethod
     async def _load_adaptive_weights(
