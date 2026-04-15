@@ -1361,6 +1361,8 @@ async def _backfill_embeddings(engine, settings) -> int:
             result = await conn.execute(
                 sa.select(
                     song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.name,
+                    song_metadata_cache.c.artist_name,
                     song_metadata_cache.c.preview_url,
                     song_metadata_cache.c.isrc,
                 ).where(
@@ -1396,7 +1398,8 @@ async def _backfill_embeddings(engine, settings) -> int:
         sem = asyncio.Semaphore(concurrency)
 
         async def _extract_one(
-            catalog_id: str, preview_url: str, isrc: str,
+            catalog_id: str, name: str, artist_name: str,
+            preview_url: str, isrc: str,
         ) -> bool:
             async with sem:
                 try:
@@ -1418,7 +1421,7 @@ async def _backfill_embeddings(engine, settings) -> int:
                     if audio_bytes is None:
                         audio_bytes = await _download_preview(preview_url)
 
-                        # Expired Deezer URL? Refresh via search
+                        # Expired Deezer URL? Refresh via name/ISRC
                         if (
                             audio_bytes is None
                             and "dzcdn.net" in preview_url
@@ -1428,7 +1431,8 @@ async def _backfill_embeddings(engine, settings) -> int:
                                     search_preview_url,
                                 )
                                 fresh = await search_preview_url(
-                                    name="", artist_name="",
+                                    name=name,
+                                    artist_name=artist_name,
                                     isrc=isrc or None,
                                 )
                                 if fresh:
@@ -1468,8 +1472,10 @@ async def _backfill_embeddings(engine, settings) -> int:
         for i in range(0, len(rows), batch_size):
             batch = rows[i:i + batch_size]
             results = await asyncio.gather(
-                *[_extract_one(r.catalog_id, r.preview_url, r.isrc or "")
-                  for r in batch],
+                *[_extract_one(
+                    r.catalog_id, r.name or "", r.artist_name or "",
+                    r.preview_url, r.isrc or "",
+                ) for r in batch],
                 return_exceptions=True,
             )
             ok = sum(1 for r in results if r is True)
