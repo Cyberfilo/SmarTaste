@@ -160,9 +160,84 @@ class AudioEnricher:
             return None
 
     @modal.method()
+    def enrich_track_from_bytes(self, audio_b64: str) -> dict:
+        """Enrichment from base64-encoded audio bytes (no URL download).
+
+        Used when Railway has cached the preview audio locally,
+        avoiding expired Deezer CDN URLs.
+        """
+        import base64
+        import tempfile
+        from pathlib import Path
+
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception as e:
+            return {"error": f"Base64 decode failed: {e}", "clap_512": None, "mert_768": None}
+
+        if len(audio_bytes) < 1000:
+            return {"error": "Audio too small", "clap_512": None, "mert_768": None}
+
+        with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = Path(tmp.name)
+
+        try:
+            result: dict = {"error": None}
+
+            try:
+                embedding = self.clap_model.get_audio_embedding_from_filelist(
+                    [str(tmp_path)], use_tensor=False,
+                )
+                result["clap_512"] = [round(float(v), 6) for v in embedding[0]]
+            except Exception as e:
+                result["clap_512"] = None
+                result["error"] = f"CLAP failed: {e}"
+
+            try:
+                import soundfile as sf
+                import torch
+
+                audio, sr = sf.read(str(tmp_path))
+                if len(audio.shape) > 1:
+                    audio = audio.mean(axis=1)
+                if sr != 24000:
+                    import torchaudio
+                    audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+                    resampler = torchaudio.transforms.Resample(sr, 24000)
+                    audio_tensor = resampler(audio_tensor)
+                    audio = audio_tensor.squeeze(0).numpy()
+
+                inputs = self.mert_processor(
+                    audio, sampling_rate=24000, return_tensors="pt",
+                )
+                if torch.cuda.is_available():
+                    inputs = {k: v.cuda() for k, v in inputs.items()}
+
+                with torch.no_grad():
+                    outputs = self.mert_model(**inputs, output_hidden_states=True)
+
+                last_hidden = outputs.hidden_states[-1]
+                embedding = last_hidden.mean(dim=1).squeeze(0).cpu().numpy()
+                result["mert_768"] = [round(float(v), 6) for v in embedding]
+            except Exception as e:
+                result["mert_768"] = None
+                if not result["error"]:
+                    result["error"] = f"MERT failed: {e}"
+
+            return result
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    @modal.method()
     def enrich_batch(self, preview_urls: list[str]) -> list[dict]:
         """Batch enrichment for efficiency."""
         return [self.enrich_track(url) for url in preview_urls]
+
+    @modal.method()
+    def enrich_batch_from_bytes(self, audio_items: list[str]) -> list[dict]:
+        """Batch enrichment from base64-encoded audio bytes."""
+        return [self.enrich_track_from_bytes(b64) for b64 in audio_items]
 
 
 # ── HTTP endpoints for Railway ─────────────────────────────────────────────────
@@ -208,7 +283,17 @@ def enrich(data: dict) -> dict:
     enricher = AudioEnricher()
     start = time.time()
 
-    if "preview_urls" in data:
+    if "audio_items" in data:
+        # Base64-encoded audio bytes — no URL download needed
+        results = enricher.enrich_batch_from_bytes.remote(data["audio_items"])
+        ok = sum(1 for r in results if r.get("clap_512"))
+        _log_to_backend(
+            "gpu_batch_bytes", f"{ok}/{len(results)}",
+            f"{len(data['audio_items'])} items",
+            int((time.time() - start) * 1000),
+        )
+        return {"results": results}
+    elif "preview_urls" in data:
         results = enricher.enrich_batch.remote(data["preview_urls"])
         ok = sum(1 for r in results if r.get("clap_512"))
         _log_to_backend(

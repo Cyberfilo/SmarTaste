@@ -82,5 +82,37 @@ async def enrich_batch_via_gpu(
             data = resp.json()
             return data.get("results", [])
     except Exception:
-        logger.warning("GPU batch enrichment failed for %d URLs", len(preview_urls), exc_info=True)
+        logger.warning(
+            "GPU batch enrichment failed for %d URLs",
+            len(preview_urls), exc_info=True,
+        )
+        return []
+
+
+async def enrich_batch_bytes_via_gpu(
+    audio_items: list[str],
+    modal_endpoint_url: str,
+) -> list[dict[str, Any]]:
+    """Batch GPU enrichment from base64-encoded audio bytes.
+
+    Sends cached audio bytes directly to Modal instead of URLs.
+    Eliminates expired Deezer CDN URL failures entirely.
+    """
+    if not modal_endpoint_url or not audio_items:
+        return []
+
+    url = modal_endpoint_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            resp = await client.post(
+                url, json={"audio_items": audio_items},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("results", [])
+    except Exception:
+        logger.warning(
+            "GPU batch bytes enrichment failed for %d items",
+            len(audio_items), exc_info=True,
+        )
         return []
