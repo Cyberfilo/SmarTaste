@@ -225,12 +225,21 @@ async def main() -> None:
     except Exception:
         logger.exception("Startup Essentia enrichment failed")
 
-    # ── Startup Phase 4: GPU embeddings (Modal, user-linked first) ──
-    await _set_status(engine, "startup_gpu", "GPU enrichment (CLAP + MERT)")
+    # ── Startup Phase 4a: EffNet embedding backfill ──────────────────
+    await _set_status(engine, "startup_effnet", "EffNet embedding backfill")
     try:
         backfilled = await _backfill_embeddings(engine, settings)
         if backfilled > 0:
-            logger.info("Startup GPU/embedding backfill: %d tracks", backfilled)
+            logger.info("Startup EffNet backfill: %d tracks", backfilled)
+    except Exception:
+        logger.exception("Startup EffNet backfill failed")
+
+    # ── Startup Phase 4b: GPU enrichment (CLAP + MERT via Modal) ──
+    await _set_status(engine, "startup_gpu", "GPU enrichment (CLAP + MERT)")
+    try:
+        gpu_stored = await _backfill_gpu_embeddings(engine, settings)
+        if gpu_stored > 0:
+            logger.info("Startup GPU backfill: %d CLAP/MERT stored", gpu_stored)
     except Exception:
         logger.exception("Startup GPU backfill failed")
 
@@ -295,20 +304,35 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d library gap-fill failed", cycle)
 
-        # ── Phase 4: Embedding backfill (EffNet + GPU) ─────────────
+        # ── Phase 4: EffNet embedding backfill ──────────────────────
         await _set_status(
             engine, "embedding_backfill",
-            "Completing partial enrichment", cycle=cycle,
+            "EffNet embedding backfill", cycle=cycle,
         )
         try:
             backfilled = await _backfill_embeddings(engine, settings)
             if backfilled > 0:
                 logger.info(
-                    "Cycle %d: backfilled %d embeddings",
+                    "Cycle %d: backfilled %d EffNet embeddings",
                     cycle, backfilled,
                 )
         except Exception:
-            logger.exception("Cycle %d embedding backfill failed", cycle)
+            logger.exception("Cycle %d EffNet backfill failed", cycle)
+
+        # ── Phase 5: GPU backfill (CLAP + MERT via Modal) ──────────
+        await _set_status(
+            engine, "gpu_backfill",
+            "GPU enrichment (CLAP + MERT)", cycle=cycle,
+        )
+        try:
+            gpu_stored = await _backfill_gpu_embeddings(engine, settings)
+            if gpu_stored > 0:
+                logger.info(
+                    "Cycle %d: GPU backfill stored %d CLAP/MERT",
+                    cycle, gpu_stored,
+                )
+        except Exception:
+            logger.exception("Cycle %d GPU backfill failed", cycle)
 
         # ── Check if user-linked work is done ──────────────────────
         user_work_remaining = await _count_user_linked_gaps(engine)
@@ -1489,6 +1513,143 @@ async def _backfill_embeddings(engine, settings) -> int:
 
     logger.info("Embedding backfill complete: %d total", total)
     return total
+
+
+# ── GPU Backfill (CLAP + MERT) ──────────────────────────────────────────
+
+
+async def _backfill_gpu_embeddings(engine, settings) -> int:
+    """Standalone GPU backfill: send cached audio bytes to Modal for
+    tracks that have EffNet embeddings but lack CLAP/MERT.
+
+    Runs independently of enrich_tracks() so GPU enrichment isn't
+    blocked by Essentia gap-fill completion.
+    User-linked tracks have priority over global.
+    """
+    import base64
+
+    from musicmind.db.schema import (
+        audio_embeddings,
+        users,
+    )
+    from musicmind.engine.enrichment.gpu_client import (
+        enrich_batch_bytes_via_gpu,
+    )
+    from musicmind.engine.enrichment.orchestrator import _get_cached_audio
+
+    modal_url = getattr(settings, "modal_endpoint_url", None)
+    if not modal_url:
+        logger.debug("GPU backfill skipped: no modal_endpoint_url")
+        return 0
+
+    total_stored = 0
+
+    async with engine.begin() as conn:
+        user_rows = await conn.execute(sa.select(users.c.id))
+        user_ids = [r.id for r in user_rows]
+
+    for user_id in user_ids:
+        # Find tracks with embeddings row but no CLAP
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    audio_embeddings.c.catalog_id,
+                ).where(
+                    sa.and_(
+                        audio_embeddings.c.user_id == user_id,
+                        audio_embeddings.c.clap_embedding.is_(None),
+                    )
+                ).limit(100)
+            )
+            rows = result.fetchall()
+
+        if not rows:
+            continue
+
+        logger.info(
+            "GPU backfill: %d tracks for user %s",
+            len(rows), user_id[:8],
+        )
+
+        # Build batch: prefer cached bytes, fall back to DB preview URL
+        batch_items: list[tuple[str, str | None, bytes | None]] = []
+        for row in rows:
+            cid = row.catalog_id
+            cached = await _get_cached_audio(engine, cid)
+            batch_items.append((cid, None, cached))
+
+        # Process in GPU batches of 10
+        gpu_batch_size = 10
+        for i in range(0, len(batch_items), gpu_batch_size):
+            chunk = batch_items[i:i + gpu_batch_size]
+
+            # Split into bytes-based and URL-based
+            bytes_chunk = [
+                (cid, audio)
+                for cid, _, audio in chunk if audio
+            ]
+            url_chunk = [
+                cid for cid, _, audio in chunk if not audio
+            ]
+
+            # Bytes-based GPU call
+            if bytes_chunk:
+                b64_items = [
+                    base64.b64encode(audio).decode("ascii")
+                    for _, audio in bytes_chunk
+                ]
+                try:
+                    results = await enrich_batch_bytes_via_gpu(
+                        b64_items, modal_url,
+                    )
+                    for (cid, _), gpu_data in zip(
+                        bytes_chunk, results,
+                    ):
+                        if gpu_data and not gpu_data.get("error"):
+                            clap = gpu_data.get("clap_512")
+                            mert = gpu_data.get("mert_768")
+                            if clap or mert:
+                                async with engine.begin() as conn:
+                                    await conn.execute(sa.text(
+                                        "UPDATE audio_embeddings"
+                                        " SET clap_embedding = :clap,"
+                                        "     mert_embedding = :mert"
+                                        " WHERE catalog_id = :cid"
+                                        "   AND user_id = :uid"
+                                    ), {
+                                        "cid": cid, "uid": user_id,
+                                        "clap": json.dumps(clap)
+                                        if clap else None,
+                                        "mert": json.dumps(mert)
+                                        if mert else None,
+                                    })
+                                total_stored += 1
+                        elif gpu_data and gpu_data.get("error"):
+                            logger.warning(
+                                "GPU backfill error for %s: %s",
+                                cid, gpu_data["error"][:100],
+                            )
+                except Exception:
+                    logger.warning(
+                        "GPU backfill batch failed",
+                        exc_info=True,
+                    )
+
+            # Log skipped tracks without cached audio
+            if url_chunk:
+                logger.debug(
+                    "GPU backfill: %d tracks without cached audio"
+                    " (user %s), skipping",
+                    len(url_chunk), user_id[:8],
+                )
+
+        if total_stored > 0:
+            logger.info(
+                "GPU backfill: %d CLAP/MERT stored for user %s",
+                total_stored, user_id[:8],
+            )
+
+    return total_stored
 
 
 # ── ISRC Backfill ────────────────────────────────────────────────────────
