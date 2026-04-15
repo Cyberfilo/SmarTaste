@@ -82,5 +82,5 @@ async def enrich_batch_via_gpu(
             data = resp.json()
             return data.get("results", [])
     except Exception:
-        logger.debug("GPU batch enrichment failed", exc_info=True)
+        logger.warning("GPU batch enrichment failed for %d URLs", len(preview_urls), exc_info=True)
         return []

@@ -558,6 +558,31 @@ playlist_items = sa.Table(
     sa.Column("added_by", sa.Text, server_default="user"),  # user, ai_expand, ai_improve
 )
 
+# ── Preview Audio Cache ─────────────────────────────────────────────────────
+# Caches raw preview audio bytes to avoid re-downloading expiring Deezer URLs.
+# Worker cleans up rows where enrichment_complete=true or downloaded_at > 7 days.
+
+preview_audio_cache = sa.Table(
+    "preview_audio_cache",
+    metadata,
+    sa.Column("catalog_id", sa.Text, primary_key=True),
+    sa.Column("audio_data", sa.LargeBinary, nullable=False),
+    sa.Column("content_type", sa.Text, server_default="audio/mpeg"),
+    sa.Column("source_url", sa.Text, nullable=True),
+    sa.Column(
+        "downloaded_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "enrichment_complete",
+        sa.Boolean,
+        nullable=False,
+        server_default=sa.text("false"),
+    ),
+)
+
 # ── Performance Indexes ─────────────────────────────────────────────────────
 # Composite PK tables index only the first column; queries filtering by
 # user_id alone need explicit indexes to avoid full table scans.

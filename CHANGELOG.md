@@ -7,6 +7,41 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.200 — 2026-04-15
+
+### Pipeline Reliability & Worker Hardening
+
+#### GPU Pipeline Fix (CLAP + MERT were at 0% coverage)
+- **Root cause**: Phase 2 (Modal GPU) used stale in-memory preview URLs from expired Deezer CDN links. Phase 1 (Essentia) refreshed them in the DB, but Phase 2 never re-read
+- **Fix**: Phase 2 now re-reads fresh `preview_url` from `song_metadata_cache` after Phase 1 completes
+- **GPU batching**: Split from single mega-batch into chunks of 10 (avoids Modal timeout on large catalogs)
+- **GPU client logging**: Failures now log as WARNING (was debug — completely invisible in production)
+
+#### IntegrityError Infinite Loop Fix
+- **Problem**: 13 discovery tracks failed with IntegrityError every 60s cycle, generating ~300 log entries/day
+- **Fix**: Module-level `_failed_tracks` dict tracks failures per track. After 3 failures, track is marked `permanently_failed` in DB and skipped. Resets every 50 cycles to allow retries after code fixes
+- **Batch exception handlers**: Both `_fill_library_gaps` and `_enrich_global_songs` now catch batch-level failures and increment per-track counters
+- **IntegrityError safety net**: `_store_embedding` catches IntegrityError explicitly (logs warning, continues)
+
+#### Preview Audio Cache (new table)
+- **`preview_audio_cache`** table (migration 023): stores downloaded 30s preview audio bytes
+- Orchestrator checks cache before downloading, caches after download
+- Marks `enrichment_complete = true` after all enrichment stages pass
+- Worker Phase 0a cleans up completed + stale (>7 day) entries
+- Solves Deezer preview URL expiry (URLs expire ~24h, audio bytes persist)
+
+#### ISRC Backfill (free APIs)
+- **`isrc_lookup.py`**: Deezer (fast, no key) + MusicBrainz (fallback, 1 req/sec) ISRC resolution
+- **Worker Phase 1c**: Backfills missing ISRCs for `song_metadata_cache` and `global_song_cache` each cycle
+- ISRC is the global dedup key for sharing enrichment across users
+
+#### Dead Code Cleanup
+- Deleted `worker/enrichment_worker.py` (619 lines, old ReccoBeats worker)
+- Deleted `worker/requirements.txt` (unused, Dockerfile uses backend/pyproject.toml)
+- Deleted `worker/proxy.txt` (proxy list for old worker)
+
+---
+
 ## V 6.100 — 2026-04-10
 
 ### Full Audio Intelligence Stack

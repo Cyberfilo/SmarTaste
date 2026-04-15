@@ -1,3 +1,8 @@
+# Worker image — runs musicmind.worker from the backend package.
+# Build context must be the repo root so COPY backend/... paths resolve.
+# Dependencies come from backend/pyproject.toml (uv sync --extra audio),
+# NOT from worker/requirements.txt (deleted — was dead code).
+#
 # Python 3.12 required — essentia only has wheels for 3.9-3.12
 FROM python:3.12-slim
 
