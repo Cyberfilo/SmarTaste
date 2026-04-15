@@ -179,7 +179,7 @@ async def main() -> None:
         cycle += 1
         start = time.monotonic()
 
-        # ── Phase 1: Fill user library enrichment gaps first ────────
+        # ── Phase 1a: Fill user library enrichment gaps first ───────
         await _set_status(
             engine, "library_gaps", "Enriching missing user library songs", cycle=cycle,
         )
@@ -189,6 +189,17 @@ async def main() -> None:
                 logger.info("Cycle %d: enriched %d user library gaps", cycle, lib_enriched)
         except Exception:
             logger.exception("Cycle %d library gap-fill failed", cycle)
+
+        # ── Phase 1b: Backfill missing embeddings (every cycle) ────
+        await _set_status(
+            engine, "embedding_backfill", "Completing partial enrichment", cycle=cycle,
+        )
+        try:
+            backfilled = await _backfill_embeddings(engine, settings)
+            if backfilled > 0:
+                logger.info("Cycle %d: backfilled %d embeddings", cycle, backfilled)
+        except Exception:
+            logger.exception("Cycle %d embedding backfill failed", cycle)
 
         # ── Check if user-linked work is done ──────────────────────
         user_work_remaining = await _count_user_linked_gaps(engine)
