@@ -51,8 +51,8 @@ class AudioEnricher:
         import laion_clap
         from transformers import AutoModel, Wav2Vec2FeatureExtractor
 
-        # CLAP — music checkpoint
-        self.clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
+        # CLAP — music checkpoint (HTSAT-tiny matches the default checkpoint)
+        self.clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-tiny")
         self.clap_model.load_ckpt()  # Downloads ~600MB on first run, cached after
 
         # MERT — music understanding transformer
