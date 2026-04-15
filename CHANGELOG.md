@@ -13,7 +13,9 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 #### GPU Pipeline Fix (CLAP + MERT were at 0% coverage)
 - **Root cause**: Phase 2 (Modal GPU) used stale in-memory preview URLs from expired Deezer CDN links. Phase 1 (Essentia) refreshed them in the DB, but Phase 2 never re-read
-- **Fix**: Phase 2 now re-reads fresh `preview_url` from `song_metadata_cache` after Phase 1 completes
+- **Fix**: Phase 2 now sends cached audio bytes directly to Modal instead of URLs — completely eliminates URL expiry failures
+- **Bytes-first GPU enrichment**: `preview_audio_cache` bytes → base64 → Modal. URL fallback only for uncached tracks
+- **New Modal endpoint**: `enrich_track_from_bytes` / `enrich_batch_from_bytes` — accepts base64-encoded audio, skips download
 - **GPU batching**: Split from single mega-batch into chunks of 10 (avoids Modal timeout on large catalogs)
 - **GPU client logging**: Failures now log as WARNING (was debug — completely invisible in production)
 
