@@ -26,30 +26,25 @@ Weights computed per-user from `compute_context_weights()` based on:
 - **Mood active**: audio becomes dominant at 40%
 - **Feedback-learned**: if 10+ ratings exist, blends 60% context + 40% feedback-optimized
 
-### Scoring Architecture (6 Weighted Dimensions)
+### Scoring Architecture (6 Embedding-Based Dimensions)
 | Dimension | Default Weight | Source |
 |-----------|---------------|--------|
-| Genre match (cosine) | 0.25 | Apple Music/Spotify genres with regional prioritization |
-| Tag similarity (cosine) | 0.15 | Last.fm crowd-sourced tags ("dark", "aggressive", "drill") |
-| Collaborative match | 0.10 | Last.fm track.getSimilar (billions of scrobbles) |
-| Audio similarity | 0.20 | Deezer + ReccoBeats + AcousticBrainz features |
-| Artist affinity | 0.15 | Library presence + calibration + featuring parse |
-| Language/region | 0.15 | Regional genre prefix detection |
+| CLAP cosine (512-dim) | 0.30 | Modal GPU — semantic audio similarity |
+| MERT cosine (768-dim) | 0.25 | Modal GPU — musical structure similarity |
+| EffNet cosine (1280-dim) | 0.15 | Essentia local ONNX — timbral fingerprint |
+| Genre match (cosine) | 0.15 | Apple Music/Spotify native metadata |
+| Scalar audio match | 0.10 | Essentia tempo/energy/danceability euclidean |
+| Artist affinity | 0.05 | Library presence + calibration |
 
 Plus additive bonuses:
-- **calibration_boost** — continuous `min(0.20, weight * 0.03)` — zeroed if genre mismatch
-- **collaborative_match** — +0.20 boost when candidate in Last.fm getSimilar set
 - **diversity** — MMR penalty applied during greedy selection
 - **staleness** — cooldown penalty on recently recommended songs
 
-Unused dimensions redistributed proportionally (graceful degradation when Last.fm/audio unavailable).
+Missing dimensions redistributed proportionally (graceful degradation when embeddings unavailable).
 
-### Play Count Proxy (Apple Music Workaround)
-Apple Music has no play counts. The `play_count_proxy` table tracks `seen_count` from recently-played polling:
-- Each time recently-played is fetched, songs in the list get their `seen_count` incremented
-- Songs seen 5x get 5x weight in the profile (capped at 10x)
-- Songs with `last_seen` in past 7 days get 2x recency multiplier on top
-- `total_songs_analyzed` counts unique songs, not amplified duplicates
+**Removed dimensions** (Apr 2026 pipeline rebuild):
+- Last.fm tags, collaborative matching, language/region — replaced by embedding similarity
+- Play count proxy — table dropped, engagement weighting stubbed
 
 ### Regional Genre Prioritization
 When building genre vectors and computing cosine similarity:
@@ -65,10 +60,32 @@ If a known artist appears in a genre with cosine score < 0.2, their artist_match
 - **chart_filter**: passes user's #1 genre to API + pre-filters by top-5 genre overlap
 - **genre_adjacent_explore**: uses full regional genre names for search, filters out zero-overlap results
 
-### Audio Analysis Tiers
-- **Tier 1** (always): Metadata-only scoring (genres, artists, editorial notes)
-- **Tier 2** (requires `ffmpeg` + `librosa`): 7-dimension audio feature extraction from 30s previews
-- **Tier 3** (macOS only): SoundAnalysis classification labels via Swift CLI helper
+### Enrichment Pipeline (Apr 2026 rebuild)
+All external APIs removed. Pipeline per track:
+1. **Preview URL**: from Apple Music/Spotify natively, Deezer ISRC fallback
+2. **Essentia (CPU, Railway)**: 11 scalar features + 1280-dim EffNet ONNX embedding + classifier heads
+3. **Modal GPU (serverless)**: 512-dim CLAP + 768-dim MERT embeddings
+4. **OpenAI (optional)**: AI-generated track captions
+
+Worker runs embedding backfill every cycle (Phase 1b) to complete partial enrichment.
+
+### Key Infrastructure Files
+| File | Purpose | Depends on |
+|------|---------|-----------|
+| `worker/Dockerfile` | Railway worker image (Python 3.12, Essentia, ONNX) | `backend/src/` |
+| `backend/Dockerfile` | Backend API image | `backend/src/` |
+| `gpu-worker/handler.py` | Modal serverless GPU (CLAP + MERT) | Deployed via `modal deploy` |
+| `.github/workflows/deploy-modal.yml` | Auto-deploy Modal on gpu-worker/ changes | GitHub secrets |
+| `admin/` | Old standalone admin dashboard (Railway service) | Backend API |
+
+### File Dependency Map (change in one affects the other)
+- `orchestrator.py` ↔ `worker.py` ↔ `indexer.py` — enrichment pipeline flow
+- `orchestrator.py` ↔ `essentia_extractor.py` — audio analysis
+- `orchestrator.py` ↔ `gpu_client.py` ↔ `gpu-worker/handler.py` — Modal GPU
+- `scorer.py` ↔ `similarity.py` ↔ `weights.py` — scoring engine
+- `profile.py` ↔ `scorer.py` — taste profile feeds scoring
+- `schema.py` ↔ `alembic/versions/` — DB schema changes need migrations
+- `worker/Dockerfile` ↔ `backend/Dockerfile` — both need same deps, different entry points
 
 ### Onboarding Taste Calibration
 3-step wizard shown after service connection to compensate for Apple Music's lack of play counts:
@@ -83,12 +100,31 @@ Calibration weights are applied as song duplication in the profile builder input
 **DB table**: `user_calibration` (user_id, calibration_type, item_id, item_name, weight)
 **Calibration types**: `top_artist`, `artist_rank`, `playlist`, `playlist_song`
 
-### New DB Tables (adaptive engine)
-- `recommendation_feedback` — user feedback on recommendations (thumbs_up/down, skipped, added_to_library)
-- `audio_features_cache` — extracted audio features (tempo, energy, brightness, danceability, acousticness, valence_proxy, beat_strength)
-- `sound_classification_cache` — optional SoundAnalysis labels
-- `play_count_proxy` — approximate play counts from recently-played observations
-- `user_calibration` — onboarding wizard selections (calibration_type, item_id, weight)
+### Active DB Tables (21 total, migration 022)
+- `audio_features_cache` — Essentia scalar features (tempo, energy, etc.), feature_source tracks provenance
+- `audio_embeddings` — EffNet 1280-dim + CLAP 512-dim + MERT 768-dim per user
+- `audio_embeddings_global` — ISRC-keyed shared embeddings
+- `song_metadata_cache` — includes ai_caption, ai_tags from Essentia classifiers
+- `taste_profile_snapshots` — includes clap_centroid, mert_centroid, embedding_centroid
+
+**Dropped tables** (migration 022): lastfm_tags_cache, kg_artists, kg_relationships, acousticbrainz_cache, lastfm_similar_tracks, isrc_spotify_mapping, bandit_arms, listening_history, play_count_proxy, recommendation_feedback
+
+### Bugs Encountered & Fixed (Apr 2026 sprint)
+- **uuid7 on Python 3.12/3.13**: `uuid.uuid7()` is 3.14+ only. Fixed with `_uuid7 = getattr(uuid, "uuid7", uuid.uuid4)` shim
+- **Essentia no wheel for 3.13/3.14**: Dockerfile downgraded to Python 3.12 (essentia only has 3.9-3.12 wheels)
+- **Worker/Backend Dockerfile mismatch**: `worker/Dockerfile` is SEPARATE from `backend/Dockerfile` — both need identical deps
+- **ONNX input rank**: EffNet expects `[batch, time, mel]` (rank 3), not `[batch, 1, time, mel]` (rank 4)
+- **ONNX patch size**: EffNet expects 128-frame patches, not full spectrogram (~1875 frames for 30s)
+- **beats_confidence type**: Essentia 2.1b6 returns scalar float, not array — use `hasattr(bc, "mean")`
+- **Stale feature skip**: `_enrich_single_track` skipped tracks with old reccobeats features as "complete" — now checks feature_source for stale sources
+- **_merge_features didn't overwrite**: Only filled NULL fields, so old reccobeats values persisted — now overwrites stale sources
+- **Embedding JSON serialization**: `json.dumps()` string passed to sa.JSON column via `sa.text()` silently failed — use SQLAlchemy Core
+- **Stale indexing blocks worker**: Stuck indexing step < 7 from crashed runs blocked gap-fill forever — now force-completes after 5 min
+- **Orphan cleanup deletes __global__**: `__global__` user's audio_features_cache rows deleted as orphans — created system user in DB
+- **Deezer preview URL expiry**: Cached URLs return 403 after ~24h — auto-refresh via fresh ISRC lookup
+- **CLAP model mismatch**: `HTSAT-base` (128 channels) initialized but checkpoint is `HTSAT-tiny` (96 channels)
+- **torch.load weights_only**: PyTorch 2.6+ defaults `weights_only=True`, breaking CLAP checkpoint with numpy globals — monkey-patch to False
+- **Discovery query undefined**: Apple Music branch used `query` variable only defined in Spotify branch — fixed with `genre_term`
 
 ## Code Style
 - All tool inputs: Pydantic BaseModel with Field() descriptions
