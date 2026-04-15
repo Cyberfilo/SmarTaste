@@ -144,7 +144,25 @@ async def main() -> None:
     except Exception:
         logger.debug("worker_status init skipped", exc_info=True)
 
-    # ── Phase 0: Cleanup orphaned audio_features_cache ───────────────
+    # Ensure preview_audio_cache table exists (worker may deploy before
+    # the backend runs alembic upgrade head)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text(
+                "CREATE TABLE IF NOT EXISTS preview_audio_cache ("
+                "  catalog_id TEXT PRIMARY KEY,"
+                "  audio_data BYTEA NOT NULL,"
+                "  content_type TEXT DEFAULT 'audio/mpeg',"
+                "  source_url TEXT,"
+                "  downloaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                "  enrichment_complete BOOLEAN NOT NULL DEFAULT false"
+                ")"
+            ))
+        logger.info("preview_audio_cache table ensured")
+    except Exception:
+        logger.warning("Could not ensure preview_audio_cache table", exc_info=True)
+
+    # ── Startup Phase 0: Cleanup ────────────────────────────────────
     await _set_status(engine, "cleanup", "Removing orphaned audio feature rows")
     try:
         from musicmind.api.admin.progress import cleanup_orphaned_features
@@ -160,20 +178,14 @@ async def main() -> None:
     except Exception:
         logger.exception("Orphan cleanup failed")
 
-    # ── Phase 0a: Cleanup preview audio cache ─────────────────────────
-    # Delete fully-enriched previews (no longer needed) and stale entries (> 7 days)
     await _set_status(engine, "cleanup", "Purging preview audio cache")
     try:
         deleted_previews = await _cleanup_preview_cache(engine)
         if deleted_previews > 0:
             logger.info("Preview cache cleanup: deleted %d entries", deleted_previews)
     except Exception:
-        logger.exception("Preview cache cleanup failed")
+        logger.debug("Preview cache cleanup skipped", exc_info=True)
 
-    # ── Phase 0b: Unlink excess discovered artists ───────────────────
-    # Previous indexer runs created discography songs for ALL library artists.
-    # Now capped at top 20%. Delete non-library songs from artists outside
-    # the top artist list, keeping only songs that are also in global_song_cache.
     await _set_status(engine, "cleanup", "Unlinking excess discovered songs")
     try:
         deleted_total = await _unlink_excess_discoveries(engine)
@@ -182,18 +194,49 @@ async def main() -> None:
     except Exception:
         logger.exception("Excess discovery cleanup failed")
 
-    # ── Phase 0c: Embedding backfill (runs every deploy) ──────────────
-    # Finds tracks with Essentia scalars but missing EffNet/CLAP/MERT embeddings.
-    # User-linked songs have top priority, then global.
-    await _set_status(engine, "backfill", "Embedding backfill (post-deploy)")
+    # ── Startup Phase 1: ISRC backfill (all missing) ────────────────
+    # ISRC enables global dedup — must run before audio download/enrichment
+    await _set_status(engine, "startup_isrc", "Backfilling all missing ISRCs")
+    try:
+        isrc_found = await _backfill_isrcs(engine, batch_limit=500)
+        if isrc_found > 0:
+            logger.info("Startup ISRC backfill: %d found", isrc_found)
+    except Exception:
+        logger.exception("Startup ISRC backfill failed")
+
+    # ── Startup Phase 2: Download + cache preview audio ─────────────
+    # Refresh expired Deezer URLs and cache bytes for all unenriched tracks.
+    # Cached bytes feed both Essentia (Phase 3) and GPU (Phase 4).
+    await _set_status(engine, "startup_audio", "Downloading preview audio files")
+    try:
+        downloaded = await _download_all_previews(engine)
+        if downloaded > 0:
+            logger.info("Startup audio download: %d previews cached", downloaded)
+    except Exception:
+        logger.exception("Startup audio download failed")
+
+    # ── Startup Phase 3: Essentia/ONNX (CPU, on Railway) ────────────
+    # Uses cached bytes — no URL downloads needed
+    await _set_status(engine, "startup_essentia", "Essentia analysis (CPU)")
+    try:
+        lib_enriched = await _fill_library_gaps(engine, settings)
+        if lib_enriched > 0:
+            logger.info("Startup Essentia: %d tracks enriched", lib_enriched)
+    except Exception:
+        logger.exception("Startup Essentia enrichment failed")
+
+    # ── Startup Phase 4: GPU embeddings (Modal, user-linked first) ──
+    await _set_status(engine, "startup_gpu", "GPU enrichment (CLAP + MERT)")
     try:
         backfilled = await _backfill_embeddings(engine, settings)
         if backfilled > 0:
-            logger.info("Embedding backfill: %d tracks enriched", backfilled)
+            logger.info("Startup GPU/embedding backfill: %d tracks", backfilled)
     except Exception:
-        logger.exception("Embedding backfill failed")
+        logger.exception("Startup GPU backfill failed")
 
-    # ── Main loop: library gaps → cobwebs → global enrich ──
+    logger.info("Startup pipeline complete — entering main loop")
+
+    # ── Main loop: ISRC → audio → essentia → GPU → cobweb ──
     cycle = 0
     while True:
         cycle += 1
@@ -205,35 +248,14 @@ async def main() -> None:
         if _fail_cycle_counter >= _FAIL_RESET_CYCLES:
             if _failed_tracks:
                 logger.info(
-                    "Resetting enrichment failure cache (%d entries) after %d cycles",
+                    "Resetting enrichment failure cache (%d entries)"
+                    " after %d cycles",
                     len(_failed_tracks), _FAIL_RESET_CYCLES,
                 )
             _failed_tracks.clear()
             _fail_cycle_counter = 0
 
-        # ── Phase 1a: Fill user library enrichment gaps first ───────
-        await _set_status(
-            engine, "library_gaps", "Enriching missing user library songs", cycle=cycle,
-        )
-        try:
-            lib_enriched = await _fill_library_gaps(engine, settings)
-            if lib_enriched > 0:
-                logger.info("Cycle %d: enriched %d user library gaps", cycle, lib_enriched)
-        except Exception:
-            logger.exception("Cycle %d library gap-fill failed", cycle)
-
-        # ── Phase 1b: Backfill missing embeddings (every cycle) ────
-        await _set_status(
-            engine, "embedding_backfill", "Completing partial enrichment", cycle=cycle,
-        )
-        try:
-            backfilled = await _backfill_embeddings(engine, settings)
-            if backfilled > 0:
-                logger.info("Cycle %d: backfilled %d embeddings", cycle, backfilled)
-        except Exception:
-            logger.exception("Cycle %d embedding backfill failed", cycle)
-
-        # ── Phase 1c: ISRC backfill ────────────────────────────────
+        # ── Phase 1: ISRC backfill ─────────────────────────────────
         await _set_status(
             engine, "isrc_backfill", "Looking up missing ISRCs", cycle=cycle,
         )
@@ -243,6 +265,50 @@ async def main() -> None:
                 logger.info("Cycle %d: found %d ISRCs", cycle, isrc_found)
         except Exception:
             logger.exception("Cycle %d ISRC backfill failed", cycle)
+
+        # ── Phase 2: Download + cache preview audio ────────────────
+        await _set_status(
+            engine, "audio_download", "Downloading missing previews",
+            cycle=cycle,
+        )
+        try:
+            downloaded = await _download_all_previews(engine, limit=100)
+            if downloaded > 0:
+                logger.info(
+                    "Cycle %d: downloaded %d previews", cycle, downloaded,
+                )
+        except Exception:
+            logger.exception("Cycle %d audio download failed", cycle)
+
+        # ── Phase 3: Essentia/ONNX enrichment (CPU) ────────────────
+        await _set_status(
+            engine, "library_gaps",
+            "Enriching missing user library songs", cycle=cycle,
+        )
+        try:
+            lib_enriched = await _fill_library_gaps(engine, settings)
+            if lib_enriched > 0:
+                logger.info(
+                    "Cycle %d: enriched %d user library gaps",
+                    cycle, lib_enriched,
+                )
+        except Exception:
+            logger.exception("Cycle %d library gap-fill failed", cycle)
+
+        # ── Phase 4: Embedding backfill (EffNet + GPU) ─────────────
+        await _set_status(
+            engine, "embedding_backfill",
+            "Completing partial enrichment", cycle=cycle,
+        )
+        try:
+            backfilled = await _backfill_embeddings(engine, settings)
+            if backfilled > 0:
+                logger.info(
+                    "Cycle %d: backfilled %d embeddings",
+                    cycle, backfilled,
+                )
+        except Exception:
+            logger.exception("Cycle %d embedding backfill failed", cycle)
 
         # ── Check if user-linked work is done ──────────────────────
         user_work_remaining = await _count_user_linked_gaps(engine)
@@ -334,6 +400,117 @@ async def _cleanup_preview_cache(engine) -> int:
     except Exception:
         logger.warning("Preview cache cleanup query failed", exc_info=True)
     return total
+
+
+# ── Preview Audio Download ────────────────────────────────────────────────
+
+
+async def _download_all_previews(engine, *, limit: int = 0) -> int:
+    """Download and cache preview audio for tracks missing cached bytes.
+
+    For tracks with expired Deezer CDN URLs (403), refreshes via Deezer
+    ISRC/search lookup. Cached bytes are used by Essentia (CPU) and
+    Modal GPU (bytes-based), eliminating URL expiry failures entirely.
+    """
+    import asyncio
+
+    from musicmind.db.schema import (
+        preview_audio_cache,
+        song_metadata_cache,
+    )
+    from musicmind.engine.enrichment.orchestrator import (
+        _cache_preview_audio,
+        _download_preview,
+    )
+
+    # Find tracks that have no cached audio bytes
+    async with engine.begin() as conn:
+        cached_ids = sa.select(
+            preview_audio_cache.c.catalog_id,
+        ).correlate(None)
+        q = sa.select(
+            song_metadata_cache.c.catalog_id,
+            song_metadata_cache.c.user_id,
+            song_metadata_cache.c.name,
+            song_metadata_cache.c.artist_name,
+            song_metadata_cache.c.isrc,
+            song_metadata_cache.c.preview_url,
+        ).where(
+            sa.and_(
+                song_metadata_cache.c.catalog_id.notin_(cached_ids),
+                song_metadata_cache.c.preview_url.isnot(None),
+                song_metadata_cache.c.preview_url != "",
+            )
+        )
+        if limit > 0:
+            q = q.limit(limit)
+        result = await conn.execute(q)
+        rows = result.fetchall()
+
+    if not rows:
+        return 0
+
+    logger.info("Downloading previews for %d tracks", len(rows))
+
+    downloaded = 0
+    sem = asyncio.Semaphore(15)
+
+    async def _dl_one(row) -> bool:
+        async with sem:
+            audio = await _download_preview(row.preview_url)
+
+            # Expired Deezer URL? Refresh via ISRC/search
+            if audio is None and "dzcdn.net" in (row.preview_url or ""):
+                try:
+                    from musicmind.engine.enrichment.deezer import (
+                        search_preview_url,
+                    )
+                    fresh = await search_preview_url(
+                        name=row.name or "",
+                        artist_name=row.artist_name or "",
+                        isrc=row.isrc or None,
+                    )
+                    if fresh:
+                        audio = await _download_preview(fresh)
+                        if audio:
+                            # Update the cached URL in DB
+                            async with engine.begin() as conn:
+                                await conn.execute(
+                                    sa.update(song_metadata_cache)
+                                    .where(sa.and_(
+                                        song_metadata_cache.c.catalog_id
+                                        == row.catalog_id,
+                                        song_metadata_cache.c.user_id
+                                        == row.user_id,
+                                    ))
+                                    .values(preview_url=fresh)
+                                )
+                except Exception:
+                    pass
+
+            if audio:
+                await _cache_preview_audio(
+                    engine, row.catalog_id, audio,
+                    row.preview_url or "",
+                )
+                return True
+            return False
+
+    for i in range(0, len(rows), 50):
+        batch = rows[i:i + 50]
+        results = await asyncio.gather(
+            *[_dl_one(r) for r in batch],
+            return_exceptions=True,
+        )
+        ok = sum(1 for r in results if r is True)
+        downloaded += ok
+        if len(rows) > 50:
+            logger.info(
+                "Audio download %d/%d: %d cached",
+                min(i + 50, len(rows)), len(rows), ok,
+            )
+
+    return downloaded
 
 
 # ── Cobweb Building ──────────────────────────────────────────────────────
@@ -1218,18 +1395,56 @@ async def _backfill_embeddings(engine, settings) -> int:
 
         sem = asyncio.Semaphore(concurrency)
 
-        async def _extract_one(catalog_id: str, preview_url: str, isrc: str) -> bool:
+        async def _extract_one(
+            catalog_id: str, preview_url: str, isrc: str,
+        ) -> bool:
             async with sem:
                 try:
                     from musicmind.engine.audio.essentia_extractor import (
                         extract_all,
                     )
                     from musicmind.engine.enrichment.orchestrator import (
+                        _cache_preview_audio,
                         _download_preview,
+                        _get_cached_audio,
                         _store_embedding,
                     )
 
-                    audio_bytes = await _download_preview(preview_url)
+                    # Check cached bytes first (avoids expired URL 403s)
+                    audio_bytes = await _get_cached_audio(
+                        engine, catalog_id,
+                    )
+
+                    if audio_bytes is None:
+                        audio_bytes = await _download_preview(preview_url)
+
+                        # Expired Deezer URL? Refresh via search
+                        if (
+                            audio_bytes is None
+                            and "dzcdn.net" in preview_url
+                        ):
+                            try:
+                                from musicmind.engine.enrichment.deezer import (
+                                    search_preview_url,
+                                )
+                                fresh = await search_preview_url(
+                                    name="", artist_name="",
+                                    isrc=isrc or None,
+                                )
+                                if fresh:
+                                    audio_bytes = await _download_preview(
+                                        fresh,
+                                    )
+                            except Exception:
+                                pass
+
+                        # Cache for reuse by GPU phase
+                        if audio_bytes:
+                            await _cache_preview_audio(
+                                engine, catalog_id,
+                                audio_bytes, preview_url,
+                            )
+
                     if not audio_bytes:
                         return False
 
@@ -1243,7 +1458,9 @@ async def _backfill_embeddings(engine, settings) -> int:
                         )
                         return True
                 except Exception:
-                    logger.debug("Embedding backfill failed for %s", catalog_id)
+                    logger.debug(
+                        "Embedding backfill failed for %s", catalog_id,
+                    )
                 return False
 
         # Process in batches of 50
