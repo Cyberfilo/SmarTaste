@@ -114,10 +114,36 @@ async def enrich_tracks(
         from musicmind.db.schema import audio_embeddings
         from musicmind.engine.enrichment.gpu_client import enrich_batch_via_gpu
 
-        # Collect preview URLs for tracks that have them but lack CLAP embeddings
+        # Re-read preview URLs from DB — Phase 1 may have refreshed
+        # expired Deezer CDN URLs that would otherwise fail on Modal.
+        fresh_urls: dict[str, str] = {}
+        track_cids = [
+            t.get("catalog_id", "") for t in tracks
+            if t.get("catalog_id")
+        ]
+        if track_cids:
+            from musicmind.db.schema import song_metadata_cache as smc
+            for i in range(0, len(track_cids), 500):
+                chunk = track_cids[i:i + 500]
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(
+                            smc.c.catalog_id, smc.c.preview_url,
+                        ).where(
+                            sa.and_(
+                                smc.c.catalog_id.in_(chunk),
+                                smc.c.preview_url.isnot(None),
+                                smc.c.preview_url != "",
+                            )
+                        )
+                    )
+                    for row in result:
+                        fresh_urls[row.catalog_id] = row.preview_url
+
         gpu_candidates: list[tuple[dict[str, Any], str]] = []
         for t in tracks:
-            preview = t.get("preview_url", "")
+            cid = t.get("catalog_id", "")
+            preview = fresh_urls.get(cid) or t.get("preview_url", "")
             if preview:
                 gpu_candidates.append((t, preview))
 
@@ -149,41 +175,53 @@ async def enrich_tracks(
                     "Phase 2: %d tracks need GPU enrichment (CLAP + MERT)",
                     len(uncached_gpu),
                 )
-                preview_urls = [url for _, url in uncached_gpu]
-                try:
-                    gpu_results = await enrich_batch_via_gpu(
-                        preview_urls, modal_endpoint_url,
-                    )
-                    for (t, _), gpu_data in zip(uncached_gpu, gpu_results):
-                        if gpu_data and not gpu_data.get("error"):
-                            cid = t.get("catalog_id", "")
-                            clap = gpu_data.get("clap_512")
-                            mert = gpu_data.get("mert_768")
-                            if clap or mert:
-                                async with engine.begin() as conn:
-                                    await conn.execute(sa.text(
-                                        "INSERT INTO audio_embeddings"
-                                        " (catalog_id, user_id, embedding,"
-                                        "  clap_embedding, mert_embedding)"
-                                        " VALUES (:cid, :uid, :emb,"
-                                        "  :clap, :mert)"
-                                        " ON CONFLICT (catalog_id, user_id)"
-                                        " DO UPDATE SET"
-                                        " clap_embedding = :clap,"
-                                        " mert_embedding = :mert"
-                                    ), {
-                                        "cid": cid, "uid": user_id,
-                                        "emb": "[]",
-                                        "clap": json.dumps(clap)
-                                        if clap else None,
-                                        "mert": json.dumps(mert)
-                                        if mert else None,
-                                    })
-                                stats["gpu_enriched"] += 1
-                except Exception:
-                    logger.warning(
-                        "Phase 2 GPU batch enrichment failed", exc_info=True,
-                    )
+                # Process in batches of 10 to avoid timeout on Modal
+                # (each track needs download + GPU inference ~30s)
+                gpu_batch_size = 10
+                for batch_start in range(0, len(uncached_gpu), gpu_batch_size):
+                    batch = uncached_gpu[batch_start:batch_start + gpu_batch_size]
+                    batch_urls = [url for _, url in batch]
+                    try:
+                        gpu_results = await enrich_batch_via_gpu(
+                            batch_urls, modal_endpoint_url,
+                        )
+                        for (t, _), gpu_data in zip(batch, gpu_results):
+                            if gpu_data and not gpu_data.get("error"):
+                                cid = t.get("catalog_id", "")
+                                clap = gpu_data.get("clap_512")
+                                mert = gpu_data.get("mert_768")
+                                if clap or mert:
+                                    async with engine.begin() as conn:
+                                        await conn.execute(sa.text(
+                                            "INSERT INTO audio_embeddings"
+                                            " (catalog_id, user_id,"
+                                            "  embedding,"
+                                            "  clap_embedding,"
+                                            "  mert_embedding)"
+                                            " VALUES (:cid, :uid,"
+                                            "  :emb, :clap, :mert)"
+                                            " ON CONFLICT"
+                                            " (catalog_id, user_id)"
+                                            " DO UPDATE SET"
+                                            " clap_embedding = :clap,"
+                                            " mert_embedding = :mert"
+                                        ), {
+                                            "cid": cid,
+                                            "uid": user_id,
+                                            "emb": "[]",
+                                            "clap": json.dumps(clap)
+                                            if clap else None,
+                                            "mert": json.dumps(mert)
+                                            if mert else None,
+                                        })
+                                    stats["gpu_enriched"] += 1
+                    except Exception:
+                        logger.warning(
+                            "Phase 2 GPU batch %d-%d failed",
+                            batch_start,
+                            batch_start + len(batch),
+                            exc_info=True,
+                        )
                 logger.info(
                     "Phase 2 done: %d CLAP/MERT embeddings stored",
                     stats["gpu_enriched"],
@@ -546,27 +584,29 @@ async def _cache_preview_audio(
     engine: Any, catalog_id: str, audio_data: bytes, source_url: str,
 ) -> None:
     """Store downloaded preview audio bytes for reuse."""
-    from musicmind.db.schema import preview_audio_cache
+    from musicmind.db.schema import preview_audio_cache as pac
 
     try:
         now = datetime.now(UTC)
         async with engine.begin() as conn:
-            await conn.execute(
-                sa.text(
-                    "INSERT INTO preview_audio_cache"
-                    " (catalog_id, audio_data, source_url, downloaded_at)"
-                    " VALUES (:cid, :data, :url, :ts)"
-                    " ON CONFLICT (catalog_id) DO UPDATE SET"
-                    " audio_data = EXCLUDED.audio_data,"
-                    " source_url = EXCLUDED.source_url,"
-                    " downloaded_at = EXCLUDED.downloaded_at,"
-                    " enrichment_complete = false"
-                ),
-                {
-                    "cid": catalog_id, "data": audio_data,
-                    "url": source_url, "ts": now,
-                },
+            existing = await conn.execute(
+                sa.select(pac.c.catalog_id).where(pac.c.catalog_id == catalog_id)
             )
+            if existing.first():
+                await conn.execute(
+                    sa.update(pac).where(pac.c.catalog_id == catalog_id).values(
+                        audio_data=audio_data, source_url=source_url,
+                        downloaded_at=now, enrichment_complete=False,
+                    )
+                )
+            else:
+                await conn.execute(
+                    pac.insert().values(
+                        catalog_id=catalog_id, audio_data=audio_data,
+                        source_url=source_url, downloaded_at=now,
+                        enrichment_complete=False,
+                    )
+                )
     except Exception:
         logger.debug("Preview cache write failed for %s", catalog_id)
 
@@ -832,6 +872,11 @@ async def _store_embedding(
                 "model_version": model, "embedding_dim": dim,
                 "analyzed_at": now,
             })
+    except sa.exc.IntegrityError:
+        logger.warning(
+            "Embedding integrity error for %s (concurrent insert), skipping",
+            catalog_id,
+        )
     except Exception:
         logger.warning(
             "Failed to store embedding for %s", catalog_id, exc_info=True,
@@ -859,6 +904,10 @@ async def _store_embedding(
                     "model_version": model,
                     "analyzed_at": now,
                 })
+        except sa.exc.IntegrityError:
+            logger.warning(
+                "Global embedding integrity error for ISRC %s, skipping", isrc,
+            )
         except Exception:
             logger.debug("Failed to store global embedding for ISRC %s", isrc)
 

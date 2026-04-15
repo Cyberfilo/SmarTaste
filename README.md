@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.000-8b5cf6?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-6.200-8b5cf6?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=nextdotjs&logoColor=white" alt="Next.js">
   <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
@@ -18,16 +18,16 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Taste Profile** | Your musical DNA — top genres (with regional specificity like "Italian Hip-Hop/Rap"), artists with featuring detection, audio traits, familiarity score |
-| **6-Dim Recommendations** | Genre + Last.fm tags + collaborative filtering + audio similarity + artist affinity + language/region — context-adaptive weights shift per user |
-| **4-Stage Enrichment** | Automatic pipeline: Deezer/ReccoBeats audio features, Last.fm crowd-sourced tags, MusicBrainz producer credits, Genius lyrics embeddings |
+| **Taste Profile** | Your musical DNA — top genres (with regional specificity like "Italian Hip-Hop/Rap"), artists with featuring detection, audio traits, embedding centroids, familiarity score |
+| **6-Dim Recommendations** | CLAP + MERT + EffNet embeddings + genre cosine + scalar audio + artist affinity — context-adaptive weights shift per user |
+| **4-Stage Enrichment** | Automatic pipeline: Essentia (CPU) scalar features + EffNet embeddings, Modal GPU (CLAP + MERT), Deezer preview fallback, OpenAI captions |
 | **Taste Calibration** | 3-step onboarding wizard: pick playlists, rank artists (drag-to-reorder), pick favorite songs — compensates for Apple Music's missing play counts |
 | **AI Chat** | Ask Claude or GPT about your taste, get recommendations by description, explore music conversationally (BYOK — bring your own API key) |
 | **Playlists** | Browse your real Apple Music / Spotify playlists with per-playlist recommendations |
 | **Listening Timeline** | Chronological song view with date labels |
 | **Multi-Service** | Connect Spotify and/or Apple Music — unified profiles with ISRC dedup and genre normalization |
-| **Admin Dashboard** | Standalone service with live SSE log stream, enrichment pipeline breakdown, worker status, DB capacity, per-user progress |
-| **Background Worker** | Standalone enrichment worker: artist discography crawl, featuring artist parse, 4-stage pipeline, global ISRC cache |
+| **Admin Dashboard** | In-app + standalone: live SSE log stream, enrichment pipeline breakdown, worker status, DB capacity, per-user progress |
+| **Background Worker** | Artist cobweb discovery, global enrichment, ISRC backfill via free APIs (Deezer + MusicBrainz), preview audio caching |
 
 ## Architecture
 
@@ -53,11 +53,11 @@
 │  │ 4. Suggested artists (40% of library count) → 50%      │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌─── Engine Layer ──────────────────────────────────────┐   │
-│  │ 6-dim Scorer (genre/tags/collab/audio/artist/language) │  │
+│  │ 6-dim Scorer (CLAP/MERT/EffNet/genre/scalar/artist)    │  │
 │  │ Profile Builder · Adaptive Weights · Mood Filter       │  │
 │  └────────────────────────────────────────────────────────┘  │
 │  ┌─── Data Layer ────────────────────────────────────────┐   │
-│  │ PostgreSQL 16 · 29 tables · user-scoped + global       │  │
+│  │ PostgreSQL 16 · 22 tables · user-scoped + global       │  │
 │  │ + Logging DB (3 tables: requests, enrichment, errors)  │  │
 │  └────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
@@ -87,35 +87,33 @@
 
 ## Recommendation Engine
 
-**6-dimension context-adaptive scorer** — weights shift based on user profile characteristics:
+**6-dimension embedding-based scorer** — weights shift based on user profile characteristics:
 
-| Dimension | Default | Adaptive Triggers | Source |
-|-----------|---------|-------------------|--------|
-| Genre match | **25%** | +10% if regional concentration >60% | Cosine similarity with regional prioritization (Italian Hip-Hop/Rap at 1.0, parent Hip-Hop/Rap at 0.3) |
-| Last.fm tags | **15%** | +10% in mood mode | Cosine between crowd-sourced tag vectors ("dark", "aggressive", "drill") |
-| Collaborative | **10%** | — | +0.20 boost when candidate in Last.fm `track.getSimilar` (billions of scrobbles) |
-| Audio similarity | **20%** | Dominant at 40% in mood mode | Feature distance from enriched audio (energy, danceability, tempo, valence, etc.) |
-| Artist affinity | **15%** | +5% when calibration present | Library presence + calibration ranking + featuring parse |
-| Language/Region | **15%** | Near-zero if <20% one language | Regional genre prefix detection |
+| Dimension | Default | Source |
+|-----------|---------|--------|
+| CLAP cosine | **30%** | 512-dim semantic audio embedding (Modal GPU) |
+| MERT cosine | **25%** | 768-dim musical structure embedding (Modal GPU) |
+| EffNet cosine | **15%** | 1280-dim timbral fingerprint (Essentia ONNX, CPU) |
+| Genre match | **15%** | Cosine similarity with regional prioritization (Italian Hip-Hop/Rap at 1.0, parent at 0.3) |
+| Scalar audio | **10%** | Euclidean on tempo/energy/danceability (Essentia CPU) |
+| Artist affinity | **5%** | Library presence + calibration ranking + featuring parse |
 
-Plus additive bonuses: calibration boost (+0.03 to +0.20 based on artist ranking, zeroed on genre mismatch), diversity penalty (MMR), staleness cooldown, collaborative match boost.
+Plus additive bonuses: calibration boost (+0.03 to +0.20, zeroed on genre mismatch), diversity penalty (MMR), staleness cooldown, cross-strategy bonus, mood boost.
 
-Unused dimensions redistributed proportionally — graceful degradation when Last.fm or audio features are unavailable.
+Missing dimensions redistributed proportionally — graceful degradation when embeddings are unavailable.
 
-**Play count proxy** for Apple Music (no play counts in API): tracks `seen_count` from recently-played polling, songs played recently get up to 10x weight in profile building.
+## Enrichment Pipeline (4 stages)
 
-## Enrichment Pipeline (3 stages)
-
-Shared by both indexer and worker. Each stage checks cache before making API calls — no duplicate requests.
+Shared by both indexer and worker. Each stage checks cache before making API calls — no duplicate requests. Preview audio cached locally to survive Deezer URL expiry.
 
 | Stage | Source | What it provides | Cost |
 |-------|--------|-----------------|------|
-| 1 | **Deezer + ReccoBeats** | 30s preview MP3 + 9 audio features (tempo, energy, danceability, acousticness, valence, brightness, beat strength, instrumentalness, loudness) | Free |
-| 2 | **Last.fm** | Crowd-sourced tags (mood/vibe/genre vectors) + track.getSimilar (collaborative filtering) | Free (API key required) |
-| 3 | **MusicBrainz** | Producer, songwriter, mixer, engineer credits via ISRC → MBID lookup | Free |
-| opt | **SoundStat** | Spotify ID → complete features + key/scale | 0.01 EUR/track |
+| 1 | **Essentia (CPU, Railway)** | 11 scalar features (tempo, energy, danceability, etc.) + 1280-dim EffNet ONNX embedding + classifier heads (mood, genre, acousticness) | Free |
+| 2 | **Modal GPU (serverless A100)** | 512-dim CLAP embedding (semantic audio-text) + 768-dim MERT embedding (musical structure) | ~$0.018/track |
+| 3 | **Deezer (fallback)** | Preview URL resolution via ISRC lookup, BPM from track metadata | Free |
+| opt | **OpenAI** | AI-generated track captions from extracted features | BYOK |
 
-Global ISRC cache (`audio_features_global`): features enriched once per song, shared across all users. Worker writes here directly; indexer writes to both per-user and global caches.
+Global ISRC cache (`audio_features_global`, `audio_embeddings_global`): features enriched once per song, shared across all users. ISRC backfill via Deezer + MusicBrainz free APIs.
 
 ## Quick Start
 

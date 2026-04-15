@@ -44,6 +44,16 @@ logger = logging.getLogger("musicmind.worker")
 POLL_INTERVAL = int(os.environ.get("WORKER_POLL_INTERVAL", "120"))
 MAX_COBWEB_SONGS = 50  # top songs per cobweb artist
 
+# ── Enrichment Failure Tracking ─────────────────────────────────────────
+# Tracks that fail enrichment repeatedly are skipped to avoid ~300
+# IntegrityError log entries/day from the same 13 stuck tracks.
+# Key: "catalog_id:user_id", Value: failure count.
+# Resets every _FAIL_RESET_CYCLES cycles to allow retries after code fixes.
+_failed_tracks: dict[str, int] = {}
+_fail_cycle_counter: int = 0
+_FAIL_MAX_RETRIES = 3
+_FAIL_RESET_CYCLES = 50
+
 
 # ── Worker Status Heartbeat ──────────────────────────────────────────────
 
@@ -150,6 +160,16 @@ async def main() -> None:
     except Exception:
         logger.exception("Orphan cleanup failed")
 
+    # ── Phase 0a: Cleanup preview audio cache ─────────────────────────
+    # Delete fully-enriched previews (no longer needed) and stale entries (> 7 days)
+    await _set_status(engine, "cleanup", "Purging preview audio cache")
+    try:
+        deleted_previews = await _cleanup_preview_cache(engine)
+        if deleted_previews > 0:
+            logger.info("Preview cache cleanup: deleted %d entries", deleted_previews)
+    except Exception:
+        logger.exception("Preview cache cleanup failed")
+
     # ── Phase 0b: Unlink excess discovered artists ───────────────────
     # Previous indexer runs created discography songs for ALL library artists.
     # Now capped at top 20%. Delete non-library songs from artists outside
@@ -179,6 +199,18 @@ async def main() -> None:
         cycle += 1
         start = time.monotonic()
 
+        # Reset failure cache periodically to allow retries after code fixes
+        global _fail_cycle_counter
+        _fail_cycle_counter += 1
+        if _fail_cycle_counter >= _FAIL_RESET_CYCLES:
+            if _failed_tracks:
+                logger.info(
+                    "Resetting enrichment failure cache (%d entries) after %d cycles",
+                    len(_failed_tracks), _FAIL_RESET_CYCLES,
+                )
+            _failed_tracks.clear()
+            _fail_cycle_counter = 0
+
         # ── Phase 1a: Fill user library enrichment gaps first ───────
         await _set_status(
             engine, "library_gaps", "Enriching missing user library songs", cycle=cycle,
@@ -200,6 +232,17 @@ async def main() -> None:
                 logger.info("Cycle %d: backfilled %d embeddings", cycle, backfilled)
         except Exception:
             logger.exception("Cycle %d embedding backfill failed", cycle)
+
+        # ── Phase 1c: ISRC backfill ────────────────────────────────
+        await _set_status(
+            engine, "isrc_backfill", "Looking up missing ISRCs", cycle=cycle,
+        )
+        try:
+            isrc_found = await _backfill_isrcs(engine)
+            if isrc_found > 0:
+                logger.info("Cycle %d: found %d ISRCs", cycle, isrc_found)
+        except Exception:
+            logger.exception("Cycle %d ISRC backfill failed", cycle)
 
         # ── Check if user-linked work is done ──────────────────────
         user_work_remaining = await _count_user_linked_gaps(engine)
@@ -247,8 +290,50 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d failed", cycle)
 
+        # Log summary of permanently-skipped tracks once per cycle
+        perm_failed = sum(
+            1 for v in _failed_tracks.values()
+            if v >= _FAIL_MAX_RETRIES
+        )
+        if perm_failed > 0:
+            cycles_until_reset = (
+                _FAIL_RESET_CYCLES - (_fail_cycle_counter % _FAIL_RESET_CYCLES)
+            )
+            logger.info(
+                "Cycle %d: %d tracks permanently skipped"
+                " (will retry in %d cycles)",
+                cycle, perm_failed, cycles_until_reset,
+            )
+
         await _set_status(engine, "idle", f"Sleeping {POLL_INTERVAL}s", cycle=cycle)
         await asyncio.sleep(POLL_INTERVAL)
+
+
+# ── Preview Audio Cache Cleanup ──────────────────────────────────────────
+
+
+async def _cleanup_preview_cache(engine) -> int:
+    """Delete fully-enriched and stale (> 7 days) preview audio entries."""
+    from datetime import UTC, datetime, timedelta
+
+    from musicmind.db.schema import preview_audio_cache
+
+    cutoff = datetime.now(UTC) - timedelta(days=7)
+    total = 0
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.delete(preview_audio_cache).where(
+                    sa.or_(
+                        preview_audio_cache.c.enrichment_complete == sa.true(),
+                        preview_audio_cache.c.downloaded_at < cutoff,
+                    )
+                )
+            )
+            total = result.rowcount
+    except Exception:
+        logger.warning("Preview cache cleanup query failed", exc_info=True)
+    return total
 
 
 # ── Cobweb Building ──────────────────────────────────────────────────────
@@ -724,6 +809,7 @@ async def _count_user_linked_gaps(engine) -> int:
                      AND af.feature_source::text NOT LIKE '%soundstat%')
                     OR (af.feature_source::text LIKE '%no_data_available%'
                         AND af.feature_source::text NOT LIKE '%reccobeats%')
+                    OR af.feature_source::text LIKE '%permanently_failed%'
                   )
             )
         """))).scalar() or 0
@@ -732,6 +818,42 @@ async def _count_user_linked_gaps(engine) -> int:
         logger.debug("User-linked gaps: %d songs missing audio features", audio_gap)
 
     return audio_gap
+
+
+# ── Permanent Failure Marker ───────────────────────────────────────────
+
+
+async def _mark_permanently_failed(engine, catalog_id: str, user_id: str) -> None:
+    """Insert a permanently_failed marker into audio_features_cache.
+
+    This ensures the track is excluded from future gap-fill queries
+    (the query already skips rows with feature_source containing
+    'no_data_available').
+    """
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    feature_source = json.dumps({
+        "_status": "permanently_failed",
+        "_reason": "enrichment_error_exceeded_retries",
+    })
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text(
+                "INSERT INTO audio_features_cache"
+                " (catalog_id, user_id, feature_source, enriched_at, analyzed_at)"
+                " VALUES (:cid, :uid, :fs, :now, :now)"
+                " ON CONFLICT (catalog_id, user_id) DO UPDATE SET"
+                " feature_source = :fs, analyzed_at = :now"
+            ), {"cid": catalog_id, "uid": user_id, "fs": feature_source, "now": now})
+        logger.info(
+            "Marked %s (user %s) as permanently failed after %d retries",
+            catalog_id, user_id[:8], _FAIL_MAX_RETRIES,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to mark %s as permanently failed", catalog_id, exc_info=True,
+        )
 
 
 # ── Library Gap Fill (priority enrichment) ──────────────────────────────
@@ -820,6 +942,10 @@ async def _fill_library_gaps(engine, settings) -> int:
                                 audio_features_cache.c.feature_source, sa.Text
                             ).like('%reccobeats%'),
                         ),
+                        # Permanently failed (enrichment errors exceeded retries)
+                        sa.cast(
+                            audio_features_cache.c.feature_source, sa.Text
+                        ).like('%permanently_failed%'),
                     ),
                 )
             )
@@ -843,6 +969,11 @@ async def _fill_library_gaps(engine, settings) -> int:
 
         tracks = []
         for row in rows:
+            # Skip tracks that have exceeded the failure threshold
+            fail_key = f"{row.catalog_id}:{user_id}"
+            if _failed_tracks.get(fail_key, 0) >= _FAIL_MAX_RETRIES:
+                continue
+
             genres = row.genre_names
             if isinstance(genres, str):
                 try:
@@ -859,15 +990,50 @@ async def _fill_library_gaps(engine, settings) -> int:
                 "genre_names": genres,
             })
 
+        # Log summary of skipped tracks (once per cycle, not per-track)
+        skipped_count = len(rows) - len(tracks)
+        if skipped_count > 0:
+            logger.info(
+                "User %s: skipping %d tracks that failed enrichment >= %d times",
+                user_id[:8], skipped_count, _FAIL_MAX_RETRIES,
+            )
+
+        if not tracks:
+            continue
+
         try:
             r = await enrich_tracks(
                 engine, tracks, user_id=user_id,
                 modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
             )
             total_enriched += r.get("essentia", 0)
+
+            # Track per-track failures and mark permanently failed
+            for cid in r.get("failed_ids", []):
+                fail_key = f"{cid}:{user_id}"
+                _failed_tracks[fail_key] = _failed_tracks.get(fail_key, 0) + 1
+                if _failed_tracks[fail_key] >= _FAIL_MAX_RETRIES:
+                    await _mark_permanently_failed(engine, cid, user_id)
         except Exception:
+            # Mark all tracks in this batch as failed so they aren't
+            # retried every cycle (the root cause of ~300 warnings/day).
+            for t in tracks:
+                fail_key = f"{t['catalog_id']}:{user_id}"
+                _failed_tracks[fail_key] = (
+                    _failed_tracks.get(fail_key, 0) + 1
+                )
+                if _failed_tracks[fail_key] >= _FAIL_MAX_RETRIES:
+                    try:
+                        await _mark_permanently_failed(
+                            engine, t["catalog_id"], user_id,
+                        )
+                    except Exception:
+                        pass
             logger.warning(
-                "User %s: library gap-fill enrichment failed", user_id[:8], exc_info=True,
+                "User %s: library gap-fill enrichment failed"
+                " (%d tracks marked as batch failure)",
+                user_id[:8], len(tracks),
+                exc_info=True,
             )
 
     return total_enriched
@@ -898,7 +1064,12 @@ async def _enrich_global_songs(engine, settings) -> int:
         return 0
 
     tracks = []
+    global_user = "__global__"
     for row in rows:
+        fail_key = f"{row.catalog_id}:{global_user}"
+        if _failed_tracks.get(fail_key, 0) >= _FAIL_MAX_RETRIES:
+            continue
+
         genres = row.genre_names
         if isinstance(genres, str):
             try:
@@ -915,18 +1086,54 @@ async def _enrich_global_songs(engine, settings) -> int:
             "preview_url": getattr(row, "preview_url", "") or "",
         })
 
+    skipped_count = len(rows) - len(tracks)
+    if skipped_count > 0:
+        logger.info(
+            "Global: skipping %d tracks that failed enrichment >= %d times",
+            skipped_count, _FAIL_MAX_RETRIES,
+        )
+
+    if not tracks:
+        return 0
+
     logger.info("Enriching %d global songs", len(tracks))
 
     try:
         # Use enrich_tracks with a system user_id for global enrichment.
         # Features are also stored globally by ISRC via _store_global_features.
         r = await enrich_tracks(
-            engine, tracks, user_id="__global__",
+            engine, tracks, user_id=global_user,
             modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
         )
+
+        # Track per-track failures and mark permanently failed
+        for cid in r.get("failed_ids", []):
+            fail_key = f"{cid}:{global_user}"
+            _failed_tracks[fail_key] = _failed_tracks.get(fail_key, 0) + 1
+            if _failed_tracks[fail_key] >= _FAIL_MAX_RETRIES:
+                await _mark_permanently_failed(engine, cid, global_user)
+
         return r.get("essentia", 0)
     except Exception:
-        logger.debug("Global song enrichment failed", exc_info=True)
+        # Mark all tracks in this batch as failed to stop infinite retry.
+        for t in tracks:
+            fail_key = f"{t['catalog_id']}:{global_user}"
+            _failed_tracks[fail_key] = (
+                _failed_tracks.get(fail_key, 0) + 1
+            )
+            if _failed_tracks[fail_key] >= _FAIL_MAX_RETRIES:
+                try:
+                    await _mark_permanently_failed(
+                        engine, t["catalog_id"], global_user,
+                    )
+                except Exception:
+                    pass
+        logger.debug(
+            "Global song enrichment failed (%d tracks marked as"
+            " batch failure)",
+            len(tracks),
+            exc_info=True,
+        )
         return 0
 
 
@@ -1059,6 +1266,117 @@ async def _backfill_embeddings(engine, settings) -> int:
 
     logger.info("Embedding backfill complete: %d total", total)
     return total
+
+
+# ── ISRC Backfill ────────────────────────────────────────────────────────
+
+
+async def _backfill_isrcs(engine, *, batch_limit: int = 100) -> int:
+    """Look up missing ISRCs for song_metadata_cache and global_song_cache.
+
+    Queries both tables for rows with NULL/empty ISRC, resolves via
+    Deezer (fast) then MusicBrainz (fallback), and updates in place.
+
+    Returns the total number of ISRCs found across both tables.
+    """
+    from musicmind.db.schema import global_song_cache, song_metadata_cache
+    from musicmind.engine.enrichment.isrc_lookup import lookup_isrc
+
+    found_total = 0
+
+    # ── song_metadata_cache ────────────────────────────────────────
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(
+                song_metadata_cache.c.catalog_id,
+                song_metadata_cache.c.user_id,
+                song_metadata_cache.c.name,
+                song_metadata_cache.c.artist_name,
+                song_metadata_cache.c.isrc,
+            ).where(
+                sa.or_(
+                    song_metadata_cache.c.isrc.is_(None),
+                    song_metadata_cache.c.isrc == "",
+                )
+            ).limit(batch_limit)
+        )
+        smc_rows = result.fetchall()
+
+    if smc_rows:
+        logger.info("ISRC backfill: %d song_metadata_cache rows to check", len(smc_rows))
+        smc_found = 0
+        for row in smc_rows:
+            try:
+                isrc = await lookup_isrc(
+                    row.name or "", row.artist_name or "",
+                    existing_isrc=row.isrc,
+                )
+                if isrc:
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            sa.update(song_metadata_cache).where(
+                                sa.and_(
+                                    song_metadata_cache.c.catalog_id == row.catalog_id,
+                                    song_metadata_cache.c.user_id == row.user_id,
+                                )
+                            ).values(isrc=isrc)
+                        )
+                    smc_found += 1
+            except Exception:
+                logger.debug(
+                    "ISRC lookup failed for %s - %s",
+                    row.artist_name, row.name,
+                )
+        found_total += smc_found
+        logger.info(
+            "ISRC backfill: %d/%d found (song_metadata_cache)", smc_found, len(smc_rows),
+        )
+
+    # ── global_song_cache ──────────────────────────────────────────
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(
+                global_song_cache.c.catalog_id,
+                global_song_cache.c.name,
+                global_song_cache.c.artist_name,
+                global_song_cache.c.isrc,
+            ).where(
+                sa.or_(
+                    global_song_cache.c.isrc.is_(None),
+                    global_song_cache.c.isrc == "",
+                )
+            ).limit(batch_limit)
+        )
+        gsc_rows = result.fetchall()
+
+    if gsc_rows:
+        logger.info("ISRC backfill: %d global_song_cache rows to check", len(gsc_rows))
+        gsc_found = 0
+        for row in gsc_rows:
+            try:
+                isrc = await lookup_isrc(
+                    row.name or "", row.artist_name or "",
+                    existing_isrc=row.isrc,
+                )
+                if isrc:
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            sa.update(global_song_cache).where(
+                                global_song_cache.c.catalog_id == row.catalog_id
+                            ).values(isrc=isrc)
+                        )
+                    gsc_found += 1
+            except Exception:
+                logger.debug(
+                    "ISRC lookup failed for global %s - %s",
+                    row.artist_name, row.name,
+                )
+        found_total += gsc_found
+        logger.info(
+            "ISRC backfill: %d/%d found (global_song_cache)", gsc_found, len(gsc_rows),
+        )
+
+    return found_total
 
 
 # ── Entry Point ──────────────────────────────────────────────────────────
