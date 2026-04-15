@@ -33,7 +33,11 @@ _onnx_available: bool | None = None
 
 def _check_essentia() -> bool:
     try:
+        import essentia
         import essentia.standard  # noqa: F401
+        # Silence Essentia's verbose C++ INFO logs (TriangularBands etc.)
+        essentia.log.infoActive = False
+        essentia.log.warningActive = False
         return True
     except ImportError:
         return False
