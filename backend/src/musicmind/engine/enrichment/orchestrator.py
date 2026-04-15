@@ -65,10 +65,11 @@ async def enrich_tracks(
 
     Returns stats dict with enrichment counts.
     """
-    stats = {
+    stats: dict[str, Any] = {
         "essentia": 0, "captions": 0,
         "skipped": 0, "failed": 0, "total": len(tracks),
         "gpu_enriched": 0,
+        "failed_ids": [],  # catalog_ids that raised exceptions
     }
 
     # ── Phase 1: Essentia audio features (CPU, local) ─────────────────
@@ -93,6 +94,9 @@ async def enrich_tracks(
             else:
                 stats["failed"] += 1
                 t = batch[i] if i < len(batch) else {}
+                cid = t.get("catalog_id", "")
+                if cid:
+                    stats["failed_ids"].append(cid)
                 logger.warning(
                     "Track enrichment failed: %s — %s (%s)",
                     t.get("name", "?"), t.get("artist_name", "?"),
@@ -157,36 +161,24 @@ async def enrich_tracks(
                             mert = gpu_data.get("mert_768")
                             if clap or mert:
                                 async with engine.begin() as conn:
-                                    existing = await conn.execute(
-                                        sa.select(audio_embeddings.c.catalog_id).where(
-                                            sa.and_(
-                                                audio_embeddings.c.catalog_id == cid,
-                                                audio_embeddings.c.user_id == user_id,
-                                            )
-                                        )
-                                    )
-                                    if existing.first():
-                                        await conn.execute(
-                                            sa.update(audio_embeddings)
-                                            .where(sa.and_(
-                                                audio_embeddings.c.catalog_id == cid,
-                                                audio_embeddings.c.user_id == user_id,
-                                            ))
-                                            .values(
-                                                clap_embedding=clap,
-                                                mert_embedding=mert,
-                                            )
-                                        )
-                                    else:
-                                        await conn.execute(
-                                            audio_embeddings.insert().values(
-                                                catalog_id=cid,
-                                                user_id=user_id,
-                                                embedding=[],
-                                                clap_embedding=clap,
-                                                mert_embedding=mert,
-                                            )
-                                        )
+                                    await conn.execute(sa.text(
+                                        "INSERT INTO audio_embeddings"
+                                        " (catalog_id, user_id, embedding,"
+                                        "  clap_embedding, mert_embedding)"
+                                        " VALUES (:cid, :uid, :emb,"
+                                        "  :clap, :mert)"
+                                        " ON CONFLICT (catalog_id, user_id)"
+                                        " DO UPDATE SET"
+                                        " clap_embedding = :clap,"
+                                        " mert_embedding = :mert"
+                                    ), {
+                                        "cid": cid, "uid": user_id,
+                                        "emb": "[]",
+                                        "clap": json.dumps(clap)
+                                        if clap else None,
+                                        "mert": json.dumps(mert)
+                                        if mert else None,
+                                    })
                                 stats["gpu_enriched"] += 1
                 except Exception:
                     logger.warning(
@@ -359,30 +351,50 @@ async def _enrich_single_track(
     # Audio analysis via Essentia (local, no API limits)
     if preview_url:
         try:
-            audio_bytes = await _download_preview(preview_url)
+            # Check preview audio cache first (avoids expired Deezer URLs)
+            audio_bytes = await _get_cached_audio(engine, catalog_id)
 
-            # Cached Deezer URL expired (403)? Get a fresh one
-            if audio_bytes is None and "dzcdn.net" in preview_url:
-                try:
-                    from musicmind.engine.enrichment.deezer import search_preview_url
-                    fresh_url = await search_preview_url(
-                        name=track.get("name", ""),
-                        artist_name=track.get("artist_name", ""),
-                        isrc=isrc or None,
+            if audio_bytes is None:
+                audio_bytes = await _download_preview(preview_url)
+
+                # Cached Deezer URL expired (403)? Get a fresh one
+                if audio_bytes is None and "dzcdn.net" in preview_url:
+                    try:
+                        from musicmind.engine.enrichment.deezer import (
+                            search_preview_url,
+                        )
+                        fresh_url = await search_preview_url(
+                            name=track.get("name", ""),
+                            artist_name=track.get("artist_name", ""),
+                            isrc=isrc or None,
+                        )
+                        if fresh_url:
+                            audio_bytes = await _download_preview(fresh_url)
+                            if audio_bytes:
+                                preview_url = fresh_url
+                                # Update cached URL
+                                async with engine.begin() as conn:
+                                    from musicmind.db.schema import (
+                                        song_metadata_cache as smc,
+                                    )
+                                    await conn.execute(
+                                        sa.update(smc)
+                                        .where(
+                                            sa.and_(
+                                                smc.c.catalog_id == catalog_id,
+                                            )
+                                        )
+                                        .values(preview_url=fresh_url)
+                                    )
+                    except Exception:
+                        pass
+
+                # Cache the downloaded audio for reuse
+                if audio_bytes:
+                    await _cache_preview_audio(
+                        engine, catalog_id, audio_bytes, preview_url,
                     )
-                    if fresh_url:
-                        audio_bytes = await _download_preview(fresh_url)
-                        if audio_bytes:
-                            # Update cached URL
-                            async with engine.begin() as conn:
-                                from musicmind.db.schema import song_metadata_cache as smc
-                                await conn.execute(
-                                    sa.update(smc)
-                                    .where(sa.and_(smc.c.catalog_id == catalog_id))
-                                    .values(preview_url=fresh_url)
-                                )
-                except Exception:
-                    pass
+
             if audio_bytes:
                 from musicmind.engine.audio.essentia_extractor import (
                     is_essentia_available,
@@ -456,6 +468,10 @@ async def _enrich_single_track(
             {}, {"_status": "no_data_available"}, isrc="",
         )
 
+    # Mark preview audio as fully enriched so the worker can clean it up
+    if enriched_by != "failed":
+        await _mark_preview_enrichment_complete(engine, catalog_id)
+
     return enriched_by
 
 
@@ -502,6 +518,74 @@ def _merge_features(
             feature_source[field] = source_name
             filled += 1
     return filled
+
+
+async def _get_cached_audio(engine: Any, catalog_id: str) -> bytes | None:
+    """Check preview_audio_cache for existing audio bytes (< 7 days old)."""
+    from musicmind.db.schema import preview_audio_cache
+
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    preview_audio_cache.c.audio_data,
+                    preview_audio_cache.c.downloaded_at,
+                ).where(preview_audio_cache.c.catalog_id == catalog_id)
+            )
+            row = result.first()
+        if row and row.audio_data:
+            age = (datetime.now(UTC) - row.downloaded_at).total_seconds()
+            if age < 7 * 86400:  # 7 days
+                return row.audio_data
+    except Exception:
+        logger.debug("Preview cache lookup failed for %s", catalog_id)
+    return None
+
+
+async def _cache_preview_audio(
+    engine: Any, catalog_id: str, audio_data: bytes, source_url: str,
+) -> None:
+    """Store downloaded preview audio bytes for reuse."""
+    from musicmind.db.schema import preview_audio_cache
+
+    try:
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "INSERT INTO preview_audio_cache"
+                    " (catalog_id, audio_data, source_url, downloaded_at)"
+                    " VALUES (:cid, :data, :url, :ts)"
+                    " ON CONFLICT (catalog_id) DO UPDATE SET"
+                    " audio_data = EXCLUDED.audio_data,"
+                    " source_url = EXCLUDED.source_url,"
+                    " downloaded_at = EXCLUDED.downloaded_at,"
+                    " enrichment_complete = false"
+                ),
+                {
+                    "cid": catalog_id, "data": audio_data,
+                    "url": source_url, "ts": now,
+                },
+            )
+    except Exception:
+        logger.debug("Preview cache write failed for %s", catalog_id)
+
+
+async def _mark_preview_enrichment_complete(
+    engine: Any, catalog_id: str,
+) -> None:
+    """Mark cached preview audio as fully enriched (ready for cleanup)."""
+    from musicmind.db.schema import preview_audio_cache
+
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(preview_audio_cache)
+                .where(preview_audio_cache.c.catalog_id == catalog_id)
+                .values(enrichment_complete=True)
+            )
+    except Exception:
+        logger.debug("Preview cache mark-complete failed for %s", catalog_id)
 
 
 async def _download_preview(url: str) -> bytes | None:
@@ -724,73 +808,57 @@ async def _store_embedding(
     isrc: str = "",
 ) -> None:
     """Store embedding in per-user + global (ISRC) tables."""
-    from musicmind.db.schema import audio_embeddings
-
     now = datetime.now(UTC)
     dim = len(embedding)
     model = f"discogs-effnet-{dim}"
 
-    # Per-user storage (SQLAlchemy Core handles JSON serialization correctly)
+    # Per-user storage — UPSERT to avoid TOCTOU race under concurrency
     try:
-        values = {
-            "catalog_id": catalog_id, "user_id": user_id,
-            "embedding": embedding, "isrc": isrc,
-            "model_version": model, "embedding_dim": dim, "analyzed_at": now,
-        }
         async with engine.begin() as conn:
-            existing = await conn.execute(
-                sa.select(audio_embeddings.c.catalog_id).where(
-                    sa.and_(
-                        audio_embeddings.c.catalog_id == catalog_id,
-                        audio_embeddings.c.user_id == user_id,
-                    )
-                )
-            )
-            if existing.first():
-                await conn.execute(
-                    sa.update(audio_embeddings).where(
-                        sa.and_(
-                            audio_embeddings.c.catalog_id == catalog_id,
-                            audio_embeddings.c.user_id == user_id,
-                        )
-                    ).values(
-                        embedding=embedding, model_version=model,
-                        embedding_dim=dim, analyzed_at=now,
-                    )
-                )
-            else:
-                await conn.execute(audio_embeddings.insert().values(**values))
+            await conn.execute(sa.text(
+                "INSERT INTO audio_embeddings"
+                " (catalog_id, user_id, embedding, isrc,"
+                "  model_version, embedding_dim, analyzed_at)"
+                " VALUES (:catalog_id, :user_id, :embedding, :isrc,"
+                "  :model_version, :embedding_dim, :analyzed_at)"
+                " ON CONFLICT (catalog_id, user_id) DO UPDATE SET"
+                " embedding = :embedding,"
+                " model_version = :model_version,"
+                " embedding_dim = :embedding_dim,"
+                " analyzed_at = :analyzed_at"
+            ), {
+                "catalog_id": catalog_id, "user_id": user_id,
+                "embedding": json.dumps(embedding), "isrc": isrc,
+                "model_version": model, "embedding_dim": dim,
+                "analyzed_at": now,
+            })
     except Exception:
         logger.warning(
             "Failed to store embedding for %s", catalog_id, exc_info=True,
         )
 
-    # Global ISRC storage
+    # Global ISRC storage — UPSERT
     if isrc:
         try:
-            from musicmind.db.schema import audio_embeddings_global
             async with engine.begin() as conn:
-                existing = await conn.execute(
-                    sa.select(audio_embeddings_global.c.isrc).where(
-                        audio_embeddings_global.c.isrc == isrc
-                    )
-                )
-                if existing.first():
-                    await conn.execute(
-                        sa.update(audio_embeddings_global).where(
-                            audio_embeddings_global.c.isrc == isrc
-                        ).values(
-                            embedding=embedding, embedding_dim=dim,
-                            model_version=model, analyzed_at=now,
-                        )
-                    )
-                else:
-                    await conn.execute(
-                        audio_embeddings_global.insert().values(
-                            isrc=isrc, embedding=embedding, embedding_dim=dim,
-                            model_version=model, analyzed_at=now,
-                        )
-                    )
+                await conn.execute(sa.text(
+                    "INSERT INTO audio_embeddings_global"
+                    " (isrc, embedding, embedding_dim,"
+                    "  model_version, analyzed_at)"
+                    " VALUES (:isrc, :embedding, :embedding_dim,"
+                    "  :model_version, :analyzed_at)"
+                    " ON CONFLICT (isrc) DO UPDATE SET"
+                    " embedding = :embedding,"
+                    " embedding_dim = :embedding_dim,"
+                    " model_version = :model_version,"
+                    " analyzed_at = :analyzed_at"
+                ), {
+                    "isrc": isrc,
+                    "embedding": json.dumps(embedding),
+                    "embedding_dim": dim,
+                    "model_version": model,
+                    "analyzed_at": now,
+                })
         except Exception:
             logger.debug("Failed to store global embedding for ISRC %s", isrc)
 

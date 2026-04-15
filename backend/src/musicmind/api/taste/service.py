@@ -30,6 +30,7 @@ from musicmind.api.taste.fetch import (
     fetch_spotify_top_tracks,
 )
 from musicmind.db.schema import (
+    audio_embeddings,
     service_connections,
     song_metadata_cache,
     taste_profile_snapshots,
@@ -311,6 +312,9 @@ class TasteService:
             "total_songs_analyzed": mapping["total_songs_analyzed"] or 0,
             "listening_hours_estimated": mapping["listening_hours_estimated"] or 0.0,
             "audio_centroid": _pj(mapping.get("audio_centroid"), {}),
+            "embedding_centroid": _pj(mapping.get("embedding_centroid"), None),
+            "clap_centroid": _pj(mapping.get("clap_centroid"), None),
+            "mert_centroid": _pj(mapping.get("mert_centroid"), None),
         }
 
     async def _fetch_and_cache_data(
@@ -640,12 +644,17 @@ class TasteService:
         """
         # Load any previously enriched audio features for centroid computation
         audio_features_map: dict[str, dict] = {}
+        embedding_map: dict[str, list[float]] = {}
+        clap_map: dict[str, list[float]] = {}
+        mert_map: dict[str, list[float]] = {}
         try:
-            async with engine.begin() as conn:
-                from musicmind.db.schema import audio_features_cache
+            from musicmind.db.schema import audio_features_cache
 
-                catalog_ids = [s.get("catalog_id", "") for s in songs if s.get("catalog_id")]
-                if catalog_ids:
+            catalog_ids = [
+                s.get("catalog_id", "") for s in songs if s.get("catalog_id")
+            ]
+            if catalog_ids:
+                async with engine.begin() as conn:
                     result = await conn.execute(
                         sa.select(audio_features_cache).where(
                             sa.and_(
@@ -665,8 +674,38 @@ class TasteService:
                                 features[field] = val
                         if features:
                             audio_features_map[row.catalog_id] = features
+
+                async with engine.begin() as conn:
+                    emb_result = await conn.execute(
+                        sa.select(audio_embeddings).where(
+                            sa.and_(
+                                audio_embeddings.c.catalog_id.in_(catalog_ids),
+                                audio_embeddings.c.user_id == user_id,
+                            )
+                        )
+                    )
+                    for row in emb_result:
+                        cid = row.catalog_id
+                        emb = row.embedding
+                        if isinstance(emb, str):
+                            emb = json.loads(emb)
+                        if emb and isinstance(emb, list) and len(emb) >= 128:
+                            embedding_map[cid] = emb
+                        clap = row.clap_embedding
+                        if isinstance(clap, str):
+                            clap = json.loads(clap)
+                        if clap and isinstance(clap, list) and len(clap) > 0:
+                            clap_map[cid] = clap
+                        mert = row.mert_embedding
+                        if isinstance(mert, str):
+                            mert = json.loads(mert)
+                        if mert and isinstance(mert, list) and len(mert) > 0:
+                            mert_map[cid] = mert
         except Exception:
-            logger.warning("Failed to load audio features for centroid, continuing without")
+            logger.warning(
+                "Failed to load audio features/embeddings for centroid, "
+                "continuing without",
+            )
 
         # Apply engagement weights (play count proxy) before profile building
         engaged_songs = await self._apply_engagement_weights(
@@ -682,6 +721,9 @@ class TasteService:
             calibrated_songs, history,
             use_temporal_decay=True,
             audio_features_map=audio_features_map or None,
+            embedding_map=embedding_map or None,
+            clap_map=clap_map or None,
+            mert_map=mert_map or None,
         )
 
         # total_songs_analyzed should reflect unique songs, not amplified duplicates
@@ -709,6 +751,15 @@ class TasteService:
                     total_songs_analyzed=profile["total_songs_analyzed"],
                     listening_hours_estimated=profile["listening_hours_estimated"],
                     audio_centroid=json.dumps(profile.get("audio_centroid", {})),
+                    embedding_centroid=json.dumps(
+                        profile.get("embedding_centroid")
+                    ) if profile.get("embedding_centroid") else None,
+                    clap_centroid=json.dumps(
+                        profile.get("clap_centroid")
+                    ) if profile.get("clap_centroid") else None,
+                    mert_centroid=json.dumps(
+                        profile.get("mert_centroid")
+                    ) if profile.get("mert_centroid") else None,
                 )
             )
 
