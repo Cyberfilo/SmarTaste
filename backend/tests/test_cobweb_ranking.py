@@ -67,3 +67,25 @@ def test_cap_based_on_feat_density_not_library_size() -> None:
         max_total=100,
     )
     assert len(ranked) == 7
+
+
+def test_co_primary_artists_excluded_from_cobweb() -> None:
+    """In 'Alpha & Beta feat. Gamma', both Alpha and Beta are primaries.
+
+    Neither should appear in the cobweb even though only Alpha is in the library.
+    Gamma is the actual feature and should be discovered.
+    """
+    library_rows = [
+        {"artist_name": "Alpha & Beta feat. Gamma", "primary_affinity": 1.0},
+    ]
+    ranked = rank_cobweb_candidates(
+        library_rows=library_rows,
+        library_artist_names={"alpha"},  # only Alpha is in library; Beta and Gamma are not
+        existing_cobweb_names=set(),
+    )
+    names = {n.lower() for n, _ in ranked}
+    # Beta is a co-primary on this track and shouldn't be added as a "feature"
+    # of itself even though it's not in the library.
+    assert "beta" not in names, f"Co-primary Beta leaked into cobweb: {names}"
+    # Gamma is the actual feature, should appear.
+    assert "gamma" in names, f"Featured artist Gamma missing: {names}"
