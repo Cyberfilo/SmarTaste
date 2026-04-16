@@ -50,12 +50,12 @@ def rank_cobweb_candidates(
         parsed = parse_artists(raw_name)
         if not parsed:
             continue
-        primary_lower = parsed[0][0].lower()
+        primary_lowers = {n.lower() for n, w in parsed if w == 1.0}
         for name, weight in parsed:
             key = name.strip().lower()
             if not key or len(key) <= 1:
                 continue
-            if key == primary_lower:
+            if key in primary_lowers:
                 continue
             if key in library_artist_names or key in existing_cobweb_names:
                 continue
