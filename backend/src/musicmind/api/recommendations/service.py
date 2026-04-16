@@ -661,7 +661,7 @@ class RecommendationService:
             return results[:3]  # Absolute fallback
 
         async def _run_similar_artists() -> list[dict[str, Any]]:
-            scored = seed_scored or [(n, 1.0) for n in seed_artist_names]
+            scored = seed_scored or []
             results = await discover_similar_artists(
                 service, access_token, scored,
                 developer_token=developer_token,
