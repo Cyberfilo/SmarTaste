@@ -150,9 +150,12 @@ class RecommendationService:
 
         # Step 3: Extract seed data from profile
         top_artists_raw = profile.get("top_artists", [])
-        seed_artist_names = [
-            a["name"] for a in top_artists_raw[:5] if isinstance(a, dict)
+        seed_scored: list[tuple[str, float]] = [
+            (a["name"], float(a.get("score", 0.0)))
+            for a in top_artists_raw[:5]
+            if isinstance(a, dict) and a.get("name")
         ]
+        seed_artist_names = [n for n, _ in seed_scored]
         genre_vector = profile.get("genre_vector", {})
         top_genres = sorted(
             genre_vector.items(), key=lambda x: x[1], reverse=True,
@@ -170,6 +173,7 @@ class RecommendationService:
                     developer_token=developer_token,
                     storefront=storefront,
                     profile_genres=top_genre_names,
+                    seed_scored=seed_scored,
                 )
             )
 
@@ -613,6 +617,7 @@ class RecommendationService:
         developer_token: str | None,
         storefront: str = "us",
         profile_genres: list[str] | None = None,
+        seed_scored: list[tuple[str, float]] | None = None,
     ) -> list[dict[str, Any]]:
         """Run discovery strategies and tag candidates with source strategy."""
         candidates: list[dict[str, Any]] = []
@@ -656,10 +661,12 @@ class RecommendationService:
             return results[:3]  # Absolute fallback
 
         async def _run_similar_artists() -> list[dict[str, Any]]:
+            scored = seed_scored or [(n, 1.0) for n in seed_artist_names]
             results = await discover_similar_artists(
-                service, access_token, seed_artist_names,
+                service, access_token, scored,
                 developer_token=developer_token,
                 storefront=storefront,
+                total_budget=40,
             )
             results = _filter_by_genre_overlap(results)
             for c in results:
