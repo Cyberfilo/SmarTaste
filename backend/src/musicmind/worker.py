@@ -993,9 +993,13 @@ async def _unlink_excess_discoveries(engine) -> int:
         if not ranked:
             continue
 
-        # Top 3 + top 20% of the rest (same cap as indexer)
-        max_other = min(30, max(5, int(len(ranked) * 0.2)))
-        keep_artists = {a.lower() for a in ranked[:3 + max_other]}
+        # Keep all artists above the indexer's affinity threshold (with min-3 fallback),
+        # matching indexer.run_indexing so we don't delete songs the indexer just enriched.
+        from musicmind.indexer import AFFINITY_INCLUDE_THRESHOLD
+        kept_ranked = [(n, s) for n, s in ranked if s >= AFFINITY_INCLUDE_THRESHOLD]
+        if len(kept_ranked) < 3:
+            kept_ranked = ranked[:3]
+        keep_artists = {n.lower() for n, _ in kept_ranked}
 
         # Also keep all library artist names (never delete library songs)
         async with engine.begin() as conn:
