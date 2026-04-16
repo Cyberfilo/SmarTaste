@@ -5,6 +5,7 @@ laion-clap==1.1.6
 transformers>=4.40
 torch>=2.2
 torchaudio>=2.2
+torchvision>=0.17
 numpy
 soundfile
 librosa>=0.10
