@@ -44,6 +44,12 @@ logger = logging.getLogger("musicmind.worker")
 POLL_INTERVAL = int(os.environ.get("WORKER_POLL_INTERVAL", "120"))
 MAX_COBWEB_SONGS = 50  # top songs per cobweb artist
 
+# Sentinel written to song_metadata_cache.isrc / global_song_cache.isrc
+# when ISRC lookup definitively fails (Deezer + MusicBrainz both miss).
+# Excluded from future backfill queries so we don't retry forever.
+# Manual recovery: UPDATE ... SET isrc = NULL WHERE isrc = '__NO_ISRC__';
+NO_ISRC_SENTINEL = "__NO_ISRC__"
+
 # ── Enrichment Failure Tracking ─────────────────────────────────────────
 # Tracks that fail enrichment repeatedly are skipped to avoid ~300
 # IntegrityError log entries/day from the same 13 stuck tracks.
@@ -1354,6 +1360,7 @@ async def _enrich_global_songs(engine, settings) -> int:
             sa.select(global_song_cache).where(
                 sa.and_(
                     global_song_cache.c.isrc.isnot(None),
+                    global_song_cache.c.isrc != NO_ISRC_SENTINEL,
                     global_song_cache.c.isrc.notin_(enriched_isrcs),
                 )
             ).limit(50)
@@ -1797,31 +1804,38 @@ async def _backfill_isrcs(engine, *, batch_limit: int = 100) -> int:
     if smc_rows:
         logger.info("ISRC backfill: %d song_metadata_cache rows to check", len(smc_rows))
         smc_found = 0
+        smc_marked = 0
         for row in smc_rows:
+            new_isrc: str | None = None
             try:
-                isrc = await lookup_isrc(
+                new_isrc = await lookup_isrc(
                     row.name or "", row.artist_name or "",
                     existing_isrc=row.isrc,
                 )
-                if isrc:
-                    async with engine.begin() as conn:
-                        await conn.execute(
-                            sa.update(song_metadata_cache).where(
-                                sa.and_(
-                                    song_metadata_cache.c.catalog_id == row.catalog_id,
-                                    song_metadata_cache.c.user_id == row.user_id,
-                                )
-                            ).values(isrc=isrc)
-                        )
-                    smc_found += 1
             except Exception:
                 logger.debug(
-                    "ISRC lookup failed for %s - %s",
+                    "ISRC lookup raised for %s - %s",
                     row.artist_name, row.name,
                 )
+                continue  # transient — leave the row for next cycle
+            value = new_isrc or NO_ISRC_SENTINEL
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.update(song_metadata_cache).where(
+                        sa.and_(
+                            song_metadata_cache.c.catalog_id == row.catalog_id,
+                            song_metadata_cache.c.user_id == row.user_id,
+                        )
+                    ).values(isrc=value)
+                )
+            if new_isrc:
+                smc_found += 1
+            else:
+                smc_marked += 1
         found_total += smc_found
         logger.info(
-            "ISRC backfill: %d/%d found (song_metadata_cache)", smc_found, len(smc_rows),
+            "ISRC backfill: %d/%d found, %d marked NO_ISRC (song_metadata_cache)",
+            smc_found, len(smc_rows), smc_marked,
         )
 
     # ── global_song_cache ──────────────────────────────────────────
@@ -1844,28 +1858,35 @@ async def _backfill_isrcs(engine, *, batch_limit: int = 100) -> int:
     if gsc_rows:
         logger.info("ISRC backfill: %d global_song_cache rows to check", len(gsc_rows))
         gsc_found = 0
+        gsc_marked = 0
         for row in gsc_rows:
+            new_isrc: str | None = None
             try:
-                isrc = await lookup_isrc(
+                new_isrc = await lookup_isrc(
                     row.name or "", row.artist_name or "",
                     existing_isrc=row.isrc,
                 )
-                if isrc:
-                    async with engine.begin() as conn:
-                        await conn.execute(
-                            sa.update(global_song_cache).where(
-                                global_song_cache.c.catalog_id == row.catalog_id
-                            ).values(isrc=isrc)
-                        )
-                    gsc_found += 1
             except Exception:
                 logger.debug(
-                    "ISRC lookup failed for global %s - %s",
+                    "ISRC lookup raised for global %s - %s",
                     row.artist_name, row.name,
                 )
+                continue  # transient — leave the row for next cycle
+            value = new_isrc or NO_ISRC_SENTINEL
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.update(global_song_cache).where(
+                        global_song_cache.c.catalog_id == row.catalog_id
+                    ).values(isrc=value)
+                )
+            if new_isrc:
+                gsc_found += 1
+            else:
+                gsc_marked += 1
         found_total += gsc_found
         logger.info(
-            "ISRC backfill: %d/%d found (global_song_cache)", gsc_found, len(gsc_rows),
+            "ISRC backfill: %d/%d found, %d marked NO_ISRC (global_song_cache)",
+            gsc_found, len(gsc_rows), gsc_marked,
         )
 
     return found_total
