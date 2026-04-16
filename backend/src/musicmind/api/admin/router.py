@@ -619,6 +619,7 @@ async def reindex_user(
                     song_metadata_cache.c.user_id == user_id,
                     song_metadata_cache.c.isrc.isnot(None),
                     song_metadata_cache.c.isrc != "",
+                    song_metadata_cache.c.isrc != "__NO_ISRC__",
                 )
             )
         )).fetchall()
