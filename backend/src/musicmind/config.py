@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     # Modal GPU worker endpoint URL for Tier 2 enrichment (CLAP + MERT)
     modal_endpoint_url: str | None = None
 
+    # GPU enrichment mode: CLOUD (Modal) or LOCAL (self-hosted, via tunnel).
+    # When LOCAL, modal_endpoint_url is transparently swapped with
+    # local_gpu_endpoint_url in model_post_init — so every caller of
+    # settings.modal_endpoint_url gets the active endpoint without changes.
+    gpu_mode: str = "CLOUD"
+    local_gpu_endpoint_url: str | None = None
+
     # Staging mode: auto-resets DB on startup (clean slate for testing).
     # Set MUSICMIND_STAGING=true on the staging Railway environment.
     staging: bool = False
@@ -108,4 +115,16 @@ class Settings(BaseSettings):
                 self,
                 "logs_database_url",
                 self.logs_database_url.replace("postgresql://", "postgresql+asyncpg://", 1),
+            )
+        # GPU mode override: when LOCAL, swap modal_endpoint_url with the
+        # local endpoint so every existing caller transparently routes to
+        # the self-hosted server instead of Modal.
+        if (
+            self.gpu_mode.upper() == "LOCAL"
+            and self.local_gpu_endpoint_url
+        ):
+            object.__setattr__(
+                self,
+                "modal_endpoint_url",
+                self.local_gpu_endpoint_url,
             )
