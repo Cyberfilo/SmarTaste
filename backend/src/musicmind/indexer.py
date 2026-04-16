@@ -28,64 +28,15 @@ import sqlalchemy as sa
 
 logger = logging.getLogger("musicmind.indexer")
 
-# Continuous depth fraction (replaces rank-based STEP_DEPTHS).
-MIN_DEPTH_FRAC = 0.15
-MAX_DEPTH_FRAC = 1.0
-DEPTH_SCALE = 1.2
-MAX_TRACKS_PER_ARTIST = 50
-AFFINITY_INCLUDE_THRESHOLD = 0.05
-CAL_BOOST = 0.1
-
-
-def compute_depth_fraction(affinity_score: float) -> float:
-    """Map affinity score to discography enrichment fraction."""
-    return max(MIN_DEPTH_FRAC, min(MAX_DEPTH_FRAC, affinity_score * DEPTH_SCALE))
-
-
-def _rank_artists_by_affinity(
-    freq_map: dict[str, int],
-    cal_weights: dict[str, float],
-) -> list[tuple[str, float]]:
-    """Rank artists by affinity score (pure function, no DB).
-
-    Score = frequency * (1 + CAL_BOOST * calibration_weight). Calibration
-    boosts existing listening, doesn't replace it.
-
-    Args:
-        freq_map: {artist_name: song_count}. Original casing preserved.
-        cal_weights: {artist_name: calibration_weight}. Original casing preserved
-            (used as display name for calibration-only artists).
-    """
-    if not freq_map and not cal_weights:
-        return []
-
-    # Build internal lower-cased lookup maps but preserve display casing.
-    cal_lower_to_weight = {n.lower(): w for n, w in cal_weights.items()}
-    cal_lower_to_display = {n.lower(): n for n in cal_weights}
-
-    combined: dict[str, float] = {}
-    for name, freq in freq_map.items():
-        cal = cal_lower_to_weight.get(name.lower(), 0.0)
-        combined[name] = float(freq) * (1.0 + CAL_BOOST * cal)
-
-    existing_lower = {n.lower() for n in combined}
-    for cal_lower, cal_weight in cal_lower_to_weight.items():
-        if cal_lower not in existing_lower:
-            display = cal_lower_to_display[cal_lower]
-            combined[display] = 1.0 * (1.0 + CAL_BOOST * cal_weight)
-
-    if not combined:
-        return []
-
-    max_score = max(combined.values())
-    if max_score <= 0:
-        return []
-
-    return sorted(
-        ((name, score / max_score) for name, score in combined.items()),
-        key=lambda x: x[1],
-        reverse=True,
-    )
+# Discography depth per step (fraction of available top songs to fetch)
+STEP_DEPTHS = {
+    1: 1.0,    # top artist → 100%
+    2: 0.70,   # 2nd artist → 70%
+    3: 0.50,   # 3rd artist → 50%
+    "other": 0.30,  # remaining library artists → 30%
+    "suggested": 0.50,  # suggested artists → 50%
+}
+MAX_TRACKS_PER_ARTIST = 50  # Apple Music / Spotify max for top-songs
 
 
 # ── Main Entry Point ─────────────────────────────────────────────────────
@@ -212,29 +163,33 @@ async def run_indexing(
     except Exception:
         logger.warning("User %s step 1 failed", user_id[:8], exc_info=True)
 
-    # ── Steps 2-5: Artist discographies via continuous affinity depth ──
+    # ── Steps 2-5: Artist discographies at decreasing depth ─────────
+    # Top 3 get full treatment (100%/70%/50%), then only the top 20%
+    # of remaining artists get 30% depth. This prevents 182 artists
+    # from creating 2000+ discography songs.
     ranked_artists = await _get_ranked_artists(engine, user_id=user_id)
     if ranked_artists:
-        # Include any artist above the affinity threshold — no hard cap.
-        # Always include at least the top 3 even if scores are thin.
-        artists_to_process: list[tuple[str, float]] = [
-            (n, s) for n, s in ranked_artists
-            if s >= AFFINITY_INCLUDE_THRESHOLD
-        ]
-        if len(artists_to_process) < 3:
-            artists_to_process = ranked_artists[:3]
+        # Cap "other" artists at top 20% of library artists (min 5, max 30)
+        max_other = min(30, max(5, int(len(ranked_artists) * 0.2)))
+        # Top 3 + top 20% of the rest
+        artists_to_process = ranked_artists[:3 + max_other]
         total_artists = len(artists_to_process)
 
         logger.info(
-            "User %s: processing %d/%d artists above threshold %.2f",
-            user_id[:8], total_artists, len(ranked_artists),
-            AFFINITY_INCLUDE_THRESHOLD,
+            "User %s: processing %d/%d artists (top 3 + %d others)",
+            user_id[:8], total_artists, len(ranked_artists), max_other,
         )
 
-        for i, (artist_name, affinity_score) in enumerate(artists_to_process):
-            step = min(i + 2, 5)
-            depth_frac = compute_depth_fraction(affinity_score)
-            limit = max(5, int(MAX_TRACKS_PER_ARTIST * depth_frac))
+        for i, artist_name in enumerate(artists_to_process):
+            step = min(i + 2, 5)  # Steps 2, 3, 4, 5 (5 = "other")
+            if i == 0:
+                depth_frac = STEP_DEPTHS[1]
+            elif i == 1:
+                depth_frac = STEP_DEPTHS[2]
+            elif i == 2:
+                depth_frac = STEP_DEPTHS[3]
+            else:
+                depth_frac = STEP_DEPTHS["other"]
 
             step_name = f"artist_{i + 1}_of_{total_artists}"
             await _set_indexing_status(
@@ -242,6 +197,7 @@ async def run_indexing(
                 current=i + 1, total=total_artists,
             )
 
+            limit = max(5, int(MAX_TRACKS_PER_ARTIST * depth_frac))
             try:
                 fetched = await _fetch_and_enrich_discography(
                     engine, settings, creds, user_id=user_id,
@@ -388,12 +344,14 @@ async def _enrich_library_songs(
     return enriched
 
 
-async def _get_ranked_artists(engine, *, user_id: str) -> list[tuple[str, float]]:
-    """Return (artist_name, normalized_score) tuples ranked by affinity."""
+async def _get_ranked_artists(engine, *, user_id: str) -> list[str]:
+    """Get user's artists ranked by calibration weight then frequency."""
     from musicmind.db.schema import song_metadata_cache, user_calibration
-    from musicmind.engine.profile import parse_artists
+
+    artists: list[tuple[str, float]] = []
 
     async with engine.begin() as conn:
+        # Calibration-ranked artists (highest priority)
         cal_result = await conn.execute(
             sa.select(
                 user_calibration.c.item_name,
@@ -405,14 +363,11 @@ async def _get_ranked_artists(engine, *, user_id: str) -> list[tuple[str, float]
                         ["top_artist", "artist_rank"]
                     ),
                 )
-            )
+            ).order_by(user_calibration.c.weight.desc())
         )
-        cal_weights: dict[str, float] = {
-            row.item_name: float(row.weight or 0.0)   # ORIGINAL casing
-            for row in cal_result
-            if row.item_name
-        }
+        cal_artists = {row.item_name: row.weight for row in cal_result}
 
+        # All library artists by frequency
         freq_result = await conn.execute(
             sa.select(
                 song_metadata_cache.c.artist_name,
@@ -426,18 +381,23 @@ async def _get_ranked_artists(engine, *, user_id: str) -> list[tuple[str, float]
                     ),
                 )
             ).group_by(song_metadata_cache.c.artist_name)
+            .order_by(sa.text("count DESC"))
         )
-        raw_freq: dict[str, int] = {}
-        for row in freq_result:
-            if not row.artist_name:
-                continue
-            parsed = parse_artists(row.artist_name)
-            if not parsed:
-                continue
-            primary_name = parsed[0][0]
-            raw_freq[primary_name] = raw_freq.get(primary_name, 0) + int(row.count)
+        freq_artists = {row.artist_name: row.count for row in freq_result}
 
-    return _rank_artists_by_affinity(raw_freq, cal_weights)
+    # Merge: calibration first, then frequency
+    seen: set[str] = set()
+    for name, weight in sorted(cal_artists.items(), key=lambda x: -x[1]):
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            artists.append((name, weight * 100))
+
+    for name, count in sorted(freq_artists.items(), key=lambda x: -x[1]):
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            artists.append((name, count))
+
+    return [name for name, _ in artists]
 
 
 async def _fetch_and_enrich_discography(
@@ -527,22 +487,17 @@ async def _suggest_and_enrich_artists(
     creds: dict,
     *,
     user_id: str,
-    ranked_artists: list[tuple[str, float]],
+    ranked_artists: list[str],
     max_artists: int,
 ) -> int:
-    """Find and enrich suggested artists from featured collaborations.
-
-    Uses the shared rank_cobweb_candidates logic: sum + log1p + primary-affinity
-    weighting so feats from top-artist tracks outrank those from tail-artist tracks.
-    """
+    """Find and enrich suggested artists from featured collaborations."""
     from musicmind.db.schema import song_metadata_cache
-    from musicmind.engine.cobweb import rank_cobweb_candidates
     from musicmind.engine.profile import parse_artists
 
-    library_set = {n.lower() for n, _ in ranked_artists}
-    affinity_map = {n.lower(): s for n, s in ranked_artists}
+    library_set = {a.lower() for a in ranked_artists}
+    candidates: dict[str, float] = {}
 
-    # Fetch raw artist strings from library (feat info preserved)
+    # Source 1: Featured artists from library songs
     async with engine.begin() as conn:
         result = await conn.execute(
             sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
@@ -557,30 +512,24 @@ async def _suggest_and_enrich_artists(
         )
         raw_names = [row[0] for row in result if row[0]]
 
-    # Build library_rows with primary affinity attached to each raw string
-    library_rows = []
-    for raw in raw_names:
-        parsed = parse_artists(raw)
-        primary = parsed[0][0].lower() if parsed else ""
-        library_rows.append({
-            "artist_name": raw,
-            "primary_affinity": affinity_map.get(primary, 0.1),
-        })
+    for raw_name in raw_names:
+        parsed = parse_artists(raw_name)
+        for name, weight in parsed:
+            key = name.strip().lower()
+            if key and key not in library_set and len(key) > 1:
+                candidates[key] = candidates.get(key, 0) + weight * 2
 
-    ranked = rank_cobweb_candidates(
-        library_rows=library_rows,
-        library_artist_names=library_set,
-        existing_cobweb_names=set(),
-        max_total=max_artists,
-    )
+    # Rank and cap
+    sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1])
+    selected = [name for name, _ in sorted_candidates[:max_artists]]
 
     enriched_count = 0
-    for artist_name, _priority in ranked:
-        limit = max(5, int(MAX_TRACKS_PER_ARTIST * 0.5))
+    for artist_name in selected:
+        limit = max(5, int(MAX_TRACKS_PER_ARTIST * STEP_DEPTHS["suggested"]))
         try:
             fetched = await _fetch_and_enrich_discography(
                 engine, settings, creds, user_id=user_id,
-                artist_name=artist_name, limit=limit,
+                artist_name=artist_name.title(), limit=limit,
             )
             enriched_count += 1 if fetched > 0 else 0
         except Exception:
