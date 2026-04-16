@@ -520,14 +520,19 @@ async def _suggest_and_enrich_artists(
     ranked_artists: list[tuple[str, float]],
     max_artists: int,
 ) -> int:
-    """Find and enrich suggested artists from featured collaborations."""
+    """Find and enrich suggested artists from featured collaborations.
+
+    Uses the shared rank_cobweb_candidates logic: sum + log1p + primary-affinity
+    weighting so feats from top-artist tracks outrank those from tail-artist tracks.
+    """
     from musicmind.db.schema import song_metadata_cache
+    from musicmind.engine.cobweb import rank_cobweb_candidates
     from musicmind.engine.profile import parse_artists
 
     library_set = {n.lower() for n, _ in ranked_artists}
-    candidates: dict[str, float] = {}
+    affinity_map = {n.lower(): s for n, s in ranked_artists}
 
-    # Source 1: Featured artists from library songs
+    # Fetch raw artist strings from library (feat info preserved)
     async with engine.begin() as conn:
         result = await conn.execute(
             sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
@@ -542,24 +547,30 @@ async def _suggest_and_enrich_artists(
         )
         raw_names = [row[0] for row in result if row[0]]
 
-    for raw_name in raw_names:
-        parsed = parse_artists(raw_name)
-        for name, weight in parsed:
-            key = name.strip().lower()
-            if key and key not in library_set and len(key) > 1:
-                candidates[key] = candidates.get(key, 0) + weight * 2
+    # Build library_rows with primary affinity attached to each raw string
+    library_rows = []
+    for raw in raw_names:
+        parsed = parse_artists(raw)
+        primary = parsed[0][0].lower() if parsed else ""
+        library_rows.append({
+            "artist_name": raw,
+            "primary_affinity": affinity_map.get(primary, 0.1),
+        })
 
-    # Rank and cap
-    sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1])
-    selected = [name for name, _ in sorted_candidates[:max_artists]]
+    ranked = rank_cobweb_candidates(
+        library_rows=library_rows,
+        library_artist_names=library_set,
+        existing_cobweb_names=set(),
+        max_total=max_artists,
+    )
 
     enriched_count = 0
-    for artist_name in selected:
+    for artist_name, _priority in ranked:
         limit = max(5, int(MAX_TRACKS_PER_ARTIST * 0.5))
         try:
             fetched = await _fetch_and_enrich_discography(
                 engine, settings, creds, user_id=user_id,
-                artist_name=artist_name.title(), limit=limit,
+                artist_name=artist_name, limit=limit,
             )
             enriched_count += 1 if fetched > 0 else 0
         except Exception:

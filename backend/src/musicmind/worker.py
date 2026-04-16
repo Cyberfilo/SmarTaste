@@ -592,6 +592,16 @@ async def _run_cobweb_cycle(
     return stats
 
 
+def _primary_affinity_lookup(raw_name: str, affinity_map: dict[str, float]) -> float:
+    """Return the primary artist's affinity score for a raw artist string."""
+    from musicmind.engine.profile import parse_artists
+
+    parsed = parse_artists(raw_name)
+    if not parsed:
+        return 0.1
+    return affinity_map.get(parsed[0][0].lower(), 0.1)
+
+
 async def _build_user_cobweb(
     engine,
     settings,
@@ -603,17 +613,19 @@ async def _build_user_cobweb(
     Cobweb sources:
     1. Featured artists from library songs (direct collaboration)
 
-    Caps at library_artists * 0.2 non-library artists.
+    Ranking uses sum + log1p + primary-affinity weighting (see engine/cobweb.py).
+    Cap per cycle = library_artists * 0.2; absolute cap = feat density (unique names).
     """
     from musicmind.db.schema import (
         artist_cobweb,
         song_metadata_cache,
+        taste_profile_snapshots,
     )
-    from musicmind.engine.profile import parse_artists
+    from musicmind.engine.cobweb import rank_cobweb_candidates
 
     stats = {"cobweb_artists": 0, "songs_cached": 0}
 
-    # Get library artists
+    # Get raw library artist strings (with feat info preserved)
     async with engine.begin() as conn:
         result = await conn.execute(
             sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
@@ -631,9 +643,41 @@ async def _build_user_cobweb(
     if not library_artist_names:
         return stats
 
+    # Build affinity_map from latest taste profile snapshot
+    affinity_map: dict[str, float] = {}
+    async with engine.begin() as conn:
+        snap = await conn.execute(
+            sa.select(taste_profile_snapshots.c.top_artists)
+            .where(taste_profile_snapshots.c.user_id == user_id)
+            .order_by(taste_profile_snapshots.c.computed_at.desc())
+            .limit(1)
+        )
+        row = snap.first()
+        if row and row[0]:
+            raw_top = row[0]
+            if isinstance(raw_top, str):
+                try:
+                    import json as _json
+                    raw_top = _json.loads(raw_top)
+                except Exception:
+                    raw_top = []
+            for entry in (raw_top or []):
+                name = entry.get("name", "") if isinstance(entry, dict) else ""
+                score = entry.get("score", 0.1) if isinstance(entry, dict) else 0.1
+                if name:
+                    affinity_map[name.lower()] = float(score)
+
+    # Build library_rows pairing raw artist string with primary affinity
+    library_rows = [
+        {
+            "artist_name": raw,
+            "primary_affinity": _primary_affinity_lookup(raw, affinity_map),
+        }
+        for raw in library_artist_names
+    ]
+
     library_set = {a.lower() for a in library_artist_names}
     max_per_cycle = max(2, int(len(library_artist_names) * 0.2))
-    max_total = max(5, int(len(library_artist_names) * 0.5))  # absolute cap
 
     # Get existing cobweb artists to avoid re-adding
     async with engine.begin() as conn:
@@ -644,42 +688,20 @@ async def _build_user_cobweb(
         )
         existing_set = {row.artist_name.lower() for row in existing}
 
-    # Only expand cobweb if below total capacity
-    if len(existing_set) < max_total:
-        max_discovered = min(max_per_cycle, max_total - len(existing_set))
+    # Rank all candidates using shared logic (density cap, no hard library-size cap)
+    all_ranked = rank_cobweb_candidates(
+        library_rows=library_rows,
+        library_artist_names=library_set,
+        existing_cobweb_names=existing_set,
+    )
 
-        candidates: dict[str, tuple[str, float]] = {}  # key → (name, priority)
+    # Slice to per-cycle budget
+    to_add = all_ranked[:max_per_cycle]
 
-        # Source 1: Featured artists from library songs
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(sa.distinct(song_metadata_cache.c.artist_name)).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == user_id,
-                        sa.or_(
-                            song_metadata_cache.c.library_id.isnot(None),
-                            song_metadata_cache.c.date_added_to_library.isnot(None),
-                        ),
-                    )
-                )
-            )
-            for row in result:
-                if not row[0]:
-                    continue
-                parsed = parse_artists(row[0])
-                for name, weight in parsed:
-                    key = name.strip().lower()
-                    if key and key not in library_set and key not in existing_set:
-                        old_priority = candidates.get(key, ("", 0))[1]
-                        candidates[key] = (name.strip(), max(old_priority, weight * 2))
-
-        # Rank and cap
-        sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1][1])
-        to_add = sorted_candidates[:max_discovered]
-
+    if to_add:
         # Insert into cobweb (use rowcount to track actual inserts)
-        for key, (name, priority) in to_add:
-            source = "feat" if priority >= 1.0 else "similar"
+        for name, priority in to_add:
+            source = "feat"
             try:
                 async with engine.begin() as conn:
                     result = await conn.execute(
@@ -696,10 +718,7 @@ async def _build_user_cobweb(
             except Exception:
                 logger.debug("Cobweb insert failed for '%s'", name)
     else:
-        logger.debug(
-            "User %s: cobweb at capacity (%d/%d), skipping expansion",
-            user_id[:8], len(existing_set), max_total,
-        )
+        logger.debug("User %s: no new cobweb candidates to add", user_id[:8])
 
     # Fetch songs for unenriched cobweb artists
     async with engine.begin() as conn:
