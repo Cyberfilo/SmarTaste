@@ -218,6 +218,13 @@ def score_candidate(
     strategy_count = candidate.get("_strategy_count", 1)
     cross_bonus = min(0.10, max(0, (strategy_count - 1)) * 0.05)
 
+    # ── 7b. Discovery-weight bonus ────────────────────────
+    # Cross-strategy bonus already counts duplicate sources; discovery_weight
+    # captures positional + seed affinity from the similar_artist crawl. Cap
+    # the bonus so it stays additive (max +0.04 at perfect alignment).
+    discovery_weight = float(candidate.get("_discovery_weight", 0.0))
+    discovery_bonus = max(0.0, min(0.04, discovery_weight * 0.04))
+
     # ── 8. Mood boost (set by filter_candidates_by_mood) ──
     mood_boost = candidate.get("_mood_boost", 0.0)
 
@@ -266,6 +273,7 @@ def score_candidate(
 
     # Additive bonuses and penalties
     overall += cross_bonus
+    overall += discovery_bonus
     overall += mood_boost * 0.1
     overall += cal_boost
     overall -= 0.05 * diversity_penalty
@@ -307,6 +315,7 @@ def score_candidate(
             "diversity_penalty": round(diversity_penalty, 3),
             "staleness": round(staleness, 3),
             "cross_strategy_bonus": round(cross_bonus, 3),
+            "discovery_bonus": round(discovery_bonus, 3),
             "mood_boost": round(mood_boost, 3),
         },
         "_explanation": "; ".join(parts) if parts else "moderate match",
