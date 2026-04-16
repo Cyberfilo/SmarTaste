@@ -7,6 +7,62 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.300 — 2026-04-16
+
+### Discovery Strategy Overhaul (affinity-weighted candidate selection)
+
+The recommendation pipeline previously selected candidates via single-dimensional ranking with hard caps, throwing away the affinity scores the profile already computed. A user with 200 plays of one artist and a calibrated weight=5 on another saw the calibrated artist swamp the heavy-listened one. A user with 5 evenly-loved artists got their #4 and #5 enriched at 30% depth while #1 got 100%. This rebuild threads the affinity score end-to-end.
+
+#### Indexer (artist depth and ranking)
+- `_get_ranked_artists` now returns `list[tuple[str, float]]` — each artist paired with its normalized affinity score
+- Pure helper `_rank_artists_by_affinity(freq_map, cal_weights)` extracted for unit testing without a DB fixture
+- Calibration combined as a multiplicative modifier (`freq * (1 + 0.1 * cal_weight)`), not concatenated above frequency
+- Calibration-only artists (no library plays yet) get a baseline frequency=1 so they still surface
+- Original artist casing preserved through ranking — no more `SZA` → `Sza` mangling
+- `STEP_DEPTHS` rank-cliff replaced with continuous `compute_depth_fraction(score)` clamped to [0.15, 1.0]
+- Hard cap `max_other = clamp(library*0.2, 5, 30)` replaced with continuous `AFFINITY_INCLUDE_THRESHOLD = 0.05` (with min-3 fallback for sparse profiles)
+- `_unlink_excess_discoveries` aligned with the new threshold so cleanup never deletes songs the indexer just enriched
+
+#### Cobweb (suggested artist mining)
+- New shared module `engine/cobweb.py` consolidates ranking previously duplicated in worker.py and indexer.py
+- Aggregation switched from `max()` to `sum()` so a 10× featured artist correctly outranks a 1× one (`log1p` damps to ~4× ratio so super-collaborators don't swamp)
+- Each feat contribution weighted by the primary artist's affinity score — feats on top-tier tracks count ~10× more than feats on tail-artist tracks
+- Cap is now feat density (unique candidate count), not `library * 0.5`
+- Co-primary artists in `A & B feat. C` properly excluded from the cobweb (was treating B as a feat of itself)
+
+#### Profile (artist affinity computation)
+- `build_artist_affinity` library presence now log-saturates: `min(3.0, 0.3 * log1p(count))`
+- Prevents 50 unplayed library songs from outranking 3 recent plays
+- `parse_artists` weight (1.0 primary, 0.3 feat) preserved through accumulation
+
+#### Discovery strategies
+- `discover_similar_artists` now accepts `list[tuple[name, affinity]]` and allocates per-seed track budget proportionally — affinity 1.0 seed gets ~20 candidates, affinity 0.2 seed gets ~4
+- Each track tagged with `_discovery_weight = positional_weight * seed_affinity`
+- Scorer consumes `_discovery_weight` as an additive bonus capped at +0.04
+- `discover_chart_filter` now uses `expand_genres` for parent/regional near-match — "Hip-Hop/Rap" chart tracks no longer rejected by an "Italian Hip-Hop/Rap" profile
+
+#### Worker compute savings (helps local-Mac GPU mode)
+- Cobweb tracks pre-filtered by EffNet embedding cosine to user centroid before enrichment dispatch
+- Top 70% kept, bottom 30% skipped — reduces GPU calls when global EffNet embeddings already exist
+- User centroid loaded once per cobweb cycle (was up to 5 redundant queries)
+- EffNet embedding validation pinned to the actual 1280 dim, not a permissive `> 10` guard
+
+#### ISRC backfill (retry loop fix)
+- Worker no longer retries the same ~115 unfindable tracks every cycle
+- Tracks whose Deezer + MusicBrainz lookups both miss are marked with sentinel `'__NO_ISRC__'` and excluded from future backfill queries
+- Transient lookup exceptions still leave rows for next-cycle retry
+- Manual recovery: `UPDATE <table> SET isrc = NULL WHERE isrc = '__NO_ISRC__';`
+
+#### Test coverage
+- 8 new test files covering each layer: artist affinity, indexer ranking, cobweb ranking, cobweb prefilter, discovery budget, discovery weight bonus, chart filter genres
+- 34 new unit tests, all pure (no DB fixtures required)
+
+#### Plan + execution artifacts
+- Implementation plan saved at `docs/superpowers/plans/2026-04-16-discovery-strategy-overhaul.md`
+- 9 atomic commits on `staging`, plus a clean revert + re-apply of one stale-checkout commit (incident captured here as a reminder to verify branch state before applying follow-up commits)
+
+---
+
 ## V 6.200 — 2026-04-15
 
 ### Pipeline Reliability & Worker Hardening
