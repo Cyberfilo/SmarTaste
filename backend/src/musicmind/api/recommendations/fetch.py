@@ -183,93 +183,114 @@ async def _search_artist_id(
 # ── Discovery Strategies ────────────────────────────────────────────────────
 
 
+def allocate_seed_budget(
+    scored_seeds: list[tuple[str, float]],
+    *,
+    total_budget: int,
+) -> dict[str, int]:
+    """Allocate track-fetch budget across seeds proportional to affinity.
+
+    Every seed gets at least 1 slot (prevents tiny-affinity seeds from being
+    silently dropped). Unallocated slots from rounding go to highest-affinity seeds.
+    """
+    if not scored_seeds or total_budget <= 0:
+        return {}
+    positive = [(n, max(0.001, s)) for n, s in scored_seeds]
+    total_weight = sum(s for _, s in positive)
+    allocation: dict[str, int] = {}
+    for name, score in positive:
+        share = int(total_budget * score / total_weight)
+        allocation[name] = max(1, share)
+    spent = sum(allocation.values())
+    leftover = total_budget - spent
+    if leftover > 0:
+        for name, _ in sorted(positive, key=lambda x: x[1], reverse=True):
+            if leftover <= 0:
+                break
+            allocation[name] += 1
+            leftover -= 1
+    return allocation
+
+
 async def discover_similar_artists(
     service: str,
     access_token: str,
-    seed_artist_names: list[str],
+    scored_seeds: list[tuple[str, float]],
     *,
     developer_token: str | None = None,
     storefront: str = "us",
     depth: int = 1,
-    songs_per_artist: int = 5,
+    total_budget: int = 40,
 ) -> list[dict[str, Any]]:
-    """Crawl similar artists and collect their top songs.
-
-    First resolves artist names to service-specific IDs via search,
-    then fetches related artists and their top tracks.
+    """Crawl similar artists with affinity-proportional budget + positional weights.
 
     Args:
         service: "spotify" or "apple_music".
         access_token: Valid access token for the service.
-        seed_artist_names: Artist names from the taste profile.
+        scored_seeds: [(artist_name, affinity_score)] from taste profile.
         developer_token: Required for Apple Music (ES256 JWT).
         storefront: Apple Music storefront (default "us").
-        depth: Hops of similar artists (default 1).
-        songs_per_artist: Top songs to collect per discovered artist.
+        depth: Hops of similar artists (default 1, unused reserved param).
+        total_budget: Total track-fetch budget across all seeds.
 
     Returns:
-        List of song_metadata_cache-compatible dicts.
+        List of song_metadata_cache-compatible dicts, each with _discovery_weight.
     """
+    import math as _math
+
     candidates: list[dict[str, Any]] = []
 
-    # Resolve seed names to IDs
-    seed_ids: list[str] = []
-    for name in seed_artist_names[:5]:
-        aid = await _search_artist_id(
-            service, access_token, name,
-            developer_token=developer_token, storefront=storefront,
-        )
-        if aid:
-            seed_ids.append(aid)
-
-    if not seed_ids:
+    if not scored_seeds:
         return candidates
 
-    visited: set[str] = set(seed_ids)
-    current_layer = list(seed_ids)
+    allocation = allocate_seed_budget(scored_seeds, total_budget=total_budget)
 
-    try:
+    for seed_name, seed_affinity in scored_seeds:
+        per_seed_budget = allocation.get(seed_name, 1)
+        related_count = max(1, min(5, int(_math.ceil(_math.sqrt(per_seed_budget)))))
+        songs_per_artist = max(1, per_seed_budget // related_count)
+
+        aid = await _search_artist_id(
+            service, access_token, seed_name,
+            developer_token=developer_token, storefront=storefront,
+        )
+        if not aid:
+            continue
+
         client = _get_shared_client()
-        for _ in range(depth):
-            next_layer: list[str] = []
-            for artist_id in current_layer[:10]:
-                try:
-                    related = await _fetch_related_artists(
-                        client, service, access_token, artist_id,
-                        developer_token=developer_token,
-                        storefront=storefront,
-                        limit=5,
-                    )
-                    for rid, artist_genres in related:
-                        if rid in visited:
-                            continue
-                        visited.add(rid)
-                        next_layer.append(rid)
+        try:
+            related = await _fetch_related_artists(
+                client, service, access_token, aid,
+                developer_token=developer_token,
+                storefront=storefront,
+                limit=related_count,
+            )
+        except (httpx.HTTPStatusError, httpx.HTTPError):
+            logger.warning("Error crawling seed %s on %s", seed_name, service)
+            continue
 
-                        tracks = await _fetch_artist_top_tracks(
-                            client, service, access_token, rid,
-                            developer_token=developer_token,
-                            storefront=storefront,
-                            limit=songs_per_artist,
-                        )
-                        # Backfill Spotify genres from artist data
-                        if service == "spotify" and artist_genres:
-                            for t in tracks:
-                                if not t.get("genre_names"):
-                                    t["genre_names"] = artist_genres
-                        candidates.extend(tracks)
-                except (httpx.HTTPStatusError, httpx.HTTPError):
-                    logger.warning(
-                        "Error crawling artist %s on %s", artist_id, service
-                    )
-                    continue
-            current_layer = next_layer
-
-    except (httpx.HTTPStatusError, httpx.HTTPError):
-        logger.exception("Connection error during similar artist crawl on %s", service)
+        for position, (rid, artist_genres) in enumerate(related):
+            positional_weight = 1.0 / (1.0 + position * 0.3)
+            try:
+                tracks = await _fetch_artist_top_tracks(
+                    client, service, access_token, rid,
+                    developer_token=developer_token,
+                    storefront=storefront,
+                    limit=songs_per_artist,
+                )
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                continue
+            if service == "spotify" and artist_genres:
+                for t in tracks:
+                    if not t.get("genre_names"):
+                        t["genre_names"] = artist_genres
+            for t in tracks:
+                t["_discovery_weight"] = positional_weight * seed_affinity
+            candidates.extend(tracks)
 
     logger.info(
-        "Discovered %d tracks via similar_artists on %s", len(candidates), service
+        "Discovered %d tracks via similar_artists on %s (budget=%d)",
+        len(candidates), service, total_budget,
     )
     return candidates
 
