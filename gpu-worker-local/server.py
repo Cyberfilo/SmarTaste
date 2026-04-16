@@ -104,9 +104,29 @@ async def lifespan(app: FastAPI):
             mert_device = "cpu"
     else:
         mert = mert.to(device)
+    # float16 on MPS halves RAM and speeds up matmul ~1.5x. Safe for
+    # audio embedding models; fall back to float32 on any issue.
+    mert_dtype = torch.float32
+    if mert_device == "mps":
+        try:
+            mert_half = mert.half()
+            with torch.no_grad():
+                dummy = torch.randn(1, 24000).numpy()
+                inputs = _models["mert_processor"](
+                    dummy, sampling_rate=24000, return_tensors="pt",
+                )
+                inputs = {k: v.to("mps") for k, v in inputs.items()}
+                _ = mert_half(**inputs)
+            mert = mert_half
+            mert_dtype = torch.float16
+            logger.info("MERT running in float16 on MPS")
+        except Exception as e:
+            logger.warning("float16 failed (%s), staying on float32", e)
+
     _models["mert"] = mert
     _models["device"] = device
     _models["mert_device"] = mert_device
+    _models["mert_dtype"] = mert_dtype
 
     logger.info("Models loaded. Ready on http://%s:%d", HOST, PORT)
     yield
@@ -161,7 +181,12 @@ def _process_audio_bytes(audio_bytes: bytes) -> dict:
                 audio, sampling_rate=24000, return_tensors="pt",
             )
             mert_device = _models["mert_device"]
-            inputs = {k: v.to(mert_device) for k, v in inputs.items()}
+            mert_dtype = _models.get("mert_dtype", torch.float32)
+            inputs = {
+                k: v.to(mert_device).to(mert_dtype)
+                if v.dtype.is_floating_point else v.to(mert_device)
+                for k, v in inputs.items()
+            }
 
             with torch.no_grad():
                 outputs = _models["mert"](
@@ -200,19 +225,107 @@ async def health() -> dict:
 async def enrich(data: dict) -> dict:
     """Mirrors the Modal /enrich endpoint contract."""
     # Batch bytes (preferred — no URL download on the server)
+    # Optimized: single CLAP forward pass for all N files, then loop MERT.
     if "audio_items" in data:
-        results = []
-        for b64 in data["audio_items"]:
+        tmp_paths: list = []
+        decode_errors: dict = {}  # idx -> error dict
+
+        # Decode + write tempfiles
+        for i, b64 in enumerate(data["audio_items"]):
             try:
                 audio = base64.b64decode(b64)
-                results.append(_process_audio_bytes(audio))
+                if len(audio) < 1000:
+                    decode_errors[i] = {
+                        "error": "Audio too small",
+                        "clap_512": None, "mert_768": None,
+                    }
+                    tmp_paths.append(None)
+                    continue
+                tmp = tempfile.NamedTemporaryFile(suffix=".m4a", delete=False)
+                tmp.write(audio)
+                tmp.close()
+                tmp_paths.append(Path(tmp.name))
             except Exception as e:
-                results.append({
+                decode_errors[i] = {
                     "error": f"Decode failed: {e}",
-                    "clap_512": None,
-                    "mert_768": None,
-                })
-        logger.info("Batch-bytes: %d items processed", len(results))
+                    "clap_512": None, "mert_768": None,
+                }
+                tmp_paths.append(None)
+
+        # Batch CLAP: all valid files in one forward pass
+        valid_paths = [p for p in tmp_paths if p is not None]
+        clap_embeddings: dict = {}  # path_idx -> embedding
+        if valid_paths:
+            try:
+                embs = _models["clap"].get_audio_embedding_from_filelist(
+                    [str(p) for p in valid_paths], use_tensor=False,
+                )
+                for orig_idx, emb in zip(
+                    [i for i, p in enumerate(tmp_paths) if p is not None],
+                    embs,
+                ):
+                    clap_embeddings[orig_idx] = [
+                        round(float(v), 6) for v in emb
+                    ]
+            except Exception as e:
+                logger.warning("Batch CLAP failed: %s", e)
+
+        # Loop MERT per file + assemble results
+        results = []
+        for i, tmp_path in enumerate(tmp_paths):
+            if i in decode_errors:
+                results.append(decode_errors[i])
+                continue
+            result = {
+                "error": None,
+                "clap_512": clap_embeddings.get(i),
+                "mert_768": None,
+            }
+            if result["clap_512"] is None:
+                result["error"] = "CLAP failed in batch"
+            # MERT per-file
+            try:
+                import librosa
+                audio, sr = librosa.load(str(tmp_path), sr=None, mono=True)
+                if sr != 24000:
+                    import torchaudio
+                    at = torch.tensor(
+                        audio, dtype=torch.float32,
+                    ).unsqueeze(0)
+                    resampler = torchaudio.transforms.Resample(sr, 24000)
+                    at = resampler(at)
+                    audio = at.squeeze(0).numpy()
+                inputs = _models["mert_processor"](
+                    audio, sampling_rate=24000, return_tensors="pt",
+                )
+                mdev = _models["mert_device"]
+                mdtype = _models.get("mert_dtype", torch.float32)
+                inputs = {
+                    k: v.to(mdev).to(mdtype)
+                    if v.dtype.is_floating_point else v.to(mdev)
+                    for k, v in inputs.items()
+                }
+                with torch.no_grad():
+                    outputs = _models["mert"](
+                        **inputs, output_hidden_states=True,
+                    )
+                lh = outputs.hidden_states[-1]
+                emb = lh.mean(dim=1).squeeze(0).cpu().float().numpy()
+                result["mert_768"] = [round(float(v), 6) for v in emb]
+            except Exception as e:
+                if not result["error"]:
+                    result["error"] = f"MERT failed: {e}"
+            results.append(result)
+
+        # Cleanup tempfiles
+        for p in tmp_paths:
+            if p is not None:
+                p.unlink(missing_ok=True)
+
+        logger.info(
+            "Batch-bytes: %d items processed (%d via batched CLAP)",
+            len(results), len(valid_paths),
+        )
         return {"results": results}
 
     # Batch URLs
