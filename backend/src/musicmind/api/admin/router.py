@@ -572,6 +572,57 @@ async def cleanup_orphans(
     return result
 
 
+@router.post("/rebuild-taste-profiles")
+async def rebuild_taste_profiles(
+    request: Request,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Recompute taste_profile_snapshots for every user (background task).
+
+    Lightweight compared to /reindex/{user_id}: doesn't refetch library or
+    re-run enrichment, just reads cached song_metadata_cache + audio data
+    and writes a fresh snapshot. Used after engine changes (e.g. log-saturated
+    affinity) so stored snapshots reflect the new math.
+
+    Returns immediately; rebuild runs in the background. Watch worker logs
+    for per-user 'Rebuilt profile for ...' lines.
+    """
+    engine = request.app.state.engine
+    encryption = request.app.state.encryption
+    settings = request.app.state.settings
+
+    async with engine.begin() as conn:
+        user_rows = (await conn.execute(sa.select(users.c.id, users.c.email))).fetchall()
+
+    user_ids = [(r.id, r.email) for r in user_rows]
+
+    async def _rebuild_all() -> None:
+        from musicmind.api.taste.service import TasteService
+        ts = TasteService()
+        ok = 0
+        failed = 0
+        for uid, email in user_ids:
+            try:
+                await ts.get_profile(
+                    engine, encryption, settings,
+                    user_id=uid, force_refresh=True,
+                )
+                ok += 1
+                logger.info("Rebuilt profile for %s", email)
+            except Exception:
+                failed += 1
+                logger.exception("Failed to rebuild profile for %s", email)
+        logger.info("Profile rebuild complete: %d ok, %d failed", ok, failed)
+
+    asyncio.ensure_future(_rebuild_all())
+
+    return {
+        "status": "rebuild_started",
+        "user_count": len(user_ids),
+        "note": "Watch worker logs for per-user progress lines.",
+    }
+
+
 @router.post("/reindex/{user_id}")
 async def reindex_user(
     request: Request,
