@@ -217,14 +217,15 @@ def build_artist_affinity(
             decay = temporal_decay_weight(ts, now, half_life_days)
 
         parsed = parse_artists(raw_artist)
-        for name, _weight in parsed:
-            library_counts[name] += 1
+        for name, weight in parsed:
+            library_counts[name] += weight  # feat artists add 0.3, primaries add 1.0
             artist_song_counts[name] += 1
             # Keep the highest decay seen (most recently added song dominates)
             if decay > library_decay.get(name, 0.0):
                 library_decay[name] = decay
 
         # Love/dislike ratings — record for primary artist only
+        # First non-None rating per primary artist wins; duplicate ratings on same artist are not aggregated.
         rating = song.get("user_rating")
         primary_name = parsed[0][0] if parsed else raw_artist
         if rating is not None and primary_name not in library_ratings:
