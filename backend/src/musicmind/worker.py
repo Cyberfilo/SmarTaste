@@ -866,6 +866,69 @@ async def _fetch_artist_songs_globally(
     if not tracks:
         return 0
 
+    # ── Embedding pre-filter ─────────────────────────────────────────────
+    # Look up any existing global EffNet embeddings by ISRC so we can rank
+    # candidates against the user's taste centroid before committing to cache
+    # (and thus enrichment). Tracks without a known embedding pass through —
+    # we need enrichment to learn their embedding. Cold-start users (no
+    # centroid snapshot yet) skip filtering entirely.
+    from musicmind.db.schema import audio_embeddings_global, taste_profile_snapshots
+    from musicmind.engine.cobweb import prefilter_by_centroid_similarity
+
+    isrcs = [t.get("isrc") for t in tracks if t.get("isrc")]
+    emb_by_isrc: dict[str, list[float]] = {}
+    if isrcs:
+        async with engine.begin() as conn:
+            rows = await conn.execute(
+                sa.select(
+                    audio_embeddings_global.c.isrc,
+                    audio_embeddings_global.c.embedding,
+                ).where(audio_embeddings_global.c.isrc.in_(isrcs))
+            )
+            for row in rows:
+                emb = row.embedding
+                if isinstance(emb, str):
+                    try:
+                        emb = json.loads(emb)
+                    except (ValueError, TypeError):
+                        emb = None
+                if isinstance(emb, list) and len(emb) > 10:
+                    emb_by_isrc[row.isrc] = emb
+
+    for t in tracks:
+        isrc = t.get("isrc")
+        if isrc and isrc in emb_by_isrc:
+            t["effnet_embedding"] = emb_by_isrc[isrc]
+
+    centroid: list[float] | None = None
+    async with engine.begin() as conn:
+        snap = (await conn.execute(
+            sa.select(taste_profile_snapshots.c.embedding_centroid)
+            .where(taste_profile_snapshots.c.user_id == user_id)
+            .order_by(taste_profile_snapshots.c.computed_at.desc())
+            .limit(1)
+        )).first()
+    if snap and snap.embedding_centroid:
+        raw = snap.embedding_centroid
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = None
+        if isinstance(raw, list) and len(raw) > 10:
+            centroid = raw
+
+    before_count = len(tracks)
+    tracks = prefilter_by_centroid_similarity(
+        tracks=tracks, centroid=centroid, keep_fraction=0.7,
+    )
+    if before_count != len(tracks):
+        logger.info(
+            "Cobweb prefilter for %s: %d → %d tracks (centroid=%s)",
+            user_id[:8], before_count, len(tracks),
+            "yes" if centroid else "no",
+        )
+
     # Store in global_song_cache (skip existing)
     cached = 0
     async with engine.begin() as conn:
