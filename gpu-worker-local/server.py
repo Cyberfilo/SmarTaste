@@ -83,9 +83,30 @@ async def lifespan(app: FastAPI):
         "m-a-p/MERT-v1-95M", trust_remote_code=True,
     )
     mert.eval()
-    # MERT on CPU is slow but safe. MPS sometimes has operator gaps for this model.
-    _models["mert"] = mert.to(device) if device != "mps" else mert.to("cpu")
-    _models["device"] = device if device != "mps" else "cpu"
+    # Try MPS first (Apple Silicon GPU), fall back to CPU on operator errors.
+    # MERT's Conv1D + layer_norm variants usually work on MPS in recent PyTorch.
+    mert_device = device
+    if device == "mps":
+        try:
+            mert = mert.to("mps")
+            # Sanity check: run a tiny forward pass
+            with torch.no_grad():
+                dummy = torch.randn(1, 24000, device="mps")
+                inputs = _models["mert_processor"](
+                    dummy.cpu().numpy(), sampling_rate=24000, return_tensors="pt",
+                )
+                inputs = {k: v.to("mps") for k, v in inputs.items()}
+                _ = mert(**inputs)
+            logger.info("MERT running on MPS (Apple Silicon GPU)")
+        except Exception as e:
+            logger.warning("MPS failed for MERT (%s), falling back to CPU", e)
+            mert = mert.to("cpu")
+            mert_device = "cpu"
+    else:
+        mert = mert.to(device)
+    _models["mert"] = mert
+    _models["device"] = device
+    _models["mert_device"] = mert_device
 
     logger.info("Models loaded. Ready on http://%s:%d", HOST, PORT)
     yield
@@ -139,8 +160,8 @@ def _process_audio_bytes(audio_bytes: bytes) -> dict:
             inputs = _models["mert_processor"](
                 audio, sampling_rate=24000, return_tensors="pt",
             )
-            device = _models["device"]
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+            mert_device = _models["mert_device"]
+            inputs = {k: v.to(mert_device) for k, v in inputs.items()}
 
             with torch.no_grad():
                 outputs = _models["mert"](
