@@ -77,3 +77,62 @@ def rank_cobweb_candidates(
         min(max_total, density_cap) if max_total is not None else density_cap
     )
     return priorities[:effective_cap]
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity. Returns 0.0 for empty or mismatched inputs."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def prefilter_by_centroid_similarity(
+    *,
+    tracks: list[dict[str, Any]],
+    centroid: list[float] | None,
+    keep_fraction: float = 0.7,
+) -> list[dict[str, Any]]:
+    """Keep the top keep_fraction of tracks by embedding cosine to centroid.
+
+    Tracks without an embedding are kept (we can't rank them yet; enrichment
+    is the only way to learn their embedding). If the centroid is None
+    (cold-start user), the input is returned unchanged.
+
+    Args:
+        tracks: Dicts that may contain "effnet_embedding": list[float].
+        centroid: User's L2-normalized embedding centroid, or None.
+        keep_fraction: Fraction in (0, 1] to keep among tracks that HAVE embeddings.
+
+    Returns:
+        Filtered tracks. Order of non-embedding tracks preserved; ranked tracks
+        are returned in descending-similarity order.
+    """
+    if not tracks:
+        return tracks
+    if centroid is None:
+        return tracks
+
+    keep_fraction = max(0.01, min(1.0, keep_fraction))
+
+    with_emb: list[tuple[float, dict[str, Any]]] = []
+    without_emb: list[dict[str, Any]] = []
+
+    for t in tracks:
+        emb = t.get("effnet_embedding") or t.get("embedding")
+        if isinstance(emb, list) and len(emb) > 0:
+            with_emb.append((_cosine(emb, centroid), t))
+        else:
+            without_emb.append(t)
+
+    if not with_emb:
+        return tracks
+
+    with_emb.sort(key=lambda x: x[0], reverse=True)
+    keep_n = max(1, int(round(len(with_emb) * keep_fraction)))
+    kept_ranked = [t for _, t in with_emb[:keep_n]]
+    return kept_ranked + without_emb
