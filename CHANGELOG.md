@@ -7,6 +7,42 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.310 — 2026-04-16
+
+### Worker-driven discovery (recommendations API becomes a read)
+
+Previously the four discovery strategies (`similar_artist`, `genre_adjacent`, `editorial`, `chart`) ran live on every `/api/recommendations` request — burning Apple Music / Spotify rate limit per-user, blocking the response on network calls, and operating on tracks that hadn't been audio-enriched yet so most embedding dimensions silently fell back to genre-only scoring. Discovery now runs in the background worker and persists to a per-user candidate pool; the API just reads + scores.
+
+#### New table: `recommendation_candidates` (migration 024)
+- `(user_id, catalog_id, strategy_source)` PK so the same track surfaced by multiple strategies still drives the cross-strategy bonus
+- Stores `discovery_weight` (positional × seed_affinity from Task 5 of the discovery overhaul) so it actually influences ranking
+- Indexed on `(user_id, fetched_at)` for the refresh cadence query
+
+#### Worker: `_run_discovery_for_user`
+- Runs after each user's cobweb pass in `_run_cobweb_cycle`
+- Reads latest `taste_profile_snapshots` for seed_scored + top genres
+- Calls all 4 discover_* strategies × all connected services in parallel
+- Upserts `global_song_cache` (metadata) + `recommendation_candidates` (per-user attribution)
+- 6-hour cadence guard: skips if any candidate row was fetched in the last 6h
+- Tagged log: `Discovery refreshed for <user>: N candidates upserted`
+
+#### `RecommendationService.get_recommendations` rewritten
+- Step 4 changed from "run live discovery" to "SELECT recommendation_candidates JOIN global_song_cache"
+- Aggregates per catalog_id: `_strategy_count = #distinct strategies`, `_discovery_weight = max across strategies`, `_strategy_source = highest-weight strategy name`
+- **Cold-start fallback:** if a user has no candidates yet AND has connected services → run live discovery for THIS request and fire `asyncio.create_task(_populate_candidates_background)` so the next request is instant
+- Hard-fails 400 only when no candidates AND no connected service (test contract preserved)
+
+#### Why this is better
+- Recommendations endpoint latency drops from "live API roundtrip × 4 strategies × N services" to "one SELECT + score"
+- Every candidate is fully enriched by the time the API sees it (worker has time to run Essentia + GPU between cobweb cycles), so `_discovery_weight`, embedding cosines, and the cross-strategy bonus all actually shape rankings instead of degrading to genre-only fallback
+- API rate limit pressure is smoothed across worker cycles, not bursty per request
+- Discovery and cobweb now share a single per-user processing model — one queue, one cadence
+
+#### Admin endpoint
+- `POST /api/admin/rebuild-taste-profiles` — bulk recompute snapshots for all users (also added in this release). After engine changes, stored snapshots reflected old math; this endpoint rebuilds them in the background without re-running indexer.
+
+---
+
 ## V 6.300 — 2026-04-16
 
 ### Discovery Strategy Overhaul (affinity-weighted candidate selection)

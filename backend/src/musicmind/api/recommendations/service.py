@@ -143,12 +143,18 @@ class RecommendationService:
             engine, encryption, settings, user_id=user_id,
         )
 
-        # Step 2: Resolve service + credentials
-        all_creds = await self._resolve_all_credentials(
-            engine, encryption, settings, user_id=user_id,
-        )
+        # Step 2: Resolve service + credentials (only used for cold-start fallback)
+        all_creds: list[tuple[str, str, str | None, str]] = []
+        try:
+            all_creds = await self._resolve_all_credentials(
+                engine, encryption, settings, user_id=user_id,
+            )
+        except ValueError:
+            # No connected service — DB candidates may still exist from a
+            # previously connected service; let the read attempt below decide.
+            pass
 
-        # Step 3: Extract seed data from profile
+        # Step 3: Extract seed data from profile (still needed for weights/mood)
         top_artists_raw = profile.get("top_artists", [])
         seed_scored: list[tuple[str, float]] = [
             (a["name"], float(a.get("score", 0.0)))
@@ -162,29 +168,51 @@ class RecommendationService:
         )[:5]
         top_genre_names = [g[0] for g in top_genres]
 
-        # Step 4: Run discovery strategies (against all connected services)
-        candidates: list[dict[str, Any]] = []
-        discovery_tasks = []
-        for svc, access_token, developer_token, storefront in all_creds:
-            discovery_tasks.append(
-                self._run_discovery(
-                    svc, access_token, seed_artist_names, top_genre_names,
-                    strategy=strategy,
-                    developer_token=developer_token,
-                    storefront=storefront,
-                    profile_genres=top_genre_names,
-                    seed_scored=seed_scored,
+        # Step 4: Read candidates from DB (worker-populated)
+        candidates = await self._load_candidates_from_db(
+            engine, user_id=user_id, strategy=strategy,
+        )
+
+        # Hard-fail when there's nothing to recommend AND no creds to fall back
+        # on (test contract: connecting a service is a precondition).
+        if not candidates and not all_creds:
+            raise ValueError("No connected service found")
+
+        # Cold-start fallback: no worker-populated candidates yet AND we have
+        # creds → run live discovery for THIS request and fire-and-forget a
+        # background populate so subsequent requests are instant.
+        if not candidates and all_creds:
+            logger.info(
+                "Recommendations cold-start for user %s — live discovery + bg populate",
+                user_id[:8],
+            )
+            discovery_tasks = []
+            for svc, access_token, developer_token, storefront in all_creds:
+                discovery_tasks.append(
+                    self._run_discovery(
+                        svc, access_token, seed_artist_names, top_genre_names,
+                        strategy=strategy,
+                        developer_token=developer_token,
+                        storefront=storefront,
+                        profile_genres=top_genre_names,
+                        seed_scored=seed_scored,
+                    )
+                )
+            discovery_results = await asyncio.gather(
+                *discovery_tasks, return_exceptions=True,
+            )
+            for result in discovery_results:
+                if isinstance(result, list):
+                    candidates.extend(result)
+                elif isinstance(result, Exception):
+                    logger.warning("Cold-start discovery failed: %s", result)
+
+            # Fire-and-forget: populate the candidates table for next time.
+            asyncio.create_task(
+                self._populate_candidates_background(
+                    engine, settings, user_id=user_id,
                 )
             )
-
-        discovery_results = await asyncio.gather(
-            *discovery_tasks, return_exceptions=True,
-        )
-        for result in discovery_results:
-            if isinstance(result, list):
-                candidates.extend(result)
-            elif isinstance(result, Exception):
-                logger.warning("Cross-service discovery failed: %s", result)
 
         # Step 5: Deduplicate candidates across services and strategies
         unique = self._deduplicate_candidates(candidates)
@@ -735,6 +763,118 @@ class RecommendationService:
                     logger.exception("Discovery strategy '%s' failed", strategy)
 
         return candidates
+
+    @staticmethod
+    async def _load_candidates_from_db(
+        engine,
+        *,
+        user_id: str,
+        strategy: str = "all",
+    ) -> list[dict[str, Any]]:
+        """Read worker-populated discovery candidates from recommendation_candidates.
+
+        Joins with global_song_cache for metadata. Aggregates per catalog_id:
+        - _strategy_count: how many distinct strategies surfaced this track
+        - _discovery_weight: max weight across strategies
+        - _strategy_source: name of the highest-weight strategy
+        """
+        from musicmind.db.schema import (
+            global_song_cache,
+            recommendation_candidates as rc,
+        )
+
+        async with engine.begin() as conn:
+            stmt = sa.select(
+                rc.c.catalog_id,
+                rc.c.strategy_source,
+                rc.c.discovery_weight,
+                rc.c.service_source,
+                global_song_cache.c.name,
+                global_song_cache.c.artist_name,
+                global_song_cache.c.album_name,
+                global_song_cache.c.genre_names,
+                global_song_cache.c.isrc,
+                global_song_cache.c.duration_ms,
+                global_song_cache.c.release_date,
+                global_song_cache.c.preview_url,
+            ).select_from(
+                rc.join(
+                    global_song_cache,
+                    rc.c.catalog_id == global_song_cache.c.catalog_id,
+                )
+            ).where(rc.c.user_id == user_id)
+
+            if strategy != "all":
+                stmt = stmt.where(rc.c.strategy_source == strategy)
+
+            result = await conn.execute(stmt)
+            rows = result.fetchall()
+
+        # Aggregate by catalog_id
+        by_cid: dict[str, dict[str, Any]] = {}
+        strategy_counts: dict[str, set[str]] = {}
+        max_weights: dict[str, tuple[float, str]] = {}
+
+        for row in rows:
+            cid = row.catalog_id
+            if not cid:
+                continue
+            genres = row.genre_names
+            if isinstance(genres, str):
+                try:
+                    genres = json.loads(genres)
+                except (ValueError, TypeError):
+                    genres = []
+            if cid not in by_cid:
+                by_cid[cid] = {
+                    "catalog_id": cid,
+                    "name": row.name or "",
+                    "artist_name": row.artist_name or "",
+                    "album_name": row.album_name or "",
+                    "genre_names": genres or [],
+                    "isrc": row.isrc,
+                    "duration_ms": row.duration_ms,
+                    "release_date": row.release_date,
+                    "preview_url": row.preview_url or "",
+                    "service_source": row.service_source or "",
+                    "artwork_url_template": "",
+                }
+                strategy_counts[cid] = set()
+                max_weights[cid] = (0.0, "")
+            strategy_counts[cid].add(row.strategy_source)
+            dw = float(row.discovery_weight or 0.0)
+            if dw >= max_weights[cid][0]:
+                max_weights[cid] = (dw, row.strategy_source)
+
+        for cid, c in by_cid.items():
+            c["_strategy_count"] = len(strategy_counts[cid])
+            best_dw, best_strat = max_weights[cid]
+            c["_discovery_weight"] = best_dw
+            c["_strategy_source"] = best_strat or "db"
+
+        return list(by_cid.values())
+
+    @staticmethod
+    async def _populate_candidates_background(
+        engine,
+        settings,
+        *,
+        user_id: str,
+    ) -> None:
+        """Fire-and-forget: trigger worker-side discovery for this user.
+
+        Runs the same _run_discovery_for_user that the worker uses on each
+        cycle; the 6h cadence guard inside it prevents redundant runs if the
+        worker already touched this user recently.
+        """
+        try:
+            from musicmind.worker import _run_discovery_for_user
+            await _run_discovery_for_user(engine, settings, user_id=user_id)
+        except Exception:
+            logger.warning(
+                "Background candidate populate failed for user %s",
+                user_id[:8], exc_info=True,
+            )
 
     @staticmethod
     def _deduplicate_candidates(
