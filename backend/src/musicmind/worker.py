@@ -591,9 +591,241 @@ async def _run_cobweb_cycle(
         except Exception:
             logger.warning("Cobweb failed for user %s", user_id[:8], exc_info=True)
 
+        # Refresh recommendation candidates (similar/genre/editorial/charts)
+        # subject to the 6h cadence inside _run_discovery_for_user.
+        try:
+            disc_stats = await _run_discovery_for_user(
+                engine, settings, user_id=user_id,
+            )
+            stats["discovery_candidates"] = (
+                stats.get("discovery_candidates", 0)
+                + disc_stats.get("discovery_candidates", 0)
+            )
+        except Exception:
+            logger.warning(
+                "Discovery refresh failed for user %s",
+                user_id[:8], exc_info=True,
+            )
+
     # Enrich unenriched global songs
     enriched = await _enrich_global_songs(engine, settings)
     stats["songs_enriched"] = enriched
+
+    return stats
+
+
+async def _run_discovery_for_user(
+    engine,
+    settings,
+    *,
+    user_id: str,
+) -> dict[str, int]:
+    """Refresh per-user discovery candidates (similar/genre/editorial/charts).
+
+    Replaces the live API calls that the recommendations endpoint used to make.
+    Persists results in `recommendation_candidates` keyed by
+    (user_id, catalog_id, strategy_source) so the same track surfaced by
+    multiple strategies still drives the cross-strategy bonus during scoring.
+
+    Refresh policy: skip if the user already has candidates fetched in the
+    last 6 hours.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from musicmind.api.recommendations.fetch import (
+        discover_chart_filter,
+        discover_editorial,
+        discover_genre_adjacent,
+        discover_similar_artists,
+    )
+    from musicmind.api.recommendations.service import RecommendationService
+    from musicmind.db.schema import (
+        recommendation_candidates,
+        taste_profile_snapshots,
+    )
+    from musicmind.security.encryption import EncryptionService
+
+    stats = {"discovery_candidates": 0}
+
+    # ── Refresh cadence guard (6 hours) ─────────────────────────────────
+    async with engine.begin() as conn:
+        last = (await conn.execute(
+            sa.select(sa.func.max(recommendation_candidates.c.fetched_at))
+            .where(recommendation_candidates.c.user_id == user_id)
+        )).scalar()
+    if last is not None:
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=UTC)
+        if datetime.now(UTC) - last < timedelta(hours=6):
+            return stats
+
+    # ── Load latest snapshot for seeds + genres ─────────────────────────
+    async with engine.begin() as conn:
+        snap_row = (await conn.execute(
+            sa.select(
+                taste_profile_snapshots.c.top_artists,
+                taste_profile_snapshots.c.genre_vector,
+            )
+            .where(taste_profile_snapshots.c.user_id == user_id)
+            .order_by(taste_profile_snapshots.c.computed_at.desc())
+            .limit(1)
+        )).first()
+    if snap_row is None:
+        logger.debug("Discovery skip for %s: no snapshot yet", user_id[:8])
+        return stats
+
+    top_artists_raw = snap_row.top_artists
+    if isinstance(top_artists_raw, str):
+        try:
+            top_artists_raw = json.loads(top_artists_raw)
+        except (ValueError, TypeError):
+            top_artists_raw = []
+
+    genre_vector_raw = snap_row.genre_vector
+    if isinstance(genre_vector_raw, str):
+        try:
+            genre_vector_raw = json.loads(genre_vector_raw)
+        except (ValueError, TypeError):
+            genre_vector_raw = {}
+
+    seed_scored: list[tuple[str, float]] = [
+        (a["name"], float(a.get("score", 0.0)))
+        for a in (top_artists_raw or [])[:5]
+        if isinstance(a, dict) and a.get("name")
+    ]
+    if not seed_scored:
+        return stats
+    top_genre_names = [
+        g for g, _ in sorted(
+            (genre_vector_raw or {}).items(),
+            key=lambda x: -x[1],
+        )[:5]
+    ]
+
+    # ── Resolve credentials (reuses existing helper) ────────────────────
+    encryption = EncryptionService(settings.fernet_key)
+    rec_service = RecommendationService()
+    try:
+        creds_list = await rec_service._resolve_all_credentials(
+            engine, encryption, settings, user_id=user_id,
+        )
+    except Exception:
+        logger.debug("No creds for discovery (user %s)", user_id[:8])
+        return stats
+
+    # ── Run all 4 strategies × all services in parallel ────────────────
+    all_candidates: list[dict[str, Any]] = []
+
+    async def _run_for_service(
+        service: str,
+        access_token: str,
+        dev_token: str | None,
+        storefront: str,
+    ) -> None:
+        results = await asyncio.gather(
+            discover_similar_artists(
+                service, access_token, seed_scored,
+                developer_token=dev_token, storefront=storefront,
+                total_budget=40,
+            ),
+            discover_genre_adjacent(
+                service, access_token, top_genre_names,
+                developer_token=dev_token, storefront=storefront,
+            ),
+            discover_editorial(
+                service, access_token, top_genre_names,
+                developer_token=dev_token, storefront=storefront,
+            ),
+            discover_chart_filter(
+                service, access_token, top_genre_names,
+                developer_token=dev_token, storefront=storefront,
+            ),
+            return_exceptions=True,
+        )
+        names = ["similar_artist", "genre_adjacent", "editorial", "chart"]
+        for strat, r in zip(names, results):
+            if isinstance(r, list):
+                for t in r:
+                    t["_strategy_source"] = strat
+                all_candidates.extend(r)
+            elif isinstance(r, Exception):
+                logger.warning(
+                    "Discovery strategy %s failed for user %s on %s: %s",
+                    strat, user_id[:8], service, r,
+                )
+
+    await asyncio.gather(
+        *[_run_for_service(*c) for c in creds_list],
+        return_exceptions=True,
+    )
+
+    if not all_candidates:
+        return stats
+
+    # ── Persist: global_song_cache (metadata) + recommendation_candidates ──
+    # Use raw SQL with ON CONFLICT for atomic upserts.
+    async with engine.begin() as conn:
+        for c in all_candidates:
+            cid = c.get("catalog_id") or ""
+            if not cid:
+                continue
+            try:
+                await conn.execute(
+                    sa.text(
+                        "INSERT INTO global_song_cache"
+                        " (catalog_id, name, artist_name, album_name,"
+                        "  genre_names, isrc, duration_ms, release_date,"
+                        "  preview_url, service_source)"
+                        " VALUES (:cid, :name, :artist, :album, :genres,"
+                        "  :isrc, :duration, :release, :preview, :svc)"
+                        " ON CONFLICT (catalog_id) DO NOTHING"
+                    ),
+                    {
+                        "cid": cid,
+                        "name": c.get("name", ""),
+                        "artist": c.get("artist_name", ""),
+                        "album": c.get("album_name", ""),
+                        "genres": json.dumps(c.get("genre_names", [])),
+                        "isrc": c.get("isrc"),
+                        "duration": c.get("duration_ms"),
+                        "release": c.get("release_date"),
+                        "preview": c.get("preview_url", ""),
+                        "svc": c.get("service_source", ""),
+                    },
+                )
+                await conn.execute(
+                    sa.text(
+                        "INSERT INTO recommendation_candidates"
+                        " (user_id, catalog_id, strategy_source,"
+                        "  discovery_weight, service_source, fetched_at)"
+                        " VALUES (:uid, :cid, :strat, :dw, :svc, NOW())"
+                        " ON CONFLICT (user_id, catalog_id, strategy_source)"
+                        " DO UPDATE SET"
+                        "  discovery_weight = GREATEST("
+                        "      recommendation_candidates.discovery_weight,"
+                        "      EXCLUDED.discovery_weight"
+                        "  ),"
+                        "  fetched_at = NOW()"
+                    ),
+                    {
+                        "uid": user_id, "cid": cid,
+                        "strat": c["_strategy_source"],
+                        "dw": float(c.get("_discovery_weight", 0.0)),
+                        "svc": c.get("service_source", ""),
+                    },
+                )
+                stats["discovery_candidates"] += 1
+            except Exception:
+                logger.debug(
+                    "Failed to persist candidate %s for %s",
+                    cid, user_id[:8],
+                )
+
+    if stats["discovery_candidates"] > 0:
+        logger.info(
+            "Discovery refreshed for %s: %d candidates upserted",
+            user_id[:8], stats["discovery_candidates"],
+        )
 
     return stats
 

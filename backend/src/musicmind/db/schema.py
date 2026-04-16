@@ -583,6 +583,34 @@ preview_audio_cache = sa.Table(
     ),
 )
 
+# Per-user discovery candidate pool — populated by the worker, consumed by
+# the recommendations API. The four discover_* strategies (similar_artist,
+# genre_adjacent, editorial, chart) used to run live on every recommendation
+# request. They now run in the worker on a refresh cadence; the API reads
+# from this table + global_song_cache + audio_embeddings, scores, and ranks.
+recommendation_candidates = sa.Table(
+    "recommendation_candidates",
+    metadata,
+    sa.Column("user_id", sa.Text, nullable=False),
+    sa.Column("catalog_id", sa.Text, nullable=False),
+    sa.Column("strategy_source", sa.Text, nullable=False),
+    sa.Column(
+        "discovery_weight", sa.Float, nullable=False, server_default="0.0",
+    ),
+    sa.Column("service_source", sa.Text, nullable=False, server_default=""),
+    sa.Column(
+        "fetched_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.PrimaryKeyConstraint(
+        "user_id", "catalog_id", "strategy_source",
+        name="pk_recommendation_candidates",
+    ),
+    sa.Index("ix_rc_user_fetched", "user_id", "fetched_at"),
+)
+
 # ── Performance Indexes ─────────────────────────────────────────────────────
 # Composite PK tables index only the first column; queries filtering by
 # user_id alone need explicit indexes to avoid full table scans.
