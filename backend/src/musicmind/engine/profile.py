@@ -201,12 +201,7 @@ def build_artist_affinity(
     artist_song_counts: dict[str, int] = Counter()
     now = datetime.now(tz=UTC)
 
-    # Library songs — two-pass approach to avoid linear accumulation dominating plays.
-    # Pass 1: accumulate counts, track max decay, record ratings per primary artist.
-    library_counts: Counter[str] = Counter()
-    library_decay: dict[str, float] = {}
-    library_ratings: dict[str, int] = {}
-
+    # Library songs: low weight (just having a song doesn't mean you listen)
     for song in songs:
         raw_artist = song.get("artist_name", "")
         if not raw_artist:
@@ -218,31 +213,16 @@ def build_artist_affinity(
 
         parsed = parse_artists(raw_artist)
         for name, weight in parsed:
-            library_counts[name] += weight  # feat artists add 0.3, primaries add 1.0
+            artist_scores[name] += 0.3 * decay * weight
             artist_song_counts[name] += 1
-            # Keep the highest decay seen (most recently added song dominates)
-            if decay > library_decay.get(name, 0.0):
-                library_decay[name] = decay
 
-        # Love/dislike ratings — record for primary artist only
-        # First non-None rating per primary artist wins; duplicate ratings on same artist are not aggregated.
+        # Love/dislike ratings are strong explicit signals
         rating = song.get("user_rating")
         primary_name = parsed[0][0] if parsed else raw_artist
-        if rating is not None and primary_name not in library_ratings:
-            library_ratings[primary_name] = rating
-
-    # Pass 2: apply log-saturated presence score once per artist
-    for name, count in library_counts.items():
-        d = library_decay.get(name, 1.0)
-        artist_scores[name] += min(3.0, 0.3 * math.log1p(count)) * d
-
-    # Apply ratings: strong explicit signals — one per primary artist
-    for name, rating in library_ratings.items():
-        d = library_decay.get(name, 1.0)
         if rating == 1:
-            artist_scores[name] += 4.0 * d
+            artist_scores[primary_name] += 4.0 * decay
         elif rating == -1:
-            artist_scores[name] -= 3.0 * d
+            artist_scores[primary_name] -= 3.0 * decay
 
     # Recent plays: the DOMINANT signal for artist affinity
     seen_song_ids: set[str] = set()
