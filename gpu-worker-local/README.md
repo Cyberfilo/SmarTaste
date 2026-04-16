@@ -11,16 +11,26 @@ transparently by flipping the `MUSICMIND_GPU_MODE` env var.
 
 ## 1 — Install and run the local server
 
+> ⚠️ **Python 3.11 required.** `laion-clap==1.1.6` pins `numpy==1.23.5`,
+> which can't build on Python 3.12+ because `distutils` was removed from
+> the stdlib. Modal's image uses 3.11 for the same reason.
+
 ```bash
 cd gpu-worker-local
 
-# fast, isolated venv (recommended)
-uv venv
+# must explicitly pick Python 3.11 — uv defaults to your system Python
+uv venv --python 3.11
 source .venv/bin/activate
 uv pip install -r requirements.txt
 
 # first run downloads ~2GB (CLAP + MERT checkpoints)
 python server.py
+```
+
+If you don't have Python 3.11:
+
+```bash
+brew install python@3.11
 ```
 
 First request may take 30–60s (cold model load). Subsequent requests:
