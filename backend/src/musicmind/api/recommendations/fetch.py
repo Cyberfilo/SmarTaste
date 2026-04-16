@@ -180,6 +180,27 @@ async def _search_artist_id(
     return None
 
 
+# ── Genre Helpers ───────────────────────────────────────────────────────────
+
+
+def _genre_overlap_with_expansion(
+    track_genres: list[str],
+    profile_genres: list[str],
+) -> bool:
+    """Check genre overlap after expanding both sides to include parent genres.
+
+    Converts "Italian Hip-Hop/Rap" → ["Italian Hip-Hop/Rap", "Hip-Hop/Rap"]
+    on both sides before set intersection, so regional and parent genres
+    match each other correctly.
+    """
+    if not track_genres or not profile_genres:
+        return False
+    from musicmind.engine.profile import expand_genres
+    track_set = {g.lower() for g in expand_genres(track_genres)}
+    profile_set = {g.lower() for g in expand_genres(profile_genres)}
+    return bool(track_set & profile_set)
+
+
 # ── Discovery Strategies ────────────────────────────────────────────────────
 
 
@@ -537,7 +558,7 @@ async def discover_chart_filter(
         List of song_metadata_cache-compatible dicts filtered by genre overlap.
     """
     candidates: list[dict[str, Any]] = []
-    top5 = set(g.lower() for g in profile_genres[:5])
+    profile_genres_top5 = list(profile_genres)[:5]
 
     try:
         client = _get_shared_client()
@@ -572,6 +593,19 @@ async def discover_chart_filter(
                 except (httpx.HTTPStatusError, httpx.HTTPError):
                     continue
 
+            # Post-filter: only apply genre overlap to tracks that HAVE genres.
+            # Spotify new-release tracks usually carry empty genre_names (genres
+            # live on artist objects, not tracks). Pass them through when untagged;
+            # reject only when tagged genres are known to not match.
+            candidates = [
+                c for c in candidates
+                if not c.get("genre_names")
+                or _genre_overlap_with_expansion(
+                    c.get("genre_names", []),
+                    profile_genres_top5,
+                )
+            ]
+
         elif service == "apple_music":
             headers = {
                 "Authorization": f"Bearer {developer_token or access_token}"
@@ -586,11 +620,11 @@ async def discover_chart_filter(
             for chart in chart_data:
                 for item in chart.get("data", []):
                     track = _apple_track_to_cache_dict(item)
-                    # Filter: keep only tracks with genre overlap
-                    track_genres = set(
-                        g.lower() for g in track.get("genre_names", [])
-                    )
-                    if track_genres & top5:
+                    # Filter: keep only tracks with expanded genre overlap
+                    if _genre_overlap_with_expansion(
+                        track.get("genre_names", []),
+                        profile_genres_top5,
+                    ):
                         candidates.append(track)
 
     except (httpx.HTTPStatusError, httpx.HTTPError):
