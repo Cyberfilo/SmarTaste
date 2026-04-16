@@ -50,19 +50,29 @@ def _rank_artists_by_affinity(
 
     Score = frequency * (1 + CAL_BOOST * calibration_weight). Calibration
     boosts existing listening, doesn't replace it.
+
+    Args:
+        freq_map: {artist_name: song_count}. Original casing preserved.
+        cal_weights: {artist_name: calibration_weight}. Original casing preserved
+            (used as display name for calibration-only artists).
     """
     if not freq_map and not cal_weights:
         return []
 
+    # Build internal lower-cased lookup maps but preserve display casing.
+    cal_lower_to_weight = {n.lower(): w for n, w in cal_weights.items()}
+    cal_lower_to_display = {n.lower(): n for n in cal_weights}
+
     combined: dict[str, float] = {}
     for name, freq in freq_map.items():
-        cal = cal_weights.get(name.lower(), 0.0)
+        cal = cal_lower_to_weight.get(name.lower(), 0.0)
         combined[name] = float(freq) * (1.0 + CAL_BOOST * cal)
 
     existing_lower = {n.lower() for n in combined}
-    for cal_name, cal in cal_weights.items():
-        if cal_name not in existing_lower:
-            combined[cal_name.title()] = 1.0 * (1.0 + CAL_BOOST * cal)
+    for cal_lower, cal_weight in cal_lower_to_weight.items():
+        if cal_lower not in existing_lower:
+            display = cal_lower_to_display[cal_lower]
+            combined[display] = 1.0 * (1.0 + CAL_BOOST * cal_weight)
 
     if not combined:
         return []
@@ -398,7 +408,7 @@ async def _get_ranked_artists(engine, *, user_id: str) -> list[tuple[str, float]
             )
         )
         cal_weights: dict[str, float] = {
-            (row.item_name or "").lower(): float(row.weight or 0.0)
+            row.item_name: float(row.weight or 0.0)   # ORIGINAL casing
             for row in cal_result
             if row.item_name
         }

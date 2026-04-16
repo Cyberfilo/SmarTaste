@@ -64,6 +64,33 @@ def test_compute_depth_fraction_continuous() -> None:
     assert compute_depth_fraction(0.0) == pytest.approx(0.15)
 
 
+def test_calibration_only_artist_preserves_original_casing() -> None:
+    """Non-standard artist casing (SZA, YUNGBLUD) survives the ranking."""
+    ranked = _rank_artists_by_affinity(
+        freq_map={},
+        cal_weights={"SZA": 5.0, "YUNGBLUD": 4.0, "twenty one pilots": 3.0},
+    )
+    names = [n for n, _ in ranked]
+    assert "SZA" in names
+    assert "YUNGBLUD" in names
+    assert "twenty one pilots" in names
+    # Specifically NOT mangled by .title()
+    assert "Sza" not in names
+    assert "Yungblud" not in names
+    assert "Twenty One Pilots" not in names
+
+
+def test_calibration_overlap_with_freq_uses_freq_casing() -> None:
+    """When an artist exists in both freq and cal, freq's casing wins (display in library)."""
+    ranked = _rank_artists_by_affinity(
+        freq_map={"Baby Gang": 50},
+        cal_weights={"baby gang": 5.0},   # different casing
+    )
+    names = [n for n, _ in ranked]
+    assert "Baby Gang" in names
+    assert "baby gang" not in names
+
+
 def test_compute_depth_fraction_smooth_at_rank_cliff() -> None:
     score_3 = compute_depth_fraction(0.7)
     score_4 = compute_depth_fraction(0.6)
