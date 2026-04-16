@@ -15,12 +15,6 @@ from typing import Any
 
 from musicmind.engine.profile import parse_artists
 
-# EffNet embedding dimensionality (Essentia model output).
-# Used by the worker to validate embeddings before populating tracks for
-# the centroid-similarity prefilter. The pure helper below intentionally
-# accepts smaller vectors so it remains test-friendly.
-EFFNET_EMBEDDING_DIM = 1280
-
 
 def rank_cobweb_candidates(
     *,
