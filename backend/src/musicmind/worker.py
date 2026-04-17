@@ -719,19 +719,24 @@ async def _run_cobweb_cycle(
         except Exception:
             logger.warning("Cobweb failed for user %s", user_id[:8], exc_info=True)
 
-        # Refresh recommendation candidates (similar/genre/editorial/charts)
-        # subject to the 6h cadence inside _run_discovery_for_user.
+        # Unified discovery: the cobweb is the single source of candidates.
+        # Editorial / chart / genre-adjacent / similar-artist strategies are
+        # no longer called here — they pulled unrelated tracks (Dua Lipa,
+        # K-pop, US charts) because they never consulted the user's
+        # genre/artist profile before writing. Everything a user sees as a
+        # recommendation now traces back to an artist in their cobweb, which
+        # itself traces back to a library collaboration.
         try:
-            disc_stats = await _run_discovery_for_user(
-                engine, settings, user_id=user_id,
+            cand_stats = await _populate_candidates_from_cobweb(
+                engine, user_id=user_id,
             )
-            stats["discovery_candidates"] = (
-                stats.get("discovery_candidates", 0)
-                + disc_stats.get("discovery_candidates", 0)
+            stats["candidates_written"] = (
+                stats.get("candidates_written", 0)
+                + cand_stats.get("candidates_written", 0)
             )
         except Exception:
             logger.warning(
-                "Discovery refresh failed for user %s",
+                "Cobweb candidate population failed for user %s",
                 user_id[:8], exc_info=True,
             )
 
@@ -739,6 +744,61 @@ async def _run_cobweb_cycle(
     enriched = await _enrich_global_songs(engine, settings)
     stats["songs_enriched"] = enriched
 
+    return stats
+
+
+async def _populate_candidates_from_cobweb(
+    engine,
+    *,
+    user_id: str,
+) -> dict[str, int]:
+    """Write recommendation_candidates from enriched cobweb artists' tracks.
+
+    Unified discovery: every candidate a user sees traces back to an artist
+    that feature-parsed out of one of their library songs (and was then
+    enriched into global_song_cache). No editorial-playlist scraping, no
+    chart-filter fallthrough, no parent-genre-overlap pollution.
+
+    The cobweb's priority (double-precision float, typically ~2.0 for
+    feat-sourced artists) is normalized to a [0.1, 1.0] discovery_weight.
+    Matching is exact on artist_name; compound / featuring strings stay
+    assigned to the row where they appear, which is fine because the
+    cobweb row itself carries the canonical split artist.
+    """
+    from musicmind.db.schema import artist_cobweb, recommendation_candidates  # noqa: F401
+
+    stats = {"candidates_written": 0}
+
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.text(
+                "INSERT INTO recommendation_candidates"
+                " (user_id, catalog_id, strategy_source, discovery_weight,"
+                "  service_source, fetched_at)"
+                " SELECT c.user_id, g.catalog_id, 'cobweb',"
+                "        LEAST(GREATEST(c.priority / 3.0, 0.1), 1.0),"
+                "        COALESCE(NULLIF(g.service_source, ''), ''),"
+                "        NOW()"
+                " FROM artist_cobweb c"
+                " JOIN global_song_cache g"
+                "      ON g.artist_name = c.artist_name"
+                " WHERE c.user_id = :uid AND c.enriched = true"
+                " ON CONFLICT (user_id, catalog_id, strategy_source) DO UPDATE"
+                "    SET discovery_weight = GREATEST("
+                "           recommendation_candidates.discovery_weight,"
+                "           EXCLUDED.discovery_weight"
+                "        ),"
+                "        fetched_at = NOW()"
+            ),
+            {"uid": user_id},
+        )
+        stats["candidates_written"] = int(result.rowcount or 0)
+
+    if stats["candidates_written"]:
+        logger.info(
+            "User %s: wrote %d cobweb-sourced candidates",
+            user_id[:8], stats["candidates_written"],
+        )
     return stats
 
 
