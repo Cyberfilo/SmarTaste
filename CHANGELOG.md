@@ -7,6 +7,60 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.360 — 2026-04-17
+
+### Dashboard v2 — centroids become neighbors, artwork everywhere, fresh-pipeline ticker
+
+Follow-up to V 6.350. The previous redesign derived all insights from what the `/api/taste/profile` response already returned; this one surfaces the data the snapshot was *saving but never serving* — specifically the `clap_centroid` / `mert_centroid` / `embedding_centroid` / `audio_centroid` JSON columns — and threads album + artist artwork through every card where it carries information cheaply.
+
+**New backend module `backend/src/musicmind/api/taste/insights.py`:**
+
+- `format_apple_artwork(template, size)` — resolves Apple Music `{w}x{h}bb.jpg` templates to a concrete thumbnail URL. Pure function, safe on empty input.
+- `get_artist_artworks(engine, *, user_id, artist_names, size)` — one query returns `{artist_name_lower: artwork_url}` for a list of artists, picking each artist's most recently added library song as the representative. Filters out rows with null/empty templates.
+- `get_recent_enrichments(engine, *, user_id, limit)` — join of `audio_features_cache` × `song_metadata_cache` ordered by `COALESCE(enriched_at, analyzed_at) DESC`. Returns name + artist + album + artwork + Essentia scalars (tempo, energy, danceability) per row.
+- `compute_sonic_neighbors(engine, *, user_id, clap_centroid, limit, sample_size)` — samples up to 2000 rows from `audio_embeddings_global` (ISRC-keyed CLAP-enriched global catalog), joins with `global_song_cache` for artist + artwork, filters out artists already in the user's library (case-insensitive), computes pure-Python cosine similarity per row (no numpy dep), groups by artist with best-per-artist, returns top N. Returns empty list if the user has no CLAP centroid yet.
+- `compute_breadth_metrics(genre_vector, top_artists)` — three numbers derived from the snapshot dicts the profile already returns: `genre_entropy` (Shannon entropy normalized to 0–1), `artist_concentration` (top-5 artists' share of total artist score), `sonic_breadth` (composite `0.6·entropy + 0.4·(1-concentration)`).
+
+**New backend endpoints on `backend/src/musicmind/api/taste/router.py`:**
+
+- `GET /api/taste/sonic-neighbors?limit=8` — returns `SonicNeighborsResponse { service, neighbors: [{artist_name, similarity, sample_song_name, sample_catalog_id, sample_album_name, artwork_url, genre_names}], note }`. The `note` explains degradation cases (no CLAP centroid yet, empty result).
+- `GET /api/taste/recent-enrichments?limit=12` — returns `RecentEnrichmentsResponse { items: [{catalog_id, name, artist_name, album_name, artwork_url, enriched_at, tempo, energy, danceability}], total }`.
+
+**Backend schema additions on `backend/src/musicmind/api/taste/schemas.py`:**
+
+- `ArtistEntry` gains `sample_artwork_url: str | None` (backward-compatible — default None).
+- `TasteProfileResponse` gains `breadth: BreadthMetrics | None` (ditto).
+- New `SonicNeighbor`, `SonicNeighborsResponse`, `RecentEnrichment`, `RecentEnrichmentsResponse`, `BreadthMetrics` models.
+- `TasteProfileResponse.model_rebuild()` called at module bottom to resolve the `BreadthMetrics` forward reference under `from __future__ import annotations`.
+
+**Profile endpoint enrichment (`/api/taste/profile`):**
+
+Response-assembly path now pulls artist artworks and breadth metrics at response time (not stored in the snapshot — stays computed), so the existing 24-hour snapshot cache doesn't need a migration. If `get_artist_artworks` fails, profile still returns with null artwork URLs — never blocks the page.
+
+**Frontend — `frontend/src/app/(app)/dashboard/page.tsx`:**
+
+- **Sonic Neighbors card (new, full-width)** — 8-artist grid with artwork, similarity percentage bar, and the sample song name that earned the match. Uses the new `useSonicNeighbors()` hook (30-min cache). Renders a graceful "still computing" state when the CLAP centroid hasn't been built yet.
+- **Recently Analyzed strip (new, full-width, horizontal-scroll)** — up to 12 freshest songs from the pipeline with 144px artwork tiles, BPM from Essentia tempo, and a relative-time label ("12m ago", "3h ago", "2d ago"). Uses a fresher 5-min `staleTime` so the pipeline's output feels alive.
+- **Top Artists (upgraded)** — now shows a 40px circular avatar per artist sourced from the backend's `sample_artwork_url`. Graceful fallback to a violet gradient tile with the artist's initials when no artwork exists. The existing affinity bar was kept, narrowed to make room for the avatar without breaking the visual rhythm.
+- **Library Snapshot (extended)** — adds two new rows from `profile.breadth`: "Sonic breadth" (composite %) labeled `focused` / `balanced` / `broad` / `eclectic`, and "Top-5 concentration" (%) labeled `artist-focused` / `balanced` / `spread out`. Both rows only render if the backend returns `breadth` (forward-compat with older snapshots).
+- **`Artwork` primitive (new, inline)** — shared component used by Sonic Neighbors and Top Artists. Handles missing URLs with an initials gradient tile in 4 sizes × 2 shapes (rounded-md for albums, rounded-full for artists). Uses plain `<img>` (not `next/image`) — no `next.config.js` domain whitelist juggling needed, and artwork URLs from Apple/other sources don't need Next's optimization pipeline.
+
+**New frontend types + hooks:**
+
+- `frontend/src/types/api.ts`: `BreadthMetrics`, `SonicNeighbor`, `SonicNeighborsResponse`, `RecentEnrichment`, `RecentEnrichmentsResponse`. `ArtistEntry.sample_artwork_url` and `TasteProfile.breadth` added as optional.
+- `frontend/src/hooks/use-taste.ts`: `useSonicNeighbors(limit)` and `useRecentEnrichments(limit)`.
+
+**Design decisions:**
+
+- Artwork everywhere, but never decoratively — every tile is the shortest-path signal (album art disambiguates "Shiva" the artist from "Shiva" the song, BPM on a tile is more memorable than a line of text).
+- Sonic-neighbors explicitly *excludes* in-library artists so it acts as a discovery surface rather than re-ranking what the user already knows.
+- Breadth metrics use server-side math (not client) because the Shannon-entropy calculation depends on the full genre vector the server already has in memory — cheaper than shipping the vector twice.
+- Pure-Python cosine (no numpy) in `compute_sonic_neighbors` — the cost of loading numpy into the backend wheels for a 2k × 512 dot product once-per-dashboard-load isn't worth it; the hot path is DB I/O, not vector math.
+
+No migration. No new env vars. No backend dependency additions. No frontend dependency additions. Pydantic `model_rebuild()` covers the forward reference without splitting the module.
+
+---
+
 ## V 6.351 — 2026-04-17
 
 ### Unify all discovery through the cobweb — stop surfacing unrelated songs
