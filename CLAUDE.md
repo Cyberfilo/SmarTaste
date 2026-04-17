@@ -1,538 +1,294 @@
-# SmarTaste (formerly MusicMind)
+# SmarTaste
 
-## Quick Commands
-- `uv run python -m musicmind.server` — Start MCP server (stdio)
-- `uv run python -m musicmind.setup` — Run one-time Apple Music OAuth setup
-- `uv run pytest` — Run tests
-- `uv run ruff check src/` — Lint
+A music-discovery webapp that connects users' Spotify + Apple Music libraries, builds a taste profile from real listening data, and delivers recommendations scored on 6 embedding-based dimensions. Users BYOK an Anthropic key for the in-app Claude chat. Designed for a small friends group, not a public product.
 
-## Architecture
-Python FastMCP server connecting Claude to Apple Music API. Three layers:
-1. **API Client** (client.py) — async httpx client for api.music.apple.com, 25+ endpoints
-2. **Persistence** (db/) — SQLite cache for listening history, song metadata, taste profiles
-3. **Taste Engine** (engine/) — algorithmic profile building + candidate scoring from metadata
-4. **Audio Analysis** (engine/audio.py, engine/classifier.py) — optional librosa-based feature extraction + macOS SoundAnalysis
-
-Tools are organized by domain: library, catalog, playback, manage, taste, recommend.
-
-## Adaptive Recommendation Engine
-The scorer uses context-adaptive weights that shift based on user profile characteristics, plus calibration bonuses and engagement data from play count proxy.
-
-### Context-Adaptive Weights
-Weights computed per-user from `compute_context_weights()` based on:
-- **Regional concentration**: >60% one language → language weight increases; <20% → language nearly zero
-- **Audio availability**: enriched features → audio weight +5%
-- **Calibration presence**: onboarding done → artist weight +5%
-- **Mood active**: audio becomes dominant at 40%
-- **Feedback-learned**: if 10+ ratings exist, blends 60% context + 40% feedback-optimized
-
-### Scoring Architecture (6 Embedding-Based Dimensions)
-| Dimension | Default Weight | Source |
-|-----------|---------------|--------|
-| CLAP cosine (512-dim) | 0.30 | Modal GPU — semantic audio similarity |
-| MERT cosine (768-dim) | 0.25 | Modal GPU — musical structure similarity |
-| EffNet cosine (1280-dim) | 0.15 | Essentia local ONNX — timbral fingerprint |
-| Genre match (cosine) | 0.15 | Apple Music/Spotify native metadata |
-| Scalar audio match | 0.10 | Essentia tempo/energy/danceability euclidean |
-| Artist affinity | 0.05 | Library presence + calibration |
-
-Plus additive bonuses:
-- **diversity** — MMR penalty applied during greedy selection
-- **staleness** — cooldown penalty on recently recommended songs
-
-Missing dimensions redistributed proportionally (graceful degradation when embeddings unavailable).
-
-**Removed dimensions** (Apr 2026 pipeline rebuild):
-- Last.fm tags, collaborative matching, language/region — replaced by embedding similarity
-- Play count proxy — table dropped, engagement weighting stubbed
-
-### Regional Genre Prioritization
-When building genre vectors and computing cosine similarity:
-- Original genre names (e.g., "Italian Hip-Hop/Rap") get **full weight (1.0)**
-- Expanded parent genres (e.g., "Hip-Hop/Rap") get **reduced weight (0.3)**
-- This ensures a user who listens to 90% Italian music gets Italian recommendations, not generic American equivalents that happen to share the parent genre
-
-### Artist-in-Wrong-Genre Penalty
-If a known artist appears in a genre with cosine score < 0.2, their artist_match is penalized to 30%. This prevents "you listen to Artist X" from recommending their one country song to a drill listener. Calibration boost is also zeroed out for genre_score < 0.15.
-
-### Discovery Strategy Noise Reduction
-- **similar_artist_crawl**: default depth=1 (was 2) — two hops drifts too far
-- **chart_filter**: passes user's #1 genre to API + pre-filters by top-5 genre overlap
-- **genre_adjacent_explore**: uses full regional genre names for search, filters out zero-overlap results
-
-### Enrichment Pipeline (Apr 2026 rebuild)
-All external APIs removed. Pipeline per track:
-1. **Preview URL**: from Apple Music/Spotify natively, Deezer ISRC fallback
-2. **Essentia (CPU, Railway)**: 11 scalar features + 1280-dim EffNet ONNX embedding + classifier heads
-3. **Modal GPU (serverless)**: 512-dim CLAP + 768-dim MERT embeddings
-4. **OpenAI (optional)**: AI-generated track captions
-
-Worker runs embedding backfill every cycle (Phase 1b) to complete partial enrichment.
-
-### Key Infrastructure Files
-| File | Purpose | Depends on |
-|------|---------|-----------|
-| `worker/Dockerfile` | Railway worker image (Python 3.12, Essentia, ONNX) | `backend/src/` |
-| `backend/Dockerfile` | Backend API image | `backend/src/` |
-| `gpu-worker/handler.py` | Modal serverless GPU (CLAP + MERT) | Deployed via `modal deploy` |
-| `.github/workflows/deploy-modal.yml` | Auto-deploy Modal on gpu-worker/ changes | GitHub secrets |
-| `admin/` | Old standalone admin dashboard (Railway service) | Backend API |
-
-### File Dependency Map (change in one affects the other)
-- `orchestrator.py` ↔ `worker.py` ↔ `indexer.py` — enrichment pipeline flow
-- `orchestrator.py` ↔ `essentia_extractor.py` — audio analysis
-- `orchestrator.py` ↔ `gpu_client.py` ↔ `gpu-worker/handler.py` — Modal GPU
-- `scorer.py` ↔ `similarity.py` ↔ `weights.py` — scoring engine
-- `profile.py` ↔ `scorer.py` — taste profile feeds scoring
-- `schema.py` ↔ `alembic/versions/` — DB schema changes need migrations
-- `worker/Dockerfile` ↔ `backend/Dockerfile` — both need same deps, different entry points
-
-### Onboarding Taste Calibration
-3-step wizard shown after service connection to compensate for Apple Music's lack of play counts:
-1. **Playlists** (max 5): pick playlists you listen to on repeat → 5x weight
-2. **Artists** (hierarchical drag-to-reorder): position = priority, top 3 get full discography enrichment → descending weight (5x → 1x)
-3. **Songs**: pick favorites from the selected playlists' combined tracks → 3x weight
-
-Calibration weights are applied as song duplication in the profile builder input (simpler than threading params through every sub-function). Top 3 artists trigger background discography fetch + audio enrichment.
-
-**API endpoints** (`api/calibration/`): `GET /albums`, `GET /artists`, `POST /save`, `GET /status`, `GET /entries`
-**Frontend**: `/onboarding` route, `CalibrationWizard` component, `CalibrationManager` in settings
-**DB table**: `user_calibration` (user_id, calibration_type, item_id, item_name, weight)
-**Calibration types**: `top_artist`, `artist_rank`, `playlist`, `playlist_song`
-
-### Active DB Tables (21 total, migration 022)
-- `audio_features_cache` — Essentia scalar features (tempo, energy, etc.), feature_source tracks provenance
-- `audio_embeddings` — EffNet 1280-dim + CLAP 512-dim + MERT 768-dim per user
-- `audio_embeddings_global` — ISRC-keyed shared embeddings
-- `song_metadata_cache` — includes ai_caption, ai_tags from Essentia classifiers
-- `taste_profile_snapshots` — includes clap_centroid, mert_centroid, embedding_centroid
-
-**Dropped tables** (migration 022): lastfm_tags_cache, kg_artists, kg_relationships, acousticbrainz_cache, lastfm_similar_tracks, isrc_spotify_mapping, bandit_arms, listening_history, play_count_proxy, recommendation_feedback
-
-### Bugs Encountered & Fixed (Apr 2026 sprint)
-- **uuid7 on Python 3.12/3.13**: `uuid.uuid7()` is 3.14+ only. Fixed with `_uuid7 = getattr(uuid, "uuid7", uuid.uuid4)` shim
-- **Essentia no wheel for 3.13/3.14**: Dockerfile downgraded to Python 3.12 (essentia only has 3.9-3.12 wheels)
-- **Worker/Backend Dockerfile mismatch**: `worker/Dockerfile` is SEPARATE from `backend/Dockerfile` — both need identical deps
-- **ONNX input rank**: EffNet expects `[batch, time, mel]` (rank 3), not `[batch, 1, time, mel]` (rank 4)
-- **ONNX patch size**: EffNet expects 128-frame patches, not full spectrogram (~1875 frames for 30s)
-- **beats_confidence type**: Essentia 2.1b6 returns scalar float, not array — use `hasattr(bc, "mean")`
-- **Stale feature skip**: `_enrich_single_track` skipped tracks with old reccobeats features as "complete" — now checks feature_source for stale sources
-- **_merge_features didn't overwrite**: Only filled NULL fields, so old reccobeats values persisted — now overwrites stale sources
-- **Embedding JSON serialization**: `json.dumps()` string passed to sa.JSON column via `sa.text()` silently failed — use SQLAlchemy Core
-- **Stale indexing blocks worker**: Stuck indexing step < 7 from crashed runs blocked gap-fill forever — now force-completes after 5 min
-- **Orphan cleanup deletes __global__**: `__global__` user's audio_features_cache rows deleted as orphans — created system user in DB
-- **Deezer preview URL expiry**: Cached URLs return 403 after ~24h — auto-refresh via fresh ISRC lookup
-- **CLAP model mismatch**: `HTSAT-base` (128 channels) initialized but checkpoint is `HTSAT-tiny` (96 channels)
-- **torch.load weights_only**: PyTorch 2.6+ defaults `weights_only=True`, breaking CLAP checkpoint with numpy globals — monkey-patch to False
-- **Discovery query undefined**: Apple Music branch used `query` variable only defined in Spotify branch — fixed with `genre_term`
-
-## Code Style
-- All tool inputs: Pydantic BaseModel with Field() descriptions
-- All tool names: musicmind_{action}_{resource} in snake_case
-- Async everywhere for network calls
-- Type hints on all functions
-- No stdout logging (stderr only — MCP requirement)
-- Genre handling: always split hierarchical genres (e.g., "Italian Hip-Hop/Rap" → ["Italian Hip-Hop/Rap", "Hip-Hop/Rap"])
-
-## API Auth
-- Developer Token: ES256 JWT signed with .p8 private key, 6-month expiry
-- Music User Token: obtained via MusicKit JS OAuth browser flow (setup.py)
-- Config stored at ~/.config/musicmind/config.json (permissions 600)
-- Both tokens sent as headers: Authorization: Bearer {dev_token}, Music-User-Token: {user_token}
-
-## Key Apple Music API Notes
-- Library songs lack play count — only available via native MusicKit on iOS/macOS
-- Use ?include=catalog on library requests to get full catalog metadata (genres, ISRC, editorial notes)
-- Recently played tracks: max 50, paginated with offset in batches of 10, no timestamps
-- Heavy rotation: often returns empty for light listeners — don't rely on it exclusively
-- Ratings: value 1 = love, -1 = dislike. PUT to set, DELETE to remove.
-- Rate limits: ~20 req/sec (undocumented), handle 429 with exponential backoff
-- Artist views parameter: top-songs, similar-artists, featured-playlists, latest-release, full-albums
-- Storefront: default "it" (Italy), auto-detect via /v1/me/storefront
-
-## Known Issues
-[Empty — add issues here as discovered]
-
-## Dependencies
-- mcp — FastMCP server framework
-- httpx — async HTTP client
-- aiosqlite — async SQLite driver
-- sqlalchemy — query building (Core only, no ORM)
-- pyjwt[crypto] + cryptography — ES256 JWT for Apple developer tokens
-- numpy — vector operations for taste profile scoring
-- scikit-learn — TF-IDF for editorial note extraction
-- pydantic — input validation for all MCP tools
-- ruff — linting
-- pytest + pytest-asyncio — testing
-
-### Optional (audio analysis)
-- librosa + soundfile — audio feature extraction from preview URLs (Tier 2)
-- ffmpeg (system) — required for M4A/AAC decoding
-- Swift 5.9+ — for building SoundAnalysis CLI tool (Tier 3, macOS only)
-
-<!-- GSD:project-start source:PROJECT.md -->
-## Project
-
-**SmarTaste**
-
-A hybrid dashboard + AI chat webapp for music discovery, built on top of an existing MCP-based recommendation engine. Users connect their Spotify and/or Apple Music accounts, bring their own Claude API key, and get a unified taste profile with personalized recommendations — plus a Claude chat interface for deeper musical exploration. Designed for a small group of friends, not a public product.
-
-**Core Value:** Users get genuinely good music recommendations powered by real audio analysis and their actual listening data across services — not just "people who liked X also liked Y."
-
-### Constraints
-
-- **Auth complexity**: Three OAuth flows needed (Spotify, Apple Music, user accounts) — each with different requirements
-- **Apple Music**: Requires Apple Developer account with MusicKit key (.p8 file) — already have this
-- **Spotify**: Requires Spotify Developer app registration for OAuth client credentials
-- **Claude BYOK**: Users need their own Anthropic API keys — no free tier for AI features
-- **Data normalization**: Apple Music and Spotify use completely different data models, IDs, and genre taxonomies
-- **Rate limits**: Apple Music ~20 req/sec (undocumented), Spotify 100+ req/sec but with monthly quotas
-<!-- GSD:project-end -->
-
-<!-- GSD:stack-start source:codebase/STACK.md -->
-## Technology Stack
-
-## Languages
-- Python >= 3.11 - All application code, configured in `pyproject.toml` with `requires-python = ">=3.11"`
-- Swift 5.9+ - Optional SoundAnalysis CLI helper for Tier 3 audio classification (macOS only), referenced in `src/musicmind/engine/classifier.py`
-- JavaScript - MusicKit JS OAuth flow served from `src/musicmind/setup.py` (inline HTML template)
-- Bash - Setup/connection script at `scripts/connect-claude.sh`
-## Runtime
-- Python 3.11+ (target version configured as `py311` in ruff)
-- macOS primary development/deployment target (SoundAnalysis framework, Apple ecosystem)
-- uv (Astral) - Primary package manager and runner
-- Lockfile: `uv.lock` present (version 1, revision 3)
-## Frameworks
-- FastMCP (via `mcp>=1.0`) - MCP server framework, entry point at `src/musicmind/server.py`
-- Pydantic >= 2.0 - Input validation for all MCP tools and API response models (`src/musicmind/models.py`)
-- SQLAlchemy >= 2.0 (Core only, no ORM) - Query building and schema definition (`src/musicmind/db/schema.py`)
-- pytest >= 8.0 - Test runner, config in `pyproject.toml` `[tool.pytest.ini_options]`
-- pytest-asyncio >= 0.23 - Async test support, `asyncio_mode = "auto"`
-- Hatchling - Build backend (`pyproject.toml` `[build-system]`)
-- Ruff >= 0.3 - Linting and formatting, version 0.15.7 detected in `.ruff_cache/`
-## Key Dependencies
-- `mcp>=1.0` - FastMCP server framework; the entire application is an MCP server
-- `httpx>=0.27` - Async HTTP client for Apple Music API (`src/musicmind/client.py`)
-- `pyjwt[crypto]>=2.8` + `cryptography>=42.0` - ES256 JWT generation for Apple Developer tokens (`src/musicmind/auth.py`)
-- `pydantic>=2.0` - All tool input models and API response parsing (`src/musicmind/models.py`)
-- `aiosqlite>=0.20` - Async SQLite driver for persistence (`src/musicmind/db/manager.py`)
-- `sqlalchemy>=2.0` - Schema definition and query building (Core mode, `src/musicmind/db/schema.py`, `src/musicmind/db/queries.py`)
-- `greenlet>=3.0` - Required by SQLAlchemy async engine
-- `numpy>=1.26` - Vector operations for taste profile scoring, cosine similarity (`src/musicmind/engine/scorer.py`, `src/musicmind/engine/weights.py`)
-- `scikit-learn>=1.3` - TF-IDF for editorial note extraction in taste profiling
-- `librosa>=0.10` - Audio feature extraction from 30s preview clips (`src/musicmind/engine/audio.py`), gracefully degrades if absent
-- `soundfile>=0.12` - Audio file I/O companion to librosa
-## Configuration
-- No `.env` files used
-- Config stored at `~/.config/musicmind/config.json` (permissions 600)
-- Config model defined in `src/musicmind/config.py` as `MusicMindConfig` (Pydantic BaseModel)
-- Required fields: `team_id`, `key_id`, `private_key_path` (Apple Developer credentials)
-- Optional fields: `music_user_token` (obtained via OAuth), `storefront` (default: "it" for Italy)
-- `pyproject.toml` - Single source of truth for project metadata, dependencies, tool config
-- `[tool.hatch.build.targets.wheel]` packages from `src/musicmind`
-- `[tool.ruff]` - Linting config: line-length 100, select rules E/F/I/N/W/UP
-- `[tool.pytest.ini_options]` - Test paths: `tests/`, async mode: auto
-- SQLite database at `~/.config/musicmind/musicmind.db`
-- Schema auto-created on startup via SQLAlchemy `metadata.create_all`
-- 9 tables defined in `src/musicmind/db/schema.py`
-## Platform Requirements
-- Python >= 3.11
-- uv package manager
-- macOS recommended (for Tier 3 SoundAnalysis, optional)
-- ffmpeg (system) required for librosa M4A/AAC decoding (optional, Tier 2)
-- Runs as stdio MCP server (no network port)
-- Designed to run locally via `uv run python -m musicmind`
-- Connects to Claude Desktop or Claude Code via MCP protocol
-- Requires Apple Developer account with MusicKit key (.p8 file)
-## Version Info
-- Project version: 2.20 (defined in `src/musicmind/__init__.py`)
-- Resolved dependency versions (from `uv.lock`): aiosqlite 0.22.1, anyio 4.13.0
-<!-- GSD:stack-end -->
-
-<!-- GSD:conventions-start source:CONVENTIONS.md -->
-## Conventions
-
-## Naming Patterns
-- Use `snake_case.py` for all Python modules: `scorer.py`, `audio.py`, `helpers.py`
-- Test files use `test_` prefix: `test_engine.py`, `test_db.py`, `test_auth.py`
-- `__init__.py` files are empty or minimal (only `__version__` in package root)
-- Use `snake_case` for all functions and methods: `build_genre_vector()`, `score_candidate()`, `get_library_songs()`
-- Private/internal functions prefixed with underscore: `_genre_cosine()`, `_compute_staleness()`, `_request()`, `_ctx()`
-- MCP tool names follow `musicmind_{action}_{resource}` pattern: `musicmind_search`, `musicmind_lookup_song`, `musicmind_taste_profile`
-- `snake_case` throughout: `genre_vector`, `catalog_id`, `release_date`
-- Constants use `UPPER_SNAKE_CASE`: `BASE_URL`, `MAX_RETRIES`, `BACKOFF_BASE`, `TOKEN_EXPIRY_SECONDS`, `DEFAULT_WEIGHTS`
-- Private instance variables prefixed with underscore: `self._http`, `self._auth`, `self._developer_token`
-- `PascalCase` for all classes: `AppleMusicClient`, `DatabaseManager`, `QueryExecutor`, `AudioFeatures`
-- Pydantic models use `PascalCase` with descriptive suffixes: `SongAttributes`, `PaginatedResponse`, `MusicMindConfig`
-- SQLAlchemy table variables use `snake_case`: `listening_history`, `song_metadata_cache`
-## Code Style
-- Ruff (v0.15.7) for both linting and formatting
-- Line length: 100 characters (configured in `pyproject.toml`)
-- Target Python version: 3.11
-- Ruff with select rules: `["E", "F", "I", "N", "W", "UP"]`
-- Run with: `uv run ruff check src/`
-- Config in `pyproject.toml` under `[tool.ruff]`
-- Use `from __future__ import annotations` at the top of every module (PEP 604 union types)
-- Use `X | None` instead of `Optional[X]` (enabled by future annotations)
-- Use `dict[str, Any]` instead of `Dict[str, Any]` (modern generics)
-- Use `list[str]` instead of `List[str]`
-## Import Organization
-- Ruff `I` rule enforces import sorting automatically
-- `noqa` comments used for intentional violations: `import musicmind.tools.catalog  # noqa: F401, E402` (side-effect imports in `server.py`)
-- Lazy imports used in hot paths to avoid circular deps: `from musicmind.engine.similarity import audio_feature_similarity` inside function body (see `src/musicmind/engine/scorer.py` lines 132, 161)
-- `from musicmind.models import Resource as Res` used locally to re-parse raw dicts (see `src/musicmind/tools/catalog.py` lines 148, 208, 251)
-- None. All imports use full dotted paths from package root: `musicmind.engine.scorer`, `musicmind.db.queries`
-## Type Annotations
-- Return type annotations on all functions including `-> None`
-- Use `dict[str, Any]` for loosely typed dictionaries (common for API response data)
-- Use `list[dict[str, Any]]` for collections of records
-- Use `str | None` for optional string fields
-- Pydantic `Field()` with `alias` for camelCase API fields: `artist_name: str = Field(default="", alias="artistName")`
-- Pydantic `Field()` with `description` for MCP tool inputs and config fields
-## Error Handling
-- Raise `RuntimeError` for initialization errors: `raise RuntimeError("Client not initialized.")` in `src/musicmind/client.py`
-- Raise `ValueError` for missing config: `raise ValueError("Music User Token not configured.")` in `src/musicmind/auth.py`
-- Raise `FileNotFoundError` for missing config files: `raise FileNotFoundError(f"Config file not found: {CONFIG_FILE}")` in `src/musicmind/config.py`
-- Catch `httpx.HTTPStatusError` and handle by status code: 404 returns `None`, others re-raised (see `src/musicmind/client.py` line 390)
-- HTTP 429 rate limiting: exponential backoff with `MAX_RETRIES = 3` and `BACKOFF_BASE = 1.0` (see `src/musicmind/client.py` lines 70-89)
-- Bare `except Exception: pass` used only in non-critical display paths (health check in `src/musicmind/server.py` lines 103, 135)
-- Server lifespan catches startup errors and yields limited mode context rather than crashing (`src/musicmind/server.py` lines 43-53)
-- Optional features (audio analysis, SoundAnalysis) return `None` when unavailable
-- Server starts in "limited mode" when config is missing
-## Logging
-- Never use `print()` or write to stdout (MCP protocol uses stdio)
-- Use `logger.info()` for normal operations, `logger.warning()` for recoverable issues, `logger.error()` for failures
-- Use %-formatting in log calls (not f-strings): `logger.info("SmarTaste v%s starting up", __version__)`
-## Comments
-- Every `.py` file has a top-level docstring: `"""Async Apple Music API client."""`
-- Docstrings use triple-quoted strings, single line for brief or multi-line for detailed
-- Use `# ── Section Name ──────────────` comment separators to organize code within files (see `src/musicmind/client.py`, `tests/test_engine.py`)
-- MCP tools have detailed docstrings with `Args:` blocks (these are exposed to the LLM user)
-- Internal functions have brief docstrings or none
-- No TSDoc/JSDoc equivalent enforced; plain docstrings only
-- Used sparingly for non-obvious logic: `# Apple returns 201 with data in some cases, empty in others`
-- `# noqa:` comments for intentional linter suppressions
-## Function Design
-- Keyword-only arguments after `*` for optional config: `def score_candidate(..., *, weights=None, audio_features=None)`
-- Default values for pagination: `limit: int = 25, offset: int = 0`
-- MCP tool functions use positional parameters with defaults (exposed to LLM)
-- Return typed Pydantic models from client methods: `PaginatedResponse`, `Resource`, `SearchResults`
-- Return `dict[str, Any]` from engine functions (profile, scores)
-- Return formatted markdown strings from MCP tool functions
-- Return `None` for missing/not-found cases (never raise for "not found")
-## Module Design
-- No `__all__` declarations; rely on import discipline
-- `__init__.py` files are empty (except package root with `__version__`)
-- Not used. Each module imports directly from the file it needs.
-- All network-facing code is `async`: client methods, DB operations, MCP tool handlers
-- Use `async with` context managers for resource lifecycle: `AppleMusicClient`, `DatabaseManager`
-- `pytest-asyncio` with `asyncio_mode = "auto"` means test functions are auto-detected as async
-## Pydantic Model Conventions
-- Use `alias` for camelCase JSON fields from Apple Music API
-- Use `model_config = {"populate_by_name": True}` on `Resource` for flexible construction
-- Default to empty values, never required fields (API responses are unpredictable)
-- Use `Field(default_factory=list)` for mutable defaults
-- Use `Field(description=...)` for documentation
-- Properties for derived values: `has_user_token`, `private_key`
-- Document in `CLAUDE.md`: "All tool inputs: Pydantic BaseModel with Field() descriptions"
-- In practice, current tools use plain function parameters (not input models), but the convention is documented for future tools
-## SQLAlchemy Conventions
-- Table definitions in `src/musicmind/db/schema.py` using `sa.Table()`
-- All queries use SQLAlchemy Core expressions in `src/musicmind/db/queries.py`
-- JSON columns for arrays/dicts (stored as TEXT in SQLite)
-- `sa.func.now()` as `server_default` for timestamp columns
-- Apple Music IDs stored as `sa.Text` (they are string identifiers)
-## Summary
-- Python 3.11+, `from __future__ import annotations` in every file
-- Ruff for linting/formatting, line length 100, rules: E, F, I, N, W, UP
-- All functions have type annotations, use modern union syntax (`X | None`)
-- Logging to stderr only, never stdout (MCP protocol requirement)
-- MCP tools named `musicmind_{action}_{resource}`, return markdown strings
-- Pydantic for API models (with aliases) and config validation
-- SQLAlchemy Core (no ORM) for persistence
-- Async everywhere for I/O: httpx client, aiosqlite DB, MCP tool handlers
-- Keyword-only arguments for optional parameters in engine functions
-- Graceful degradation: optional features return `None`, server starts in limited mode
-<!-- GSD:conventions-end -->
-
-<!-- GSD:architecture-start source:ARCHITECTURE.md -->
-## Architecture
-
-## Pattern Overview
-- FastMCP server exposing 30+ tools to Claude via stdio transport
-- Four distinct layers: Tools (MCP interface) -> Engine (algorithmic logic) -> Client (API) -> DB (persistence)
-- Async-first design throughout (httpx, aiosqlite, SQLAlchemy async)
-- Lifespan-managed shared state (config, auth, client, DB) passed via MCP context
-- All tool outputs are markdown strings consumed by Claude, not structured data
-## Layers
-- Purpose: Bootstrap the FastMCP server, manage lifespan (startup/shutdown), register tools
-- Location: `src/musicmind/server.py`, `src/musicmind/__main__.py`
-- Contains: `mcp` FastMCP instance, `lifespan()` async context manager, `musicmind_health` and `musicmind_help` tools
-- Depends on: All other layers (initializes them in lifespan)
-- Used by: Claude Desktop / MCP client via stdio transport
-- Purpose: Define MCP-callable tools that Claude invokes; format results as markdown
-- Location: `src/musicmind/tools/`
-- Contains: 6 tool modules organized by domain, plus shared helpers
-- Depends on: Server (`mcp` instance for `@mcp.tool()` decorator), Client, DB (QueryExecutor), Engine
-- Used by: MCP server (tools auto-registered via side-effect imports in `server.py`)
-- Key pattern: Each tool module defines a `_ctx()` helper that extracts `client` and `queries` from `mcp.get_context().request_context.lifespan_context`
-- Purpose: Algorithmic taste profiling, candidate scoring, discovery strategies, audio analysis
-- Location: `src/musicmind/engine/`
-- Contains: 8 modules covering profile building, scoring, similarity, discovery, mood filtering, audio extraction, classification, and adaptive weight optimization
-- Depends on: numpy, scikit-learn, librosa (optional); DB layer (QueryExecutor for discovery strategies)
-- Used by: Tools layer (recommend, taste)
-- Key constraint: Profile and scoring modules are local-only (no API calls). Discovery strategies DO call the API.
-- Purpose: Async HTTP client wrapping the Apple Music API (25+ endpoints)
-- Location: `src/musicmind/client.py`
-- Contains: `AppleMusicClient` class with library, catalog, history, and write endpoints
-- Depends on: Auth (`AuthManager`), httpx, Pydantic models
-- Used by: Tools layer, Engine discovery strategies
-- Purpose: SQLite cache for songs, artists, listening history, taste profiles, feedback, audio features
-- Location: `src/musicmind/db/`
-- Contains: Schema definitions (SQLAlchemy Core), DatabaseManager (lifecycle), QueryExecutor (all queries)
-- Depends on: SQLAlchemy, aiosqlite
-- Used by: Tools layer, Engine discovery strategies
-- Storage: `~/.config/musicmind/musicmind.db`
-- Purpose: Apple Music API authentication (ES256 JWT developer tokens, Music User Token management)
-- Location: `src/musicmind/auth.py`
-- Contains: `AuthManager` class with token generation and header building
-- Depends on: Config, PyJWT, cryptography
-- Used by: Client layer
-- Purpose: Load/save configuration from `~/.config/musicmind/config.json`
-- Location: `src/musicmind/config.py`
-- Contains: `MusicMindConfig` Pydantic model, `load_config()`, `save_config()`
-- Depends on: Pydantic
-- Used by: Auth, Server lifespan
-- Purpose: Pydantic models for Apple Music API responses
-- Location: `src/musicmind/models.py`
-- Contains: `Resource`, `PaginatedResponse`, `SearchResults`, `ChartResponse`, attribute models for songs/albums/artists/playlists
-- Used by: Client (parsing), Tools (helpers for extraction)
-## Data Flow
-- Shared state lives in the lifespan context dict: `{"config", "auth", "client", "db", "queries"}`
-- All tools access state via `mcp.get_context().request_context.lifespan_context`
-- No global mutable state beyond the lifespan context
-- Server supports "limited mode" when config/auth unavailable (DB still works)
-## Key Abstractions
-- Purpose: Generic Apple Music API resource wrapper (song, album, artist, playlist)
-- Examples: `src/musicmind/models.py` - `Resource` class
-- Pattern: Flat dict-like `attributes` field; type discriminated by `resource.type` string
-- Purpose: Single class encapsulating all database operations
-- Examples: `src/musicmind/db/queries.py`
-- Pattern: Each method is a standalone async operation using SQLAlchemy Core; no ORM
-- Purpose: Computed representation of user's musical preferences
-- Examples: Built by `src/musicmind/engine/profile.py` - `build_taste_profile()`
-- Pattern: Plain dict with keys: `genre_vector`, `top_artists`, `audio_trait_preferences`, `release_year_distribution`, `familiarity_score`, `total_songs_analyzed`, `listening_hours_estimated`
-- Purpose: A song dict augmented with scoring metadata
-- Examples: Produced by `src/musicmind/engine/scorer.py` - `score_candidate()`
-- Pattern: Original song dict + `_score`, `_breakdown`, `_explanation` keys
-- Purpose: Find candidate songs from the Apple Music catalog using different approaches
-- Examples: `src/musicmind/engine/discovery.py` - `similar_artist_crawl()`, `genre_adjacent_explore()`, `editorial_mining()`, `chart_filter()`
-- Pattern: Each accepts `(client, queries, profile_or_seeds)`, returns `list[dict]` of cache-format song dicts
-## Entry Points
-- Location: `src/musicmind/__main__.py` -> `src/musicmind/server.py`
-- Triggers: `uv run python -m musicmind` or `uv run python -m musicmind.server`
-- Responsibilities: Start FastMCP stdio server, initialize all subsystems via lifespan
-- Location: `src/musicmind/setup.py`
-- Triggers: `uv run python -m musicmind.setup`
-- Responsibilities: Interactive CLI + local HTTP server for Apple Music OAuth flow via MusicKit JS
-## Error Handling
-- Server starts in "limited mode" if config/auth fails (DB-only tools still work)
-- Discovery strategies individually wrapped in try/except; one failing doesn't abort the flow
-- API client retries 429 (rate limit) with exponential backoff (3 retries, 1s base)
-- Audio analysis gracefully returns None when librosa/ffmpeg unavailable (LIBROSA_AVAILABLE flag)
-- SoundAnalysis classifier returns None when Swift binary missing
-- All logging goes to stderr (MCP stdio transport requirement — stdout is the protocol channel)
-## Cross-Cutting Concerns
-- Framework: Python `logging` module, all handlers directed to `sys.stderr`
-- Pattern: Each module creates its own logger via `logging.getLogger(__name__)` or `logging.getLogger("musicmind")`
-- Level: INFO by default, set in `server.py`
-- Tool inputs validated implicitly by Python type hints (FastMCP handles this)
-- Config validated via Pydantic `MusicMindConfig` model
-- API responses parsed via Pydantic `Resource` / `PaginatedResponse` models
-- Two-token system: Developer Token (ES256 JWT, auto-generated, 6-month expiry) + Music User Token (obtained via OAuth setup wizard)
-- Tokens injected as HTTP headers by `AuthManager.auth_headers()`
-- Config stored at `~/.config/musicmind/config.json` with 0o600 permissions
-- Transparent: every API-fetching tool also caches results to SQLite
-- No explicit TTL/eviction; data accumulates over time
-- `extract_song_cache_data()` in `src/musicmind/tools/helpers.py` is the universal API-to-cache transformer
-## Scoring Architecture (7 Weighted Dimensions)
-| Dimension | Default Weight | Source |
-|-----------|---------------|--------|
-| Genre match (cosine) | 0.35 | `_genre_cosine()` with regional prioritization |
-| Audio similarity | 0.20 | `audio_feature_similarity()` from Tier 2 features |
-| Novelty (Gaussian) | 0.12 | New artist in familiar genre, bell curve at distance 0.3-0.5 |
-| Freshness | 0.10 | Release year match to user's distribution |
-| Diversity (MMR) | 0.08 | Penalty for similarity to already-selected songs |
-| Artist affinity | 0.08 | Deliberately low; style > specific artist |
-| Anti-staleness | 0.07 | Cooldown on recently recommended songs |
-## Audio Analysis Tiers
-| Tier | Requirements | What It Does | Location |
-|------|-------------|-------------|----------|
-| 1 (always) | None | Metadata-only scoring (genres, artists, editorial) | `src/musicmind/engine/scorer.py` |
-| 2 (optional) | librosa + ffmpeg | 7-dimension audio features from 30s previews | `src/musicmind/engine/audio.py` |
-| 3 (optional) | macOS + Swift binary | SoundAnalysis classification labels | `src/musicmind/engine/classifier.py` |
-<!-- GSD:architecture-end -->
-
-<!-- GSD:workflow-start source:GSD defaults -->
-## GSD Workflow Enforcement
-
-Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
-
-Use these entry points:
-- `/gsd:quick` for small fixes, doc updates, and ad-hoc tasks
-- `/gsd:debug` for investigation and bug fixing
-- `/gsd:execute-phase` for planned phase work
-
-Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
-<!-- GSD:workflow-end -->
-
-<!-- GSD:profile-start -->
-## Developer Profile
-
-> Profile not yet configured. Run `/gsd:profile-user` to generate your developer profile.
-> This section is managed by `generate-claude-profile` -- do not edit manually.
-<!-- GSD:profile-end -->
+**Live:** [music.menghi.dev](https://music.menghi.dev) · **Staging:** `musicmind-staging.up.railway.app` · **Admin dashboard:** `/admin` on the frontend (or the legacy `admin.music.menghi.dev` proxy, being deprecated).
 
 ---
 
-# SmarTaste — Improvement Sprint
+## Core flow (how a request travels end-to-end)
 
-## Quick Commands
-- `cd backend && uvicorn app:app --reload` — Start backend
-- `cd frontend && npm run dev` — Start frontend
-- `pytest` — Run tests
-- `git status && git diff --stat` — Check changes before commit
+**User requests recommendations:**
+```
+Browser (Next.js)  ──GET /api/recommendations──▶  FastAPI backend
+                                                    │
+                                 ┌──────────────────┼──────────────────┐
+                                 ▼                  ▼                  ▼
+                          TasteService       _load_candidates_   audio_embeddings
+                          (reads snapshot)    from_db (joins      (CLAP/MERT/EffNet
+                                              recommendation_     per-user + global
+                                              candidates with      ISRC fallback)
+                                              global_song_cache)
+                                 │                  │                  │
+                                 └────────┬─────────┴────────┬─────────┘
+                                          ▼                  ▼
+                                     score_candidate (6 dims) + rank_candidates (MMR)
+                                          │
+                                          ▼
+                                    JSON response (20 items + explanation + artwork)
+```
 
-## Sprint Overview
-10 phases, 17 improvements from two technical audits. Ordered by dependency — bugs → performance → types → infra → features.
+**Worker cycle** (runs every ~60s on Railway):
+```
+Startup: GPU backfill → ISRC → audio download → Essentia → EffNet
+Loop:    ISRC → audio → Essentia → EffNet → GPU → cobweb + discovery → library-sync
+```
 
-## Architecture Context
-- Backend: Python, FastAPI, SQLAlchemy async, PostgreSQL
-- Frontend: React, TypeScript (Next.js), TanStack Query, Zustand, SSE via fetch+ReadableStream
-- Engine: engine/ — scorer.py, profile.py, weights.py, similarity.py, genres.py, dedup.py, mood.py
-- Auth: auth/router.py — signup, login, refresh, BYOK Fernet encryption
-- DB: SQLAlchemy async (Core, no ORM), JSON columns for chat history
-- Tests: pytest, 294 tests
-- Deployment: Vercel (frontend) + Docker Compose (backend + PostgreSQL)
+**Backend startup orchestration** (v6.322): on boot, the FastAPI lifespan inspects DB gaps and dispatches worker functions as background asyncio tasks (library enrichment → ISRC → GPU backfill → cobweb). Backend and worker share the same Python package + Postgres, so duplicate work is serialized by DB transactions, no HTTP between services.
 
-## Code Style
-- All new Python: type hints mandatory, async def for DB/API calls
-- Functions under 80 lines, split if longer
-- Commit format: `feat(engine): phase N.M — description`
+**User connects a service (indexer path):** `POST /api/services/apple-music/connect` → `indexer.run_indexing` fires (per-user, 6 steps: library enrichment → top-3 discographies at 100%/70%/50% → rest above `AFFINITY_INCLUDE_THRESHOLD=0.05`). Discography tracks write to `global_song_cache`, not per-user tables.
 
-## New Dependencies Added
-[Update as you install them]
+---
 
-## Known Issues
-- artist_cache PK: only artist_id as primary key, missing user_id — two users overwrite each other (schema.py:179)
-- audio_features_cache PK: same issue — catalog_id only, no user_id in PK (schema.py:253)
-- sound_classification_cache PK: same issue (schema.py:278)
-- CORS: hardcoded origins in app.py:41-45 (localhost:3000, live.menghi.dev)
-- Auth: signup/login/refresh use multiple separate DB transactions instead of atomic
-- SSE parser: sse.ts:68 drops events with empty data fields (falsy check on currentData)
-- Weights optimizer: uses linear ratio approximation, not real coordinate descent (weights.py:92-95)
-- rank_candidates: O(n²×m) — rescores all remaining candidates each iteration (scorer.py:254-263)
-- _compute_staleness: linear scan through list instead of set lookup (scorer.py:71-72)
+## File inventory
 
-## Decisions Log
-[Record every architectural choice and why]
+### `backend/src/musicmind/`
+| Path | Purpose |
+|---|---|
+| `app.py` | FastAPI app factory + lifespan (startup orchestration) |
+| `worker.py` | Long-running polling loop (startup phases + main loop) |
+| `indexer.py` | Per-user on-connect enrichment, `_rank_artists_by_affinity`, `compute_depth_fraction` |
+| `config.py` | Pydantic `Settings` with `GPU_MODE` switch (CLOUD/LOCAL) |
+| `api/router.py` | Aggregates 13 domain routers (auth, admin, chat, recommendations, taste, calibration, services, claude, openai, search, stats, tracks, playlists, session) |
+| `api/recommendations/service.py` | `RecommendationService.get_recommendations` (DB-read path with cold-start fallback), `get_scoring_breakdown` (6 dims + 6 modifiers) |
+| `api/recommendations/fetch.py` | The 4 discovery strategies (`discover_similar_artists`, `_genre_adjacent`, `_editorial`, `_chart_filter`), `allocate_seed_budget`, `_genre_overlap_with_expansion` |
+| `api/admin/router.py` | Admin endpoints incl. new `/songs-table` and `/artists-table` for dashboard |
+| `api/taste/service.py` | `TasteService.get_profile(force_refresh)` — fetches library, builds snapshot |
+| `engine/scorer.py` | `score_candidate` (6 dims + bonuses) + `rank_candidates` (MMR) |
+| `engine/profile.py` | `build_artist_affinity` (log1p saturation), `build_genre_vector`, `parse_artists` |
+| `engine/weights.py` | `DEFAULT_WEIGHTS` + `compute_context_weights` (adaptive redistribution) |
+| `engine/cobweb.py` | Shared cobweb ranking (sum+log1p+primary-affinity) + `prefilter_by_centroid_similarity` + `EFFNET_EMBEDDING_DIM` |
+| `engine/enrichment/orchestrator.py` | Two-phase pipeline: Essentia → GPU, with min-batch deferral |
+| `engine/enrichment/gpu_client.py` | `enrich_bytes_concurrent` / `enrich_urls_concurrent` (25/batch × 3 concurrent), `GPU_MIN_BATCH=3` |
+| `engine/enrichment/isrc_lookup.py` | Deezer + MusicBrainz fallback |
+| `engine/audio/essentia_extractor.py` | 11 scalar features + EffNet ONNX |
+| `db/schema.py` | SQLAlchemy Core — 23 tables |
+| `db/engine.py` | Async engine factory |
+| `alembic/versions/` | 25 migrations, latest `025_add_artwork_url_global.py` |
+| `auth/router.py` | signup/login/refresh (atomic transactions since v6.200) |
+| `security/encryption.py` | Fernet for BYOK + service tokens |
+
+### `frontend/src/`
+| Path | Purpose |
+|---|---|
+| `app/(auth)/login`, `/signup` | auth pages |
+| `app/(app)/dashboard/recommendations/page.tsx` | main recommendations feed |
+| `app/(app)/dashboard/taste/page.tsx` | taste profile view |
+| `app/(app)/chat/page.tsx` | Claude BYOK chat (SSE) |
+| `app/(app)/onboarding/page.tsx` | 3-step calibration wizard |
+| `app/(app)/admin/page.tsx` | admin dashboard (queries `/api/admin/*`) |
+| `components/recommendations/recommendation-feed.tsx` | feed; strategy/mood selectors removed in v6.320 |
+| `components/recommendations/score-breakdown.tsx` | renders 6 weighted dims + 6 modifiers |
+| `components/recommendations/recommendation-card.tsx` | reads `item.artwork_url` |
+| `components/onboarding/calibration-wizard.tsx` | 3-step playlist/artist/song picker |
+| `hooks/use-recommendations.ts` | TanStack Query; no strategy/mood params post-v6.320 |
+| `lib/api.ts` | `apiFetch` with CSRF + 401-refresh |
+| `lib/sse.ts` | custom SSE parser for chat stream |
+| `types/api.ts` | shared response shapes |
+
+### Supporting services
+| Path | Purpose |
+|---|---|
+| `worker/Dockerfile` | Railway worker image — shares backend code, entry `python -m musicmind.worker` |
+| `backend/Dockerfile` | Railway backend image — entry `uvicorn musicmind.app:app` |
+| `gpu-worker/handler.py` | Modal serverless (A100) — CLAP HTSAT-tiny + MERT-95M |
+| `gpu-worker-local/server.py` | FastAPI on Mac MPS, same API shape as Modal; exposed via ngrok when `GPU_MODE=LOCAL` |
+| `admin/` | Legacy standalone Railway proxy, being deprecated in favour of `frontend/admin` |
+| `scripts/reset-staging-db.sql` | Guarded staging DB reset |
+| `.github/workflows/deploy-modal.yml` | Auto-deploy Modal on `gpu-worker/` changes |
+
+---
+
+## File relationships (change-one-affects-another)
+
+- `scorer.py` ↔ `weights.py` ↔ `similarity.py` — scoring engine triangle
+- `scorer.py` ↔ `profile.py` — profile provides centroids consumed by scorer
+- `indexer.py` ↔ `worker.py` — both call into `engine/cobweb.py` + `engine/enrichment/orchestrator.py`. Return types (e.g. `_get_ranked_artists` → `list[tuple[str, float]]`) must stay aligned across both
+- `worker.py:_unlink_excess_discoveries` ↔ `indexer.py:AFFINITY_INCLUDE_THRESHOLD` — cleanup uses indexer's threshold so it never deletes what indexer just enriched
+- `orchestrator.py` ↔ `gpu_client.py` ↔ `gpu-worker/handler.py` / `gpu-worker-local/server.py` — keep response-key contract (`clap_512` / `mert_768`) consistent; a past bug had `audio_embeddings_global` reading `clap_embedding` instead
+- `db/schema.py` ↔ `alembic/versions/NNN_*.py` — every schema change needs a migration; add table names to `backend/tests/test_schema.py::ALL_TABLE_NAMES` + update the count
+- `worker/Dockerfile` ↔ `backend/Dockerfile` — keep Python version + system deps identical (both need Python 3.12 + ffmpeg + Essentia)
+- `api/recommendations/service.py:_load_candidates_from_db` ↔ `global_song_cache` schema — adding a column means updating the SELECT and the result-dict mapping
+- `frontend/src/types/api.ts` ↔ backend response shapes — types are hand-maintained; if backend returns a new field, update the TS interface
+
+---
+
+## Hosting & deployment
+
+| Service | Platform | Entry point | Branch → env |
+|---|---|---|---|
+| Frontend | Vercel | `next build` | `main` → prod (music.menghi.dev), `staging` → preview |
+| Backend API | Railway | `uvicorn musicmind.app:app --port $PORT` | `main` → prod, `staging` → staging |
+| Worker | Railway (separate service) | `python -m musicmind.worker` | same branches |
+| Main DB | Railway Postgres | — | shared between backend + worker |
+| Logs DB | Railway Postgres (optional) | — | enrichment/error log stream |
+| GPU (cloud) | Modal | `modal deploy gpu-worker/handler.py` via GitHub Actions on push to `gpu-worker/**` | always targets `smartaste-gpu-worker` |
+| GPU (local) | Mac + ngrok | `python gpu-worker-local/server.py` | pair with `GPU_MODE=LOCAL` + `MUSICMIND_LOCAL_GPU_ENDPOINT_URL=<ngrok https url>` |
+| Legacy admin | Railway | `admin/app.py` | deprecated; prefer `frontend/(app)/admin` |
+
+**Deploy command**: `git push origin staging` (Railway watches the branch, rebuilds both services, runs alembic automatically via backend startup). `git push origin main` for production.
+
+**Environment variables** (all live in Railway dashboard, staging copy in `.staging-debug.md` gitignored at repo root):
+- `MUSICMIND_DATABASE_URL` — Postgres. Also reads `DATABASE_URL` (Railway convention).
+- `MUSICMIND_FERNET_KEY` — encrypts service OAuth tokens + BYOK API keys.
+- `MUSICMIND_JWT_SECRET_KEY` — session tokens.
+- `MUSICMIND_APPLE_TEAM_ID`, `_KEY_ID`, `_PRIVATE_KEY_B64` — MusicKit.
+- `MUSICMIND_SPOTIFY_CLIENT_ID`, `_CLIENT_SECRET`, `_REDIRECT_URI`.
+- `MUSICMIND_GPU_MODE` = `CLOUD` | `LOCAL` (when LOCAL, `modal_endpoint_url` is swapped with `local_gpu_endpoint_url` in `config.py:model_post_init`).
+- `MUSICMIND_MODAL_ENDPOINT_URL`, `MUSICMIND_LOCAL_GPU_ENDPOINT_URL`.
+- `MUSICMIND_LOGS_DATABASE_URL` — optional.
+- `MUSICMIND_ADMIN_SECRET` — header `x-admin-secret` on `/api/admin/*`.
+- `MUSICMIND_OPENAI_API_KEY` — optional, AI captions.
+- `MUSICMIND_FRONTEND_URL` — OAuth redirect origin.
+- `NEXT_PUBLIC_API_URL` (frontend, on Vercel) — backend URL.
+- `MUSICMIND_STAGING=true` + `MUSICMIND_CONFIRM_RESET=yes` → auto-reset DB on boot (staging-only safety).
+
+---
+
+## Scoring architecture (6 dimensions + modifiers)
+
+| Dimension | Default weight | Source |
+|---|---|---|
+| CLAP cosine (512) | 0.30 | Modal/local GPU — semantic audio-text |
+| MERT cosine (768) | 0.25 | Modal/local GPU — musical structure |
+| EffNet cosine (1280) | 0.15 | Essentia ONNX — timbral fingerprint |
+| Genre cosine | 0.15 | Apple/Spotify metadata, regional-prioritized |
+| Scalar audio | 0.10 | Essentia tempo/energy/danceability euclidean |
+| Artist affinity | 0.05 | Library presence (log1p) + calibration |
+
+**Modifiers** (additive after weighted sum):
+- `discovery_bonus` (+0…0.04) — from `_discovery_weight` set in `discover_similar_artists`
+- `cross_strategy_bonus` (+0…0.10) — strategies that surfaced this track
+- `calibration_boost` (+0…0.20) — for artists in `user_calibration` (zeroed if genre_score < 0.15)
+- `mood_boost` (+0…0.10) — when mood filter active (no-op post-v6.320)
+- `diversity_penalty` (−0…0.05) — MMR, recomputed per greedy selection step
+- `staleness` (−0…0.03) — recently recommended (indexed for O(1) lookup)
+
+**Adaptive weights** (`compute_context_weights`): weights shift when embeddings missing (redistribute to genre + scalar), when calibration exists (artist +0.05), when mood active (CLAP dominates). With ≥10 feedback ratings, blends 60% context + 40% feedback-optimized.
+
+**Regional genre prioritization**: original tag ("Italian Hip-Hop/Rap") gets weight 1.0, expanded parents ("Hip-Hop/Rap") get 0.3. Prevents a heavy Italian listener being shown American drill that happens to share the parent genre.
+
+**Artist-in-wrong-genre penalty**: known artist with genre_score < 0.2 has `artist_match` capped at 30%. Calibration boost zeroed if genre_score < 0.15.
+
+---
+
+## Enrichment pipeline (post-April 2026 rebuild)
+
+All external feature APIs (ReccoBeats, SoundStat, Last.fm, AcousticBrainz) removed. Per-track flow:
+
+1. **Preview URL**: from Apple/Spotify metadata; Deezer ISRC fallback if missing.
+2. **Essentia** (CPU on Railway worker): 11 scalar features + 1280-dim EffNet ONNX embedding + classifier heads (mood/voice/acoustic).
+3. **GPU** (Modal A100 serverless or local Mac MPS): 512-dim CLAP + 768-dim MERT. Batched 25 at a time, up to 3 concurrent. Defers if < 3 pending (`GPU_MIN_BATCH`).
+4. **OpenAI captions** (optional): AI-generated track description from Essentia tags.
+
+**Min-batch deferral** (v6.321): orchestrator Phase 2 skips GPU if <3 items pending; worker's periodic backfill picks them up with more items later. Prevents the "1 item processed" log spam.
+
+**ISRC backfill retry-loop fix** (v6.311): tracks where Deezer + MusicBrainz both miss get `isrc='__NO_ISRC__'` sentinel; existing `IS NULL OR = ''` queries naturally skip them.
+
+---
+
+## Onboarding taste calibration
+
+3-step wizard shown after service connection (compensates for Apple Music's lack of play counts):
+1. **Playlists** (max 5, weight 5x) — picked from user's library.
+2. **Artists** (hierarchical drag-to-reorder, top-3 weight 5→1x descending) — top 3 trigger background full-discography enrichment.
+3. **Songs** (weight 3x) — favorites from the selected playlists' combined tracks.
+
+Weights applied as song duplication in profile-builder input. Frontend: `CalibrationWizard` + `CalibrationManager` (settings). DB: `user_calibration(user_id, calibration_type, item_id, item_name, weight)`. Types: `top_artist`, `artist_rank`, `playlist`, `playlist_song`.
+
+---
+
+## Active DB tables (23 total, latest migration 025)
+
+**Per-user** (user_id in PK or FK):
+`users`, `user_api_keys`, `service_connections`, `refresh_tokens`, `song_metadata_cache`, `artist_cache`, `taste_profile_snapshots`, `audio_features_cache`, `sound_classification_cache`, `chat_conversations`, `chat_messages`, `audio_embeddings`, `generated_playlists`, `user_calibration`, `user_indexing_status`, `artist_cobweb`.
+
+**Global / shared** (ISRC or catalog_id keyed):
+`audio_features_global`, `audio_embeddings_global`, `global_song_cache` (+ artwork_url since mig 025), `playlist_items`, `preview_audio_cache`, `recommendation_candidates` (worker-populated per-user discovery pool), `worker_status`.
+
+---
+
+## Code conventions
+
+- Python 3.12 (Essentia wheel constraint), `from __future__ import annotations` everywhere.
+- Ruff, line-length 100, rules `E, F, I, N, W, UP`.
+- Modern generics (`dict[str, Any]`, `str | None`).
+- Async everywhere for I/O (httpx, asyncpg/SQLAlchemy async, orchestrator semaphores).
+- Logging via stderr. The `musicmind` logger is forced to INFO in `app.py` (uvicorn doesn't configure it otherwise — without this, startup orchestration + worker logs disappear on Railway).
+- Keyword-only arguments after `*` for optional scoring config.
+- Return dicts (not dataclasses) from engine functions so the `_score`/`_breakdown`/`_explanation` augmentation pattern works.
+- SQLAlchemy Core only (no ORM). JSON columns for arrays/dicts.
+- Tests are pure: `_rank_artists_by_affinity`, `rank_cobweb_candidates`, `prefilter_by_centroid_similarity`, `allocate_seed_budget`, etc. are extracted pure helpers so they unit-test without DB fixtures.
+- Frontend: Next.js 16 App Router; Tailwind 4; shadcn/ui on top of Base UI; Zustand + TanStack Query. Types in `src/types/api.ts` hand-maintained.
+
+---
+
+## Quick commands
+
+```bash
+# Backend (local)
+cd backend && uv run uvicorn musicmind.app:app --reload
+
+# Worker (local)
+cd backend && uv run python -m musicmind.worker
+
+# Frontend (local)
+cd frontend && npm run dev
+
+# Tests (full suite, deselect known flaky auth tests)
+cd backend && uv run pytest tests/ \
+  --deselect tests/test_auth.py::test_csrf_protection \
+  --deselect tests/test_auth.py::test_csrf_with_valid_token \
+  --deselect tests/test_auth.py::test_me_returns_user_info \
+  --deselect tests/test_encryption.py::test_decrypt_wrong_key_raises -q
+
+# Lint
+cd backend && uv run ruff check src/ tests/
+
+# Staging DB (creds in .staging-debug.md, gitignored)
+psql "$STAGING_DATABASE_URL"
+
+# Trigger admin actions
+curl -X POST -H "x-admin-secret: $ADMIN_SECRET" \
+  https://musicmind-staging.up.railway.app/api/admin/rebuild-taste-profiles
+
+curl -H "x-admin-secret: $ADMIN_SECRET" \
+  "https://musicmind-staging.up.railway.app/api/admin/songs-table?limit=20"
+
+# Local GPU (Mac)
+cd gpu-worker-local && uv run python server.py
+# then in another terminal: ngrok http 8765
+# then set MUSICMIND_GPU_MODE=LOCAL + MUSICMIND_LOCAL_GPU_ENDPOINT_URL=<ngrok https> on Railway
+```
+
+---
+
+## Workflow
+
+- Branch: `staging` is the working branch; push-to-deploy on staging Railway env. Merge to `main` when ready to ship to production. Never create ad-hoc feature branches.
+- Every change: commit + push + CHANGELOG entry + VERSION bump + README badge.
+- Versioning: `V X.YZA` — A = bugfix, Z = minor refinement, Y = small logic change, X = major.
+- For file-changing work, start through a GSD command (`/gsd:quick`, `/gsd:debug`, `/gsd:execute-phase`) when one applies. Bypass only when the user asks directly.
+
+---
+
+## Bugs history (reference for future regressions)
+
+Apr 2026 pipeline-rebuild sprint fixes — if a similar pattern shows up, check the fix first:
+
+- `uuid.uuid7` is 3.14+ only → `_uuid7 = getattr(uuid, "uuid7", uuid.uuid4)` shim.
+- Essentia wheels cap at Python 3.12 → `backend/Dockerfile` + `worker/Dockerfile` pin 3.12.
+- Worker/Backend Dockerfile drift → both need identical system deps, different entry points only.
+- EffNet ONNX input shape → rank 3 `[batch, time, mel]`, not rank 4.
+- EffNet patch size → 128 frames, not full spectrogram (~1875 frames for 30s).
+- `beats_confidence` polymorphism → scalar float in 2.1b6; use `hasattr(bc, "mean")`.
+- `_merge_features` must overwrite stale `reccobeats`/`soundstat` sources, not just fill NULLs.
+- Embedding JSON via `sa.text()` silently fails → use SQLAlchemy Core with column types.
+- Stale `user_indexing_status` step < 7 blocks gap-fill forever → force-complete after 5 min.
+- `__global__` user's cache deleted by orphan cleanup → create system user, skip in cleanup.
+- Deezer preview URLs expire (~24h 403) → auto-refresh via fresh ISRC lookup + `preview_audio_cache` bytes.
+- CLAP `HTSAT-base` vs `HTSAT-tiny` channel mismatch → use tiny (matches checkpoint).
+- `torch.load` defaults `weights_only=True` in 2.6+ → monkey-patch to False for CLAP checkpoint.
+- `_get_ranked_artists` return-type change (from `list[str]` to `list[tuple[str, float]]`) broke `_unlink_excess_discoveries` — callers of shared helpers need coordinated updates.
+- `_backfill_gpu_embeddings_global` had swapped args (`enrich_batch_bytes_via_gpu(modal_url, b64_items)`) + wrong response keys (`clap_embedding` instead of `clap_512`) — both silently failed, leaving global CLAP/MERT at 0. Fixed in v6.321 via the concurrent helper.
+- Uvicorn doesn't configure the `musicmind.*` logger → INFO messages dropped. v6.322 forces INFO + stderr handler in `app.py` module init.
