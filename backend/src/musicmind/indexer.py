@@ -34,7 +34,16 @@ MAX_DEPTH_FRAC = 1.0
 DEPTH_SCALE = 1.2
 MAX_TRACKS_PER_ARTIST = 50
 AFFINITY_INCLUDE_THRESHOLD = 0.05
-CAL_BOOST = 0.1
+
+# Calibration picks dominate library frequency. The previous 0.1 multiplicative
+# boost meant a wizard-ranked #1 artist (weight 5) only got a 50% edge over a
+# random high-frequency library artist — so library frequency won whenever the
+# user had a big back-catalogue for any non-calibrated artist. With 100 the
+# contribution is additive and dominant: weight 5 adds +500 to the score,
+# weight 1 adds +100, uncalibrated adds 0. Library frequency becomes a
+# within-tier tiebreaker, which is what "top artists are defined by calibration"
+# means operationally.
+CAL_BOOST = 100.0
 
 
 def compute_depth_fraction(affinity_score: float) -> float:
@@ -48,8 +57,10 @@ def _rank_artists_by_affinity(
 ) -> list[tuple[str, float]]:
     """Rank artists by affinity score (pure function, no DB).
 
-    Score = frequency * (1 + CAL_BOOST * calibration_weight). Calibration
-    boosts existing listening, doesn't replace it.
+    Calibration picks (from the 3-step onboarding wizard) dominate library
+    frequency. Score = frequency + CAL_BOOST * calibration_weight. Weight 5
+    top_artist picks add +500, weight 1 artist_rank picks add +100, uncalibrated
+    library artists contribute only their frequency.
 
     Args:
         freq_map: {artist_name: song_count}. Original casing preserved.
@@ -59,20 +70,19 @@ def _rank_artists_by_affinity(
     if not freq_map and not cal_weights:
         return []
 
-    # Build internal lower-cased lookup maps but preserve display casing.
     cal_lower_to_weight = {n.lower(): w for n, w in cal_weights.items()}
     cal_lower_to_display = {n.lower(): n for n in cal_weights}
 
     combined: dict[str, float] = {}
     for name, freq in freq_map.items():
         cal = cal_lower_to_weight.get(name.lower(), 0.0)
-        combined[name] = float(freq) * (1.0 + CAL_BOOST * cal)
+        combined[name] = float(freq) + CAL_BOOST * cal
 
     existing_lower = {n.lower() for n in combined}
     for cal_lower, cal_weight in cal_lower_to_weight.items():
         if cal_lower not in existing_lower:
             display = cal_lower_to_display[cal_lower]
-            combined[display] = 1.0 * (1.0 + CAL_BOOST * cal_weight)
+            combined[display] = CAL_BOOST * cal_weight
 
     if not combined:
         return []

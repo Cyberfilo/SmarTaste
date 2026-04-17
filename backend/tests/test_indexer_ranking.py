@@ -24,24 +24,44 @@ def test_ranked_artists_returns_tuples_with_normalized_scores() -> None:
     assert ranked[0][1] == pytest.approx(1.0)
 
 
-def test_frequency_dominates_calibration_when_mismatched() -> None:
+def test_calibration_dominates_frequency_when_user_picked() -> None:
+    """V 6.363 contract: wizard-ranked artists outrank any uncalibrated one.
+
+    A weight-5 top_artist pick with only 3 library songs must outrank a
+    200-song uncalibrated artist — because the user explicitly told the
+    app "these are my top artists". Library frequency is a within-tier
+    tiebreaker, not the primary signal.
+    """
     freq_map = {"Baby Gang": 200, "Simba La Rue": 3}
     cal_weights = {"simba la rue": 5.0}
     ranked = _rank_artists_by_affinity(freq_map, cal_weights)
     names = [n for n, _ in ranked]
-    assert names.index("Baby Gang") < names.index("Simba La Rue"), (
-        f"Baby Gang should rank above Simba La Rue. Got: {names}"
+    assert names.index("Simba La Rue") < names.index("Baby Gang"), (
+        f"Calibrated Simba La Rue should outrank uncalibrated Baby Gang. Got: {names}"
     )
 
 
-def test_calibration_boosts_without_replacing() -> None:
+def test_frequency_breaks_ties_within_calibration_tier() -> None:
+    """Two calibrated artists with the same weight: higher freq wins."""
     ranked = _rank_artists_by_affinity(
-        freq_map={"Baby Gang": 200, "Simba La Rue": 3},
-        cal_weights={"simba la rue": 5.0},
+        freq_map={"Artist A": 10, "Artist B": 3},
+        cal_weights={"artist a": 5.0, "artist b": 5.0},
     )
-    scores = dict(ranked)
-    assert scores["Simba La Rue"] > 0.0
-    assert scores["Baby Gang"] > scores["Simba La Rue"]
+    names = [n for n, _ in ranked]
+    assert names[0] == "Artist A", (
+        f"Higher-freq calibrated artist wins the tiebreaker. Got: {names}"
+    )
+
+
+def test_uncalibrated_high_freq_still_surfaces() -> None:
+    """Uncalibrated library artists still appear below calibrated ones."""
+    ranked = _rank_artists_by_affinity(
+        freq_map={"Heavy Listen": 100},
+        cal_weights={},
+    )
+    names = [n for n, _ in ranked]
+    assert "Heavy Listen" in names
+    assert ranked[0][1] == pytest.approx(1.0)
 
 
 def test_calibration_only_artist_gets_seeded_frequency() -> None:
