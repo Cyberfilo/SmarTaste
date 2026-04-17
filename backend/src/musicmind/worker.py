@@ -336,6 +336,20 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d GPU backfill failed", cycle)
 
+        # ── Phase 5b: Global GPU backfill (CLAP/MERT for discography) ──
+        # V 6.379: bring the V 6.374 download-first + mert-only-split
+        # backfiller into the main-loop so new global gaps drain every
+        # cycle instead of only at worker startup.
+        try:
+            gpu_global = await _backfill_gpu_embeddings_global(engine, settings)
+            if gpu_global > 0:
+                logger.info(
+                    "Cycle %d: global GPU backfill stored %d CLAP/MERT",
+                    cycle, gpu_global,
+                )
+        except Exception:
+            logger.exception("Cycle %d global GPU backfill failed", cycle)
+
         # ── Check if user-linked work is done ──────────────────────
         user_work_remaining = await _count_user_linked_gaps(engine)
 
