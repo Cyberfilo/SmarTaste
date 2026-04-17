@@ -7,6 +7,24 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.373 — 2026-04-17
+
+### GPU backfill preserves existing embeddings — stop the CLAP overwrite
+
+When `_backfill_gpu_embeddings_global` revisits a row that has CLAP populated but MERT NULL (the 143-row backlog V 6.367 targeted), the GPU worker always returns both embeddings — there's no "MERT-only" inference mode. The DB writer was then overwriting the existing `clap_embedding` with a freshly-computed (functionally identical) value on every pass. Pointless write bandwidth, pointless update-trigger fire, and it also reset any analyzed-at ordering signal.
+
+**Fix:**
+- `_backfill_gpu_embeddings_global._apply_results`: wrap each column's new value in `sa.func.coalesce(existing_column, new_value)`. Order matters — `COALESCE(existing, new)` preserves existing; the reverse would always overwrite when new is non-NULL, which is what the old code did.
+- `_backfill_gpu_embeddings` (per-user, raw SQL): swapped argument order, `COALESCE(clap_embedding, :clap)` instead of `COALESCE(:clap, clap_embedding)`.
+
+**GPU-side waste still present:** the Modal / local GPU worker endpoint has no "compute MERT only" path, so inference still runs both models. Fixing that requires a GPU-worker protocol change (`models=['mert']` request parameter, short-circuit the unused forward pass). Not in this commit — DB-side waste was the easy half.
+
+No migration. Tests: 20/20 pass.
+
+Code commit: `48cf463`.
+
+---
+
 ## V 6.372 — 2026-04-17
 
 ### Dashboard v3 hotfix — contained layout, readable tooltips, zoomed scatter
