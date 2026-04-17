@@ -7,6 +7,23 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.341 — 2026-04-17
+
+### Admin dashboard: fix TypeError crash on first render
+
+The relocated dashboard (V 6.340) crashed on hydration with `TypeError: undefined is not an object (evaluating 'e.global_isrc_cache.toLocaleString')`. The cards briefly rendered their skeletons, then React tried to apply the real data and threw — producing the Safari "page couldn't load" chrome because the error propagated past React's (absent) error boundary.
+
+**Root cause:** the hand-maintained `SystemStatus` TypeScript interface in `admin/ui/app/page.tsx` was copied verbatim from the V 6.330 main-frontend version, which had drifted from the backend. Backend `/api/admin/status` returns `total_users / connected_users / gpu_embeddings`; the interface expected `users / connections / global_isrc_cache / listening_history_entries`. TypeScript doesn't enforce this at runtime, so undefined-access through a `status ? ...` branch crashed once the fetch resolved.
+
+**Fix:** `admin/ui/app/page.tsx`
+- `SystemStatus` interface aligned to the actual backend response
+- "Users" card: uses `total_users`, sub-label now "N connected · M calibrated"
+- "Total Songs" card: sub-label now shows `gpu_embeddings` as "N GPU embeds" (the field that actually exists), replacing the phantom `global_isrc_cache` reference
+
+Same bug existed latent in the main-frontend dashboard before V 6.340's removal, masked there by the outer `AppLayout` error boundary. No backend changes. No endpoint contract changes.
+
+---
+
 ## V 6.340 — 2026-04-17
 
 ### Admin dashboard relocated from main frontend to the standalone admin Railway service

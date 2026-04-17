@@ -29,14 +29,13 @@ import { ArtistsTableCard } from "@/components/admin/artists-table-card";
 
 interface SystemStatus {
   version: string;
-  users: number;
-  connections: number;
+  total_users: number;
+  connected_users: number;
   calibrated_users: number;
   total_songs: number;
   total_enriched: number;
   enrichment_pct: number;
-  global_isrc_cache: number;
-  listening_history_entries: number;
+  gpu_embeddings: number;
 }
 
 interface WorkerHeartbeat {
@@ -157,8 +156,12 @@ export default function AdminPage() {
         <OverviewCard
           icon={Users}
           label="Users"
-          value={status?.users}
-          sub={status ? `${status.calibrated_users} calibrated` : undefined}
+          value={status?.total_users}
+          sub={
+            status
+              ? `${status.connected_users} connected · ${status.calibrated_users} calibrated`
+              : undefined
+          }
           loading={isLoading}
         />
         <OverviewCard
@@ -167,7 +170,7 @@ export default function AdminPage() {
           value={status?.total_songs}
           sub={
             status
-              ? `${status.global_isrc_cache.toLocaleString()} ISRC cache`
+              ? `${status.gpu_embeddings.toLocaleString()} GPU embeds`
               : undefined
           }
           loading={isLoading}
