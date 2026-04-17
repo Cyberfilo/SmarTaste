@@ -68,14 +68,22 @@ class AudioEnricher:
         if torch.cuda.is_available():
             self.mert_model = self.mert_model.cuda()
 
-    def _process_audio_bytes(self, audio_bytes: bytes) -> dict:
-        """Core enrichment logic: audio bytes → CLAP + MERT embeddings.
+    def _process_audio_bytes(
+        self, audio_bytes: bytes, models: set | None = None,
+    ) -> dict:
+        """Core enrichment logic: audio bytes → CLAP and/or MERT embeddings.
 
-        Plain method (no @modal.method) so it can be called directly
-        from other methods within the same class.
+        `models` restricts which forward passes run. Default = both.
+        Pass {"mert"} to skip the CLAP compute entirely when backfilling
+        MERT-only gaps. Skipped models return None in their slot.
         """
         import tempfile
         from pathlib import Path
+
+        if models is None:
+            models = {"clap", "mert"}
+        want_clap = "clap" in models
+        want_mert = "mert" in models
 
         if len(audio_bytes) < 1000:
             return {"error": "Audio too small", "clap_512": None, "mert_768": None}
@@ -85,49 +93,45 @@ class AudioEnricher:
             tmp_path = Path(tmp.name)
 
         try:
-            result: dict = {"error": None}
+            result: dict = {"error": None, "clap_512": None, "mert_768": None}
 
-            # CLAP embedding (512-dim)
-            try:
-                embedding = self.clap_model.get_audio_embedding_from_filelist(
-                    [str(tmp_path)], use_tensor=False,
-                )
-                result["clap_512"] = [round(float(v), 6) for v in embedding[0]]
-            except Exception as e:
-                result["clap_512"] = None
-                result["error"] = f"CLAP failed: {e}"
+            if want_clap:
+                try:
+                    embedding = self.clap_model.get_audio_embedding_from_filelist(
+                        [str(tmp_path)], use_tensor=False,
+                    )
+                    result["clap_512"] = [round(float(v), 6) for v in embedding[0]]
+                except Exception as e:
+                    result["error"] = f"CLAP failed: {e}"
 
-            # MERT embedding (768-dim)
-            try:
-                import librosa
-                import torch
+            if want_mert:
+                try:
+                    import librosa
+                    import torch
 
-                # Use librosa instead of soundfile — handles M4A/AAC
-                # via audioread fallback (soundfile only reads WAV/FLAC)
-                audio, sr = librosa.load(str(tmp_path), sr=None, mono=True)
-                if sr != 24000:
-                    import torchaudio
-                    audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
-                    resampler = torchaudio.transforms.Resample(sr, 24000)
-                    audio_tensor = resampler(audio_tensor)
-                    audio = audio_tensor.squeeze(0).numpy()
+                    audio, sr = librosa.load(str(tmp_path), sr=None, mono=True)
+                    if sr != 24000:
+                        import torchaudio
+                        audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+                        resampler = torchaudio.transforms.Resample(sr, 24000)
+                        audio_tensor = resampler(audio_tensor)
+                        audio = audio_tensor.squeeze(0).numpy()
 
-                inputs = self.mert_processor(
-                    audio, sampling_rate=24000, return_tensors="pt",
-                )
-                if torch.cuda.is_available():
-                    inputs = {k: v.cuda() for k, v in inputs.items()}
+                    inputs = self.mert_processor(
+                        audio, sampling_rate=24000, return_tensors="pt",
+                    )
+                    if torch.cuda.is_available():
+                        inputs = {k: v.cuda() for k, v in inputs.items()}
 
-                with torch.no_grad():
-                    outputs = self.mert_model(**inputs, output_hidden_states=True)
+                    with torch.no_grad():
+                        outputs = self.mert_model(**inputs, output_hidden_states=True)
 
-                last_hidden = outputs.hidden_states[-1]
-                embedding = last_hidden.mean(dim=1).squeeze(0).cpu().numpy()
-                result["mert_768"] = [round(float(v), 6) for v in embedding]
-            except Exception as e:
-                result["mert_768"] = None
-                if not result["error"]:
-                    result["error"] = f"MERT failed: {e}"
+                    last_hidden = outputs.hidden_states[-1]
+                    embedding = last_hidden.mean(dim=1).squeeze(0).cpu().numpy()
+                    result["mert_768"] = [round(float(v), 6) for v in embedding]
+                except Exception as e:
+                    if not result["error"]:
+                        result["error"] = f"MERT failed: {e}"
 
             return result
 
@@ -185,15 +189,22 @@ class AudioEnricher:
         return results
 
     @modal.method()
-    def enrich_batch_from_bytes(self, audio_items: list[str]) -> list[dict]:
-        """Batch enrichment from base64-encoded audio bytes."""
+    def enrich_batch_from_bytes(
+        self, audio_items: list[str], models: list[str] | None = None,
+    ) -> list[dict]:
+        """Batch enrichment from base64-encoded audio bytes.
+
+        `models` defaults to both CLAP + MERT. Pass ["mert"] to skip
+        CLAP inference when only MERT is missing for a batch.
+        """
         import base64
 
+        model_set = {m.lower() for m in (models or ["clap", "mert"])}
         results = []
         for b64 in audio_items:
             try:
                 audio_bytes = base64.b64decode(b64)
-                results.append(self._process_audio_bytes(audio_bytes))
+                results.append(self._process_audio_bytes(audio_bytes, models=model_set))
             except Exception as e:
                 results.append({"error": f"Decode failed: {e}", "clap_512": None, "mert_768": None})
         return results
@@ -244,8 +255,10 @@ def enrich(data: dict) -> dict:
 
     if "audio_items" in data:
         # Base64-encoded audio bytes — no URL download needed
-        results = enricher.enrich_batch_from_bytes.remote(data["audio_items"])
-        ok = sum(1 for r in results if r.get("clap_512"))
+        results = enricher.enrich_batch_from_bytes.remote(
+            data["audio_items"], data.get("models"),
+        )
+        ok = sum(1 for r in results if r.get("clap_512") or r.get("mert_768"))
         _log_to_backend(
             "gpu_batch_bytes", f"{ok}/{len(results)}",
             f"{len(data['audio_items'])} items",

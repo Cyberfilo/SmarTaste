@@ -2438,55 +2438,60 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
     from musicmind.engine.enrichment.gpu_client import (
         GPU_MIN_BATCH,
         enrich_bytes_concurrent,
-        enrich_urls_concurrent,
     )
-    from musicmind.engine.enrichment.orchestrator import _get_cached_audio
+    from musicmind.engine.enrichment.orchestrator import (
+        _cache_preview_audio,
+        _download_preview,
+        _get_cached_audio,
+    )
 
     modal_url = getattr(settings, "modal_endpoint_url", None)
     if not modal_url:
         logger.debug("Global GPU backfill skipped: no modal_endpoint_url")
         return 0
 
-    # Candidate query: rows missing EITHER CLAP OR MERT. Limit 500 per call
-    # (was 200) — we want aggressive drain of the MERT-only-missing backlog
-    # (~143 rows as of audit). Effnet embedding must exist so we know the
-    # row has been through Essentia at least once.
+    # Two separate queries so the GPU call can skip CLAP inference for
+    # the MERT-only group — saves one forward pass per track in the
+    # 350-row backlog (per V 6.374 diagnostic).
     async with engine.begin() as conn:
-        result = await conn.execute(
+        rows_both = (await conn.execute(
             sa.select(audio_embeddings_global.c.isrc).where(
                 sa.and_(
-                    sa.or_(
-                        audio_embeddings_global.c.clap_embedding.is_(None),
-                        audio_embeddings_global.c.mert_embedding.is_(None),
-                    ),
+                    audio_embeddings_global.c.clap_embedding.is_(None),
                     audio_embeddings_global.c.embedding.isnot(None),
                 )
-            ).limit(500)
-        )
-        rows = result.fetchall()
+            ).limit(300)
+        )).fetchall()
+        rows_mert_only = (await conn.execute(
+            sa.select(audio_embeddings_global.c.isrc).where(
+                sa.and_(
+                    audio_embeddings_global.c.clap_embedding.isnot(None),
+                    audio_embeddings_global.c.mert_embedding.is_(None),
+                    audio_embeddings_global.c.embedding.isnot(None),
+                )
+            ).limit(300)
+        )).fetchall()
 
-    if not rows:
+    if not rows_both and not rows_mert_only:
         return 0
 
-    logger.info("Global GPU backfill: %d ISRCs missing CLAP/MERT", len(rows))
+    logger.info(
+        "Global GPU backfill: %d need both, %d need MERT-only",
+        len(rows_both), len(rows_mert_only),
+    )
 
-    # Map ISRC → (catalog_id, preview_url) via global_song_cache
-    isrcs = [r.isrc for r in rows if r.isrc]
+    # Map ALL relevant ISRCs → (catalog_id, preview_url) in one query
+    all_isrcs = [r.isrc for r in (rows_both + rows_mert_only) if r.isrc]
     isrc_to_cid: dict[str, str] = {}
     isrc_to_url: dict[str, str] = {}
-    if isrcs:
+    if all_isrcs:
         async with engine.begin() as conn:
             gsc = await conn.execute(
                 sa.select(
                     global_song_cache.c.catalog_id,
                     global_song_cache.c.isrc,
                     global_song_cache.c.preview_url,
-                ).where(
-                    sa.and_(
-                        global_song_cache.c.isrc.in_(isrcs),
-                        global_song_cache.c.isrc != NO_ISRC_SENTINEL,
-                    )
-                )
+                ).where(global_song_cache.c.isrc.in_(all_isrcs))
             )
             for r in gsc:
                 if r.isrc:
@@ -2494,50 +2499,55 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                     if r.preview_url:
                         isrc_to_url[r.isrc] = r.preview_url
 
-    # Split into bytes (cached audio) vs. URL fallback queues. Bytes path is
-    # preferred when available — no CDN round-trip, no URL-expiry risk. URL
-    # path covers the 143 CLAP-only rows whose audio was purged after 7d but
-    # whose preview_url is still valid (iTunes URLs don't expire; Deezer
-    # URLs might 403 but the GPU worker will log the failure and skip).
-    bytes_queue: list[tuple[str, bytes]] = []
-    url_queue: list[tuple[str, str]] = []
-    for r in rows:
-        isrc = r.isrc
+    async def _resolve_bytes(isrc: str) -> bytes | None:
+        """Return audio bytes: cached first, else download-and-cache.
+
+        Download failures (403 on expired Deezer CDN, 404 on dead iTunes,
+        timeouts) return None so the row skips this cycle entirely rather
+        than wasting a GPU dispatch on a dead URL.
+        """
         cid = isrc_to_cid.get(isrc, "")
-        cached = await _get_cached_audio(engine, cid) if cid else None
+        if not cid:
+            return None
+        cached = await _get_cached_audio(engine, cid)
         if cached:
-            bytes_queue.append((isrc, cached))
-        else:
-            url = isrc_to_url.get(isrc, "")
-            if url:
-                url_queue.append((isrc, url))
+            return cached
+        url = isrc_to_url.get(isrc, "")
+        if not url:
+            return None
+        audio = await _download_preview(url)
+        if audio:
+            # Persist bytes so the next GPU pass + any future re-run read
+            # from preview_audio_cache and skip the CDN round-trip.
+            await _cache_preview_audio(engine, cid, audio, url)
+            return audio
+        return None
+
+    async def _build_queue(rows) -> list[tuple[str, bytes]]:
+        q: list[tuple[str, bytes]] = []
+        for r in rows:
+            audio = await _resolve_bytes(r.isrc)
+            if audio:
+                q.append((r.isrc, audio))
+        return q
+
+    both_queue = await _build_queue(rows_both)
+    mert_queue = await _build_queue(rows_mert_only)
 
     logger.info(
-        "Global GPU backfill queues: %d bytes, %d URL-fallback "
-        "(of %d missing)",
-        len(bytes_queue), len(url_queue), len(rows),
+        "Global GPU backfill queues: %d both (from %d rows), "
+        "%d mert-only (from %d rows) — dead URLs skipped",
+        len(both_queue), len(rows_both),
+        len(mert_queue), len(rows_mert_only),
     )
 
-    if not bytes_queue and not url_queue:
-        logger.debug("Global GPU backfill: no audio source available")
-        return 0
-
     async def _apply_results(queue_items, gpu_results) -> int:
-        """Shared DB-writer for both bytes and URL result batches.
-
-        Uses COALESCE(existing, new) semantics so a column that's already
-        populated is never overwritten. When we revisit a CLAP-only /
-        MERT-NULL row, the GPU wastefully recomputes CLAP too — that
-        redundant inference cost is unavoidable without a GPU-worker
-        protocol change, but at least we avoid the matching wasted DB
-        write.
-        """
+        """Write results back. COALESCE preserves existing columns."""
         stored = 0
         async with engine.begin() as conn:
             for (isrc, _), res in zip(queue_items, gpu_results):
                 if not res:
                     continue
-                # GPU handler returns clap_512 / mert_768.
                 clap = res.get("clap_512")
                 mert = res.get("mert_768")
                 if not (clap or mert):
@@ -2553,54 +2563,41 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                         audio_embeddings_global.c.mert_embedding,
                         json.dumps(mert),
                     )
-                await conn.execute(
-                    sa.update(audio_embeddings_global)
-                    .where(audio_embeddings_global.c.isrc == isrc)
-                    .values(**updates)
-                )
-                stored += 1
+                if updates:
+                    await conn.execute(
+                        sa.update(audio_embeddings_global)
+                        .where(audio_embeddings_global.c.isrc == isrc)
+                        .values(**updates)
+                    )
+                    stored += 1
         return stored
 
     total = 0
 
-    # Bytes path — defer below GPU_MIN_BATCH (avoid 1-item round-trips)
-    if bytes_queue:
-        if len(bytes_queue) >= GPU_MIN_BATCH:
-            b64_items = [
-                base64.b64encode(audio).decode("ascii")
-                for _, audio in bytes_queue
-            ]
-            try:
-                results = await enrich_bytes_concurrent(b64_items, modal_url)
-                total += await _apply_results(bytes_queue, results)
-            except Exception:
-                logger.warning(
-                    "Global GPU bytes dispatch failed for %d items",
-                    len(bytes_queue), exc_info=True,
-                )
-        else:
+    async def _dispatch(queue, models_wanted: list[str]):
+        nonlocal total
+        if not queue:
+            return
+        if len(queue) < GPU_MIN_BATCH:
             logger.info(
-                "Global GPU bytes queue: %d items, deferring (min batch %d)",
-                len(bytes_queue), GPU_MIN_BATCH,
+                "Global GPU %s queue: %d items, deferring (min batch %d)",
+                "/".join(models_wanted), len(queue), GPU_MIN_BATCH,
+            )
+            return
+        b64_items = [base64.b64encode(a).decode("ascii") for _, a in queue]
+        try:
+            results = await enrich_bytes_concurrent(
+                b64_items, modal_url, models=models_wanted,
+            )
+            total += await _apply_results(queue, results)
+        except Exception:
+            logger.warning(
+                "Global GPU dispatch failed for %s queue (%d items)",
+                "/".join(models_wanted), len(queue), exc_info=True,
             )
 
-    # URL fallback path — same min-batch floor
-    if url_queue:
-        if len(url_queue) >= GPU_MIN_BATCH:
-            urls = [u for _, u in url_queue]
-            try:
-                results = await enrich_urls_concurrent(urls, modal_url)
-                total += await _apply_results(url_queue, results)
-            except Exception:
-                logger.warning(
-                    "Global GPU URL dispatch failed for %d items",
-                    len(url_queue), exc_info=True,
-                )
-        else:
-            logger.info(
-                "Global GPU URL queue: %d items, deferring (min batch %d)",
-                len(url_queue), GPU_MIN_BATCH,
-            )
+    await _dispatch(both_queue, ["clap", "mert"])
+    await _dispatch(mert_queue, ["mert"])
 
     if total > 0:
         logger.info("Global GPU backfill: %d CLAP/MERT stored", total)

@@ -223,7 +223,20 @@ async def health() -> dict:
 
 @app.post("/")
 async def enrich(data: dict) -> dict:
-    """Mirrors the Modal /enrich endpoint contract."""
+    """Mirrors the Modal /enrich endpoint contract.
+
+    Optional `models` field in the request body restricts which embeddings
+    are computed. Default = ["clap", "mert"]. Pass ["mert"] to skip the
+    CLAP forward pass entirely (useful when backfilling MERT for rows
+    that already have CLAP). Skipped models return None in their slot.
+    """
+    # Normalize + validate the models selector — used by the bytes branch.
+    models_wanted = {
+        m.lower() for m in (data.get("models") or ["clap", "mert"])
+    }
+    want_clap = "clap" in models_wanted
+    want_mert = "mert" in models_wanted
+
     # Batch bytes (preferred — no URL download on the server)
     # Optimized: single CLAP forward pass for all N files, then loop MERT.
     if "audio_items" in data:
@@ -252,10 +265,11 @@ async def enrich(data: dict) -> dict:
                 }
                 tmp_paths.append(None)
 
-        # Batch CLAP: all valid files in one forward pass
+        # Batch CLAP: all valid files in one forward pass — skipped if the
+        # caller only wants MERT (saves the CLAP forward pass entirely).
         valid_paths = [p for p in tmp_paths if p is not None]
         clap_embeddings: dict = {}  # path_idx -> embedding
-        if valid_paths:
+        if want_clap and valid_paths:
             try:
                 embs = _models["clap"].get_audio_embedding_from_filelist(
                     [str(p) for p in valid_paths], use_tensor=False,
@@ -278,43 +292,44 @@ async def enrich(data: dict) -> dict:
                 continue
             result = {
                 "error": None,
-                "clap_512": clap_embeddings.get(i),
+                "clap_512": clap_embeddings.get(i) if want_clap else None,
                 "mert_768": None,
             }
-            if result["clap_512"] is None:
+            if want_clap and result["clap_512"] is None:
                 result["error"] = "CLAP failed in batch"
-            # MERT per-file
-            try:
-                import librosa
-                audio, sr = librosa.load(str(tmp_path), sr=None, mono=True)
-                if sr != 24000:
-                    import torchaudio
-                    at = torch.tensor(
-                        audio, dtype=torch.float32,
-                    ).unsqueeze(0)
-                    resampler = torchaudio.transforms.Resample(sr, 24000)
-                    at = resampler(at)
-                    audio = at.squeeze(0).numpy()
-                inputs = _models["mert_processor"](
-                    audio, sampling_rate=24000, return_tensors="pt",
-                )
-                mdev = _models["mert_device"]
-                mdtype = _models.get("mert_dtype", torch.float32)
-                inputs = {
-                    k: v.to(mdev).to(mdtype)
-                    if v.dtype.is_floating_point else v.to(mdev)
-                    for k, v in inputs.items()
-                }
-                with torch.no_grad():
-                    outputs = _models["mert"](
-                        **inputs, output_hidden_states=True,
+            # MERT per-file — skipped entirely when the caller doesn't want it
+            if want_mert:
+                try:
+                    import librosa
+                    audio, sr = librosa.load(str(tmp_path), sr=None, mono=True)
+                    if sr != 24000:
+                        import torchaudio
+                        at = torch.tensor(
+                            audio, dtype=torch.float32,
+                        ).unsqueeze(0)
+                        resampler = torchaudio.transforms.Resample(sr, 24000)
+                        at = resampler(at)
+                        audio = at.squeeze(0).numpy()
+                    inputs = _models["mert_processor"](
+                        audio, sampling_rate=24000, return_tensors="pt",
                     )
-                lh = outputs.hidden_states[-1]
-                emb = lh.mean(dim=1).squeeze(0).cpu().float().numpy()
-                result["mert_768"] = [round(float(v), 6) for v in emb]
-            except Exception as e:
-                if not result["error"]:
-                    result["error"] = f"MERT failed: {e}"
+                    mdev = _models["mert_device"]
+                    mdtype = _models.get("mert_dtype", torch.float32)
+                    inputs = {
+                        k: v.to(mdev).to(mdtype)
+                        if v.dtype.is_floating_point else v.to(mdev)
+                        for k, v in inputs.items()
+                    }
+                    with torch.no_grad():
+                        outputs = _models["mert"](
+                            **inputs, output_hidden_states=True,
+                        )
+                    lh = outputs.hidden_states[-1]
+                    emb = lh.mean(dim=1).squeeze(0).cpu().float().numpy()
+                    result["mert_768"] = [round(float(v), 6) for v in emb]
+                except Exception as e:
+                    if not result["error"]:
+                        result["error"] = f"MERT failed: {e}"
             results.append(result)
 
         # Cleanup tempfiles
@@ -323,8 +338,8 @@ async def enrich(data: dict) -> dict:
                 p.unlink(missing_ok=True)
 
         logger.info(
-            "Batch-bytes: %d items processed (%d via batched CLAP)",
-            len(results), len(valid_paths),
+            "Batch-bytes: %d items processed (models=%s, clap-batched=%d)",
+            len(results), sorted(models_wanted), len(valid_paths) if want_clap else 0,
         )
         return {"results": results}
 

@@ -110,21 +110,28 @@ async def enrich_batch_via_gpu(
 async def enrich_batch_bytes_via_gpu(
     audio_items: list[str],
     modal_endpoint_url: str,
+    *,
+    models: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Batch GPU enrichment from base64-encoded audio bytes.
 
     Sends cached audio bytes directly to Modal instead of URLs.
     Eliminates expired Deezer CDN URL failures entirely.
+
+    `models` restricts which embeddings the GPU computes. Default = both
+    CLAP + MERT. Pass ["mert"] to skip the CLAP forward pass when the
+    batch only needs MERT backfilled.
     """
     if not modal_endpoint_url or not audio_items:
         return []
 
     url = modal_endpoint_url.rstrip("/")
+    payload: dict[str, Any] = {"audio_items": audio_items}
+    if models:
+        payload["models"] = list(models)
     try:
         async with httpx.AsyncClient(timeout=600.0) as client:
-            resp = await client.post(
-                url, json={"audio_items": audio_items},
-            )
+            resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data.get("results", [])
@@ -142,6 +149,7 @@ async def enrich_bytes_concurrent(
     *,
     batch_size: int = GPU_BATCH_SIZE,
     max_concurrent: int = GPU_MAX_CONCURRENT,
+    models: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Split base64 items into chunks and dispatch concurrently.
 
@@ -164,7 +172,9 @@ async def enrich_bytes_concurrent(
 
     async def _send(chunk: list[str]) -> list[dict[str, Any]]:
         async with semaphore:
-            results = await enrich_batch_bytes_via_gpu(chunk, modal_endpoint_url)
+            results = await enrich_batch_bytes_via_gpu(
+                chunk, modal_endpoint_url, models=models,
+            )
             if not results:
                 # Pad with empty dicts so caller can still zip by position
                 return [{} for _ in chunk]
