@@ -7,6 +7,16 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.381 — 2026-04-17
+
+### Fix COALESCE type mismatch killing global GPU write-back
+
+`_apply_results` used `sa.func.coalesce(json_column, json.dumps(list))` to write CLAP/MERT embeddings. `json.dumps()` returns a Python `str` which asyncpg sends as `varchar` — PostgreSQL rejects `COALESCE(json, varchar)` with `DatatypeMismatchError`. This was the **actual** blocker for global MERT (and CLAP) embeddings: the GPU call succeeded (233 items!) but every `UPDATE` failed silently.
+
+Fix: pass Python lists directly to the `sa.JSON` column — SQLAlchemy handles serialization. COALESCE was unnecessary anyway since the query already filters for NULL columns.
+
+---
+
 ## V 6.380 — 2026-04-17
 
 ### iTunes re-resolution for global MERT backfill
