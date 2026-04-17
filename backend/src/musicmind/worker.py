@@ -2608,7 +2608,12 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
     )
 
     async def _apply_results(queue_items, gpu_results) -> int:
-        """Write results back. COALESCE preserves existing columns."""
+        """Write GPU results back. Rows were filtered for NULL columns in
+        the queue query, so direct assignment is safe — no COALESCE needed.
+        (COALESCE(json_col, varchar_literal) causes a type mismatch on
+        asyncpg; passing Python lists lets SQLAlchemy's JSON column handle
+        serialization correctly.)
+        """
         stored = 0
         async with engine.begin() as conn:
             for (isrc, _), res in zip(queue_items, gpu_results):
@@ -2618,17 +2623,11 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                 mert = res.get("mert_768")
                 if not (clap or mert):
                     continue
-                updates: dict[str, Any] = {}
+                updates: dict = {}
                 if clap:
-                    updates["clap_embedding"] = sa.func.coalesce(
-                        audio_embeddings_global.c.clap_embedding,
-                        json.dumps(clap),
-                    )
+                    updates["clap_embedding"] = clap
                 if mert:
-                    updates["mert_embedding"] = sa.func.coalesce(
-                        audio_embeddings_global.c.mert_embedding,
-                        json.dumps(mert),
-                    )
+                    updates["mert_embedding"] = mert
                 if updates:
                     await conn.execute(
                         sa.update(audio_embeddings_global)
