@@ -783,6 +783,19 @@ async def _populate_candidates_from_cobweb(
                 " JOIN global_song_cache g"
                 "      ON g.artist_name = c.artist_name"
                 " WHERE c.user_id = :uid AND c.enriched = true"
+                # Exclude anything already in the user's library: match by
+                # catalog_id (same-service) OR by non-empty ISRC
+                # (cross-service — e.g. Spotify library entry slipping in as
+                # an Apple-sourced candidate with a different catalog_id).
+                "   AND NOT EXISTS ("
+                "     SELECT 1 FROM song_metadata_cache smc"
+                "     WHERE smc.user_id = c.user_id"
+                "       AND (smc.library_id IS NOT NULL"
+                "            OR smc.date_added_to_library IS NOT NULL)"
+                "       AND (smc.catalog_id = g.catalog_id"
+                "            OR (smc.isrc IS NOT NULL AND smc.isrc <> ''"
+                "                AND smc.isrc = g.isrc))"
+                "   )"
                 " ON CONFLICT (user_id, catalog_id, strategy_source) DO UPDATE"
                 "    SET discovery_weight = GREATEST("
                 "           recommendation_candidates.discovery_weight,"
