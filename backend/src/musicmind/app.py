@@ -99,79 +99,47 @@ async def _dispatch_startup_work(engine, settings) -> None:
         plan.append(f"fill {gpu_gaps} global CLAP/MERT embeddings on the GPU")
     plan.append("run a cobweb + discovery cycle to grow the candidate pool")
 
-    log.info("── Backend booted. Telling worker to: ──")
+    log.info("── Backend booted. Plan for the worker: ──")
     for i, step in enumerate(plan, 1):
         log.info("  %d. %s", i, step)
 
-    # Lazy import — worker is part of same package, no cross-service HTTP
+    # V 6.370: backend no longer dispatches enrichment work. It inspects
+    # the DB and logs the natural-language plan above; the worker is the
+    # single executor. Removes the backend/worker race where both
+    # processes ran the same backfill functions in parallel on boot,
+    # doubling API quota / GPU spend and occasionally stepping on each
+    # other's Postgres transactions.
+    #
+    # The worker reads the DB itself on startup and runs two strict
+    # drains (USER-LINKED → DISCOVERED) before entering the main cycle.
+    # We persist the plan to worker_status.detail as a JSON blob so the
+    # admin dashboard can show expected work even before the worker has
+    # updated its own phase on the same row.
     try:
-        from musicmind import worker as wk
+        import json as _json
+
+        plan_payload = {
+            "lib_gaps": lib_gaps,
+            "isrc_gaps": isrc_gaps,
+            "gpu_gaps": gpu_gaps,
+            "plan": plan,
+        }
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("""
+                INSERT INTO worker_status (id, phase, detail, updated_at)
+                VALUES (1, 'startup_plan_ready', :detail, now())
+                ON CONFLICT (id) DO UPDATE SET
+                  phase = 'startup_plan_ready',
+                  detail = EXCLUDED.detail,
+                  updated_at = now()
+            """), {"detail": _json.dumps(plan_payload)[:1000]})
     except Exception:
-        log.warning("Worker module import failed; backend cannot orchestrate")
-        return
+        log.debug("Could not write startup plan to worker_status", exc_info=True)
 
-    async def _task_library() -> None:
-        if lib_gaps <= 0:
-            return
-        log.info("▶ Worker: starting library enrichment for %d tracks", lib_gaps)
-        try:
-            enriched = await wk._fill_library_gaps(engine, settings)
-            log.info("✓ Worker: library enrichment done — %d tracks got audio features", enriched)
-        except Exception:
-            log.exception("✗ Worker: library enrichment crashed")
-
-    async def _task_isrc() -> None:
-        if isrc_gaps <= 0:
-            return
-        log.info("▶ Worker: starting ISRC backfill for up to 500 tracks")
-        try:
-            found = await wk._backfill_isrcs(engine, batch_limit=500)
-            log.info(
-                "✓ Worker: ISRC backfill done — %d ISRCs found (unfindable ones marked NO_ISRC)",
-                found,
-            )
-        except Exception:
-            log.exception("✗ Worker: ISRC backfill crashed")
-
-    async def _task_gpu() -> None:
-        try:
-            if gpu_gaps > 0 or True:  # always try — per-user may have gaps too
-                log.info(
-                    "▶ Worker: starting GPU backfill (CLAP + MERT via local/Modal GPU)"
-                )
-                per_user = await wk._backfill_gpu_embeddings(engine, settings)
-                if per_user > 0:
-                    log.info("✓ Worker: per-user GPU backfill stored %d CLAP/MERT", per_user)
-                if gpu_gaps > 0:
-                    globally = await wk._backfill_gpu_embeddings_global(engine, settings)
-                    if globally > 0:
-                        log.info("✓ Worker: global GPU backfill stored %d CLAP/MERT", globally)
-        except Exception:
-            log.exception("✗ Worker: GPU backfill crashed")
-
-    async def _task_cobweb() -> None:
-        log.info("▶ Worker: starting cobweb + discovery cycle")
-        try:
-            stats = await wk._run_cobweb_cycle(engine, settings)
-            log.info(
-                "✓ Worker: cobweb cycle done — %d new artists, %d songs cached globally, %d discovery candidates upserted",
-                stats.get("cobweb_artists", 0),
-                stats.get("songs_cached", 0),
-                stats.get("discovery_candidates", 0),
-            )
-        except Exception:
-            log.exception("✗ Worker: cobweb cycle crashed")
-
-    # Run tasks in the documented order; each awaits its predecessor so
-    # ISRC is done before GPU (which needs ISRCs to look up global embeddings)
-    # and library gaps are filled before cobweb (user-linked priority).
-    async def _chain() -> None:
-        await _task_library()
-        await _task_isrc()
-        await _task_gpu()
-        await _task_cobweb()
-
-    asyncio.create_task(_chain())
+    log.info(
+        "── Worker will execute the plan (USER-LINKED drain → "
+        "DISCOVERED drain → main cycle). Backend is inspector-only. ──"
+    )
 
 
 @asynccontextmanager
