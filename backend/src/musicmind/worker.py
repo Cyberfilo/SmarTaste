@@ -453,14 +453,20 @@ async def _migrate_discography_to_global(engine) -> int:
         async with engine.begin() as conn:
             # Step 1: promote enrichment from per-user to global
             # audio_features_cache → audio_features_global (by ISRC)
+            # NOTE: both tables use `loudness` (not `loudness_lufs`) and
+            # `audio_features_global` has only `analyzed_at` (with NOW()
+            # default) — no `enriched_at` column. Omitting the timestamp
+            # lets the default fire. Earlier draft hardcoded the wrong
+            # names and blew up the first migration run with
+            # UndefinedColumnError.
             promoted = await conn.execute(sa.text("""
                 INSERT INTO audio_features_global
                   (isrc, tempo, energy, danceability, brightness,
-                   beat_strength, key, scale, loudness_lufs, acousticness,
-                   valence_proxy, feature_source, enriched_at)
+                   beat_strength, key, scale, loudness, acousticness,
+                   valence_proxy, feature_source)
                 SELECT s.isrc, af.tempo, af.energy, af.danceability, af.brightness,
-                       af.beat_strength, af.key, af.scale, af.loudness_lufs,
-                       af.acousticness, af.valence_proxy, af.feature_source, af.enriched_at
+                       af.beat_strength, af.key, af.scale, af.loudness,
+                       af.acousticness, af.valence_proxy, af.feature_source
                 FROM song_metadata_cache s
                 JOIN audio_features_cache af
                   ON af.catalog_id = s.catalog_id AND af.user_id = s.user_id
