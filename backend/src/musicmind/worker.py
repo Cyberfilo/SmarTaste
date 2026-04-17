@@ -2615,10 +2615,22 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         serialization correctly.)
         """
         stored = 0
+        clap_count = 0
+        mert_count = 0
+        sample_logged = False
         async with engine.begin() as conn:
             for (isrc, _), res in zip(queue_items, gpu_results):
                 if not res:
                     continue
+                if not sample_logged:
+                    logger.info(
+                        "GPU result sample keys=%s, mert_768 type=%s, "
+                        "error=%s",
+                        list(res.keys()),
+                        type(res.get("mert_768")).__name__,
+                        res.get("error"),
+                    )
+                    sample_logged = True
                 clap = res.get("clap_512")
                 mert = res.get("mert_768")
                 if not (clap or mert):
@@ -2626,8 +2638,10 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                 updates: dict = {}
                 if clap:
                     updates["clap_embedding"] = clap
+                    clap_count += 1
                 if mert:
                     updates["mert_embedding"] = mert
+                    mert_count += 1
                 if updates:
                     await conn.execute(
                         sa.update(audio_embeddings_global)
@@ -2635,6 +2649,10 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                         .values(**updates)
                     )
                     stored += 1
+        logger.info(
+            "GPU apply: %d stored (%d clap, %d mert) from %d results",
+            stored, clap_count, mert_count, len(gpu_results),
+        )
         return stored
 
     total = 0
