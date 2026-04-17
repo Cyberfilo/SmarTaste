@@ -7,6 +7,40 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.350 — 2026-04-17
+
+### User dashboard redesign — enrichment-derived taste insights replace stale proxy metrics
+
+The user-facing `/dashboard` overview (not the admin dashboard) hadn't been touched since before the April-2026 pipeline rebuild, so it surfaced metrics that are either known to be wrong (`listening_hours_estimated`, extrapolated from added-at timestamps), conceptually stale (`familiarity_score`, a coarse proxy that no longer maps to the 6-dim scoring engine), or design-incorrect (a pie chart with 8 slices — the ui-ux-pro-max ruleset and Tufte both flag this). The enrichment pipeline computes seven aggregated Essentia scalar traits per user (tempo, energy, brightness, danceability, acousticness, valence_proxy, beat_strength) plus genre/artist/release-year distributions; none of that was being translated into plain-English insight.
+
+**What's new on `frontend/src/app/(app)/dashboard/page.tsx`:**
+
+- **Sound Signature hero card** — the new anchor of the page. Generates a natural-language headline from the user's audio_trait_preferences ("Your library sounds high-energy, rhythm-forward, and electronic — rooted in Hip-Hop/Rap."), renders a radar of the seven traits alongside a stat column with per-trait percentage bars + one-line descriptions ("Rhythmic stability", "Positive / uplifting feel", etc.). Descriptor generation lives in a local `describeSound()` helper keyed on energy / danceability / valence_proxy / acousticness / tempo / beat_strength thresholds. Gracefully degrades when fewer than 3 traits are populated (new accounts, pre-enrichment state).
+- **Genre DNA card** — replaces the 8-slice donut with direct-labeled horizontal bars (rank · genre · bar · %). Preserves the existing regional-prioritized genre names from `profile.genre_vector` but presents them in a layout that scales linearly with category count. No legend, no eye travel.
+- **Top Artists** — kept, restyled with consistent bar gradient (`from-purple-600 to-purple-400`) to match the rest of the page. Unchanged data contract.
+- **Release Era card** — the year distribution is now an `AreaChart` with a vertical purple gradient fill, and a header-right callout that states the range and peak year ("2020–2026 · Peak: 2023 · 18% of library") so the insight is readable without reading the axis.
+- **Library Snapshot card** — replaces the four top-row stat cards. A compact definition list showing songs-analyzed, genres-detected (with "regional-weighted" hint), ranked-artist count, source service(s), and a relative-time "last updated". No more Listening Hours. No more Familiarity.
+
+**What was removed:**
+
+- The four-card row at the top (Songs Analyzed / Listening Hours / Familiarity / Service)
+- The Top Genres pie chart
+- The Audio Traits radar (now absorbed into the Sound Signature hero)
+- The Release Years bar chart (now an area chart inside its own card with a narrative callout)
+
+**What was kept:**
+
+- The Calibration banner (incomplete state) + Calibration summary (completed state), unchanged — still the only primary CTA on the page.
+- The tab navigation at the bottom (`/dashboard/taste`, `/dashboard/stats`, `/dashboard/recommendations`).
+
+**Data contract:** no backend changes. All insights are derived client-side from the existing `/api/taste/profile` response (`audio_trait_preferences`, `genre_vector`, `top_artists`, `release_year_distribution`, `services_included`, `computed_at`, `total_songs_analyzed`). The now-unused `listening_hours_estimated` and `familiarity_score` fields are still returned by the API for back-compat but silently ignored by the dashboard.
+
+**Design decisions (ui-ux-pro-max ruleset):** pie avoided for >5 categories (→ horizontal bars); radar preserved for the multi-variate signature (its canonical use case); area chart preferred over bars for a 15-point time series (editorial feel, smoother reading); one primary CTA per screen (calibration); `tabular-nums` on every numeric cell; per-trait descriptions below each bar to make the fingerprint legible without a glossary; `bg-gradient-to-br from-purple-500/[0.04]` on the hero only, to anchor visual hierarchy without overloading the page with gradients.
+
+No new dependencies. No backend changes. No API contract changes. Existing `useTasteProfile()` hook unchanged.
+
+---
+
 ## V 6.341 — 2026-04-17
 
 ### Admin dashboard: fix TypeError crash on first render
