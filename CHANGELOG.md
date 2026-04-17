@@ -7,6 +7,48 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.364 — 2026-04-17
+
+### Full discography fetch + compound-name credit + case dedup + ISRC backfill throughput
+
+Four coordinated indexing fixes that finally make "top artists get their full discography analysed" be true in practice.
+
+**1. Full-discography paginator replaces top-tracks.**
+
+`_fetch_artist_top_tracks` hits Spotify `/artists/{id}/top-tracks` and Apple `?views=top-songs` — both hard-capped at ~10 by the service APIs. That's why even Capo Plaza (31 library songs, calibration rank 15) had only 20 entries in `global_song_cache`: the indexer asked for 50 tracks but got 10 and moved on.
+
+New `_fetch_artist_full_discography` in `api/recommendations/fetch.py` paginates `/artists/{id}/albums` → for each album `/albums/{id}/tracks` (Spotify) or `/albums/{id}` with tracks relationship (Apple). Dedups by ISRC, or by `(title, album)` tuple when ISRC is absent (Spotify SimplifiedTrackObject doesn't carry ISRC — those rows rely on `_backfill_isrcs` to resolve later). Stops once `limit` tracks are collected so a 300-album artist doesn't generate 300 API calls.
+
+`indexer._fetch_and_enrich_discography` now uses this. `MAX_TRACKS_PER_ARTIST` raised from 50 → 200 to give the top calibration picks actual headroom.
+
+**2. Credit every co-primary artist, not just `parsed[0][0]`.**
+
+`_get_ranked_artists` was dropping every co-primary except the first: "SadTurs & KIID" with 7 songs credited only SadTurs. Now iterates every `parse_artists` result with weight ≥ 1.0 and credits each one. Feature artists (weight 0.3) continue to flow through the cobweb, not the ranking.
+
+**3. Case-insensitive aggregation for the frequency map.**
+
+"KERO" and "Kero" (same artist, different service metadata casing) were stored as separate keys, splitting their library counts. `_get_ranked_artists` now aggregates by `lower()` key with first-seen casing preserved for display. Artists that appear in both casings now get their combined song counts.
+
+**4. ISRC backfill batch size 100 → 500 per cycle.**
+
+`_backfill_isrcs` was called with `batch_limit=100` from the main worker loop. With 274 library rows still `NULL` at audit time and the library sync continuously adding new rows, that rate was barely keeping pace. 500 per cycle drains the backlog in 1–2 cycles. Startup call was already 500.
+
+**Tests:** 20/20 pass across `test_indexer_ranking`, `test_artist_affinity`, `test_cobweb_ranking`. No test contract changes in this commit.
+
+**Expected effect:**
+- Top 3 calibration picks (Nabi, Neima Ezza, Vale Pain) start getting ~200-track discography instead of ~10.
+- Co-primary artists like KIID, Bobo no longer lose rank position to their "&" partner.
+- Library dedup reduces artist count in the admin dashboard (KERO/Kero collapses into one entry).
+- ISRC null count drops from 274 → single digits within a couple of cycles (new library sync entries will still appear NULL briefly).
+
+**Follow-ups not in this commit:**
+- Migration to also dedup existing `song_metadata_cache` rows on casing collision (this commit fixes the aggregation; the underlying rows are still separate).
+- Full-discography for cobweb artists (currently they still use `_fetch_artist_top_tracks` since 10 tracks is the intended depth for feat-discovered artists).
+
+No migration. No new env vars.
+
+---
+
 ## V 6.363 — 2026-04-17
 
 ### Recommendation pipeline: MERT global backfill + calibration-dominant ranking + cold-start cleanup

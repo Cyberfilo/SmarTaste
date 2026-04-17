@@ -32,7 +32,12 @@ logger = logging.getLogger("musicmind.indexer")
 MIN_DEPTH_FRAC = 0.15
 MAX_DEPTH_FRAC = 1.0
 DEPTH_SCALE = 1.2
-MAX_TRACKS_PER_ARTIST = 50
+# Hard cap on tracks fetched per artist. The "100%-discography" promise for the
+# top artist needs enough headroom to actually capture a real catalogue —
+# 50 was less than one album for many rap artists. 200 covers most real
+# back-catalogues; a bounded cap keeps runaway pagination in check if the
+# API returns compilation duplicates.
+MAX_TRACKS_PER_ARTIST = 200
 AFFINITY_INCLUDE_THRESHOLD = 0.05
 
 # Calibration picks dominate library frequency. The previous 0.1 multiplicative
@@ -437,15 +442,32 @@ async def _get_ranked_artists(engine, *, user_id: str) -> list[tuple[str, float]
                 )
             ).group_by(song_metadata_cache.c.artist_name)
         )
-        raw_freq: dict[str, int] = {}
+        # Aggregate by lowercase key (dedups "KERO" vs "Kero") while keeping
+        # the first-seen casing for display. Credit every co-primary artist
+        # ("Simba La Rue & Bobo" → both get full count) — only feature
+        # artists (weight < 1.0) are skipped here, they're handled downstream
+        # by the cobweb.
+        display_by_lower: dict[str, str] = {}
+        raw_freq_lower: dict[str, int] = {}
         for row in freq_result:
             if not row.artist_name:
                 continue
             parsed = parse_artists(row.artist_name)
             if not parsed:
                 continue
-            primary_name = parsed[0][0]
-            raw_freq[primary_name] = raw_freq.get(primary_name, 0) + int(row.count)
+            count = int(row.count)
+            for name, weight in parsed:
+                if weight < 1.0:
+                    continue
+                lower = name.lower()
+                if lower not in display_by_lower:
+                    display_by_lower[lower] = name
+                raw_freq_lower[lower] = raw_freq_lower.get(lower, 0) + count
+
+        raw_freq: dict[str, int] = {
+            display_by_lower[lower]: count
+            for lower, count in raw_freq_lower.items()
+        }
 
     return _rank_artists_by_affinity(raw_freq, cal_weights)
 
@@ -467,7 +489,7 @@ async def _fetch_and_enrich_discography(
     actually in the user's library live there.
     """
     from musicmind.api.recommendations.fetch import (
-        _fetch_artist_top_tracks,
+        _fetch_artist_full_discography,
         _search_artist_id,
     )
     from musicmind.db.schema import global_song_cache
@@ -480,8 +502,11 @@ async def _fetch_and_enrich_discography(
     if not artist_id:
         return 0
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        tracks = await _fetch_artist_top_tracks(
+    # Paginate albums → tracks so the indexer can actually honour
+    # "100%-discography for the top artist". The old _fetch_artist_top_tracks
+    # is capped at 10 by the service API.
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        tracks = await _fetch_artist_full_discography(
             client, creds["service"], creds["access_token"], artist_id,
             developer_token=creds["developer_token"],
             storefront=creds["storefront"],

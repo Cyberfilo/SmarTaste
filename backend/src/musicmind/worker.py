@@ -294,7 +294,10 @@ async def main() -> None:
             engine, "isrc_backfill", "Looking up missing ISRCs", cycle=cycle,
         )
         try:
-            isrc_found = await _backfill_isrcs(engine)
+            # Batch 500 (was default 100). With 274 library rows still
+            # NULL + new rows from library sync, a 100/cycle rate took
+            # several hours to drain. 500 catches up in a cycle or two.
+            isrc_found = await _backfill_isrcs(engine, batch_limit=500)
             if isrc_found > 0:
                 logger.info("Cycle %d: found %d ISRCs", cycle, isrc_found)
         except Exception:
