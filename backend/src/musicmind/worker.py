@@ -211,64 +211,38 @@ async def main() -> None:
     except Exception:
         logger.exception("Discography migration failed")
 
-    # ── Startup Phase 1: GPU FIRST ──────────────────────────────────
-    # On every redeploy, finish GPU enrichment before anything else.
-    # This is the most expensive step and the one most likely to have
-    # gaps from tunnel/endpoint downtime.
-    await _set_status(engine, "startup_gpu", "GPU enrichment (CLAP + MERT) — PRIORITY")
+    # ── Startup Phase 1: USER-LINKED drain ──────────────────────────
+    # Fill every gap for songs in the user's library before spending a
+    # single cycle on global/discovered data. Strict order inside the
+    # drain: ISRC → preview URL/audio → Essentia → EffNet → GPU. Each
+    # step depends on the one before, so running them in the right
+    # sequence avoids wasted calls (e.g., don't ask the GPU to process
+    # a track that hasn't been Essentia'd yet).
+    #
+    # The old design kicked all five off as independent startup phases
+    # AND fired a duplicate chain from the backend's lifespan — both
+    # services hammered the same tables in parallel, which Postgres
+    # serialized but the redundant work wasted API quota and GPU
+    # budget. V 6.370 makes the worker the single executor; the backend
+    # only logs the plan.
+    logger.info("── Startup: USER-LINKED drain ──")
     try:
-        gpu_stored = await _backfill_gpu_embeddings(engine, settings)
-        if gpu_stored > 0:
-            logger.info("Startup GPU backfill (per-user): %d CLAP/MERT stored", gpu_stored)
+        await _drain_user_linked(engine, settings)
     except Exception:
-        logger.exception("Startup GPU backfill failed")
+        logger.exception("User-linked drain crashed")
 
-    # Global GPU backfill (cobweb + discovery tracks in audio_embeddings_global)
-    await _set_status(engine, "startup_gpu_global", "GPU enrichment — global songs")
+    # ── Startup Phase 2: DISCOVERED drain ───────────────────────────
+    # Global tracks (cobweb + discography-fetched) come strictly AFTER
+    # user-linked. Uses the V 6.367 URL-fallback path so GPU rows whose
+    # preview_audio_cache expired can still MERT-backfill via the
+    # preview URL stored on global_song_cache.
+    logger.info("── Startup: DISCOVERED drain ──")
     try:
-        gpu_global = await _backfill_gpu_embeddings_global(engine, settings)
-        if gpu_global > 0:
-            logger.info("Startup GPU backfill (global): %d CLAP/MERT stored", gpu_global)
+        await _drain_discovered(engine, settings)
     except Exception:
-        logger.exception("Startup global GPU backfill failed")
+        logger.exception("Discovered drain crashed")
 
-    # ── Startup Phase 2: ISRC backfill (all missing) ────────────────
-    await _set_status(engine, "startup_isrc", "Backfilling all missing ISRCs")
-    try:
-        isrc_found = await _backfill_isrcs(engine, batch_limit=500)
-        if isrc_found > 0:
-            logger.info("Startup ISRC backfill: %d found", isrc_found)
-    except Exception:
-        logger.exception("Startup ISRC backfill failed")
-
-    # ── Startup Phase 3: Download + cache preview audio ─────────────
-    await _set_status(engine, "startup_audio", "Downloading preview audio files")
-    try:
-        downloaded = await _download_all_previews(engine)
-        if downloaded > 0:
-            logger.info("Startup audio download: %d previews cached", downloaded)
-    except Exception:
-        logger.exception("Startup audio download failed")
-
-    # ── Startup Phase 4: Essentia/ONNX (CPU, on Railway) ────────────
-    await _set_status(engine, "startup_essentia", "Essentia analysis (CPU)")
-    try:
-        lib_enriched = await _fill_library_gaps(engine, settings)
-        if lib_enriched > 0:
-            logger.info("Startup Essentia: %d tracks enriched", lib_enriched)
-    except Exception:
-        logger.exception("Startup Essentia enrichment failed")
-
-    # ── Startup Phase 5: EffNet embedding backfill ──────────────────
-    await _set_status(engine, "startup_effnet", "EffNet embedding backfill")
-    try:
-        backfilled = await _backfill_embeddings(engine, settings)
-        if backfilled > 0:
-            logger.info("Startup EffNet backfill: %d tracks", backfilled)
-    except Exception:
-        logger.exception("Startup EffNet backfill failed")
-
-    logger.info("Startup pipeline complete — entering main loop")
+    logger.info("Startup drains complete — entering main loop")
 
     # ── Main loop: ISRC → audio → essentia → GPU → cobweb ──
     cycle = 0
@@ -1628,6 +1602,180 @@ async def _count_user_linked_gaps(engine) -> int:
         logger.debug("User-linked gaps: %d library songs missing audio features", audio_gap)
 
     return audio_gap
+
+
+async def _count_global_gaps(engine) -> int:
+    """Count GLOBAL/discovered tracks that still need enrichment.
+
+    Sum of three categories:
+      - GPU gaps: audio_embeddings_global rows missing CLAP or MERT
+      - Essentia gaps: global_song_cache with valid ISRC but no audio_features_global row
+      - ISRC gaps: global_song_cache with NULL/empty ISRC (not yet attempted)
+
+    Excludes library songs entirely — those are measured by
+    _count_user_linked_gaps. This is what the DISCOVERED drain watches.
+    """
+    async with engine.begin() as conn:
+        gpu_gap = (await conn.execute(sa.text("""
+            SELECT count(*) FROM audio_embeddings_global
+            WHERE (clap_embedding IS NULL OR mert_embedding IS NULL)
+              AND embedding IS NOT NULL
+        """))).scalar() or 0
+
+        ess_gap = (await conn.execute(sa.text("""
+            SELECT count(*) FROM global_song_cache g
+            WHERE g.isrc IS NOT NULL AND g.isrc <> '' AND g.isrc <> '__NO_ISRC__'
+              AND NOT EXISTS (
+                SELECT 1 FROM audio_features_global afg
+                WHERE afg.isrc = g.isrc AND afg.energy IS NOT NULL
+              )
+        """))).scalar() or 0
+
+        isrc_gap = (await conn.execute(sa.text("""
+            SELECT count(*) FROM global_song_cache
+            WHERE (isrc IS NULL OR isrc = '')
+        """))).scalar() or 0
+
+    total = int(gpu_gap + ess_gap + isrc_gap)
+    if total > 0:
+        logger.debug(
+            "Global gaps: %d GPU, %d Essentia, %d ISRC (total %d)",
+            gpu_gap, ess_gap, isrc_gap, total,
+        )
+    return total
+
+
+# ── Startup Drains ─────────────────────────────────────────────────────
+#
+# Strict two-phase ordering: finish EVERY user-linked enrichment gap
+# (ISRC → preview → Essentia → EffNet → GPU) before touching global /
+# discovered data. Matches the main-loop invariant that cobweb is skipped
+# while any user gap remains; extends it to startup where previously the
+# worker kicked everything off in parallel and the backend fired a
+# second, redundant chain on its own.
+
+
+async def _drain_user_linked(
+    engine, settings, *, max_iterations: int = 10,
+) -> dict[str, int]:
+    """Loop ISRC → preview → Essentia → EffNet → GPU until no user gaps
+    remain (or no progress is made — permanent failures).
+    """
+    totals: dict[str, int] = {
+        "isrc": 0, "previews": 0,
+        "essentia": 0, "effnet": 0, "gpu": 0,
+    }
+
+    for it in range(max_iterations):
+        await _set_status(
+            engine, "user_drain",
+            f"Pass {it + 1}: filling user-linked gaps",
+        )
+
+        progress = 0
+
+        isrc = await _backfill_isrcs(engine, batch_limit=500)
+        totals["isrc"] += isrc
+        progress += isrc
+
+        prev = await _download_all_previews(engine)
+        totals["previews"] += prev
+        progress += prev
+
+        ess = await _fill_library_gaps(engine, settings)
+        totals["essentia"] += ess
+        progress += ess
+
+        effnet = await _backfill_embeddings(engine, settings)
+        totals["effnet"] += effnet
+        progress += effnet
+
+        gpu = await _backfill_gpu_embeddings(engine, settings)
+        totals["gpu"] += gpu
+        progress += gpu
+
+        remaining = await _count_user_linked_gaps(engine)
+        logger.info(
+            "User drain pass %d: +%d isrc, +%d prev, +%d ess, +%d eff, "
+            "+%d gpu  (%d user gaps remain)",
+            it + 1, isrc, prev, ess, effnet, gpu, remaining,
+        )
+
+        if remaining == 0:
+            logger.info(
+                "✓ User-linked drain complete after %d pass(es) — "
+                "totals: %s", it + 1, totals,
+            )
+            return totals
+        if progress == 0:
+            logger.info(
+                "User-linked drain: no progress this pass, %d gaps remain "
+                "(likely permanent failures). Proceeding to discovered.",
+                remaining,
+            )
+            return totals
+
+    logger.warning(
+        "User-linked drain: hit max iterations (%d), proceeding anyway",
+        max_iterations,
+    )
+    return totals
+
+
+async def _drain_discovered(
+    engine, settings, *, max_iterations: int = 10,
+) -> dict[str, int]:
+    """Loop ISRC → Essentia (via _enrich_global_songs) → GPU (with URL
+    fallback per V 6.367) until no global gaps remain.
+    """
+    totals: dict[str, int] = {"isrc": 0, "essentia": 0, "gpu": 0}
+
+    for it in range(max_iterations):
+        await _set_status(
+            engine, "discovered_drain",
+            f"Pass {it + 1}: filling global/discovered gaps",
+        )
+
+        progress = 0
+
+        isrc = await _backfill_isrcs(engine, batch_limit=500)
+        totals["isrc"] += isrc
+        progress += isrc
+
+        ess = await _enrich_global_songs(engine, settings)
+        totals["essentia"] += ess
+        progress += ess
+
+        gpu = await _backfill_gpu_embeddings_global(engine, settings)
+        totals["gpu"] += gpu
+        progress += gpu
+
+        remaining = await _count_global_gaps(engine)
+        logger.info(
+            "Discovered drain pass %d: +%d isrc, +%d ess, +%d gpu  "
+            "(%d global gaps remain)",
+            it + 1, isrc, ess, gpu, remaining,
+        )
+
+        if remaining == 0:
+            logger.info(
+                "✓ Discovered drain complete after %d pass(es) — totals: %s",
+                it + 1, totals,
+            )
+            return totals
+        if progress == 0:
+            logger.info(
+                "Discovered drain: no progress this pass, %d gaps remain "
+                "(permanent failures). Entering main loop.",
+                remaining,
+            )
+            return totals
+
+    logger.warning(
+        "Discovered drain: hit max iterations (%d), entering main loop",
+        max_iterations,
+    )
+    return totals
 
 
 # ── Permanent Failure Marker ───────────────────────────────────────────
