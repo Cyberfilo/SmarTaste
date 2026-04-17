@@ -7,6 +7,20 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.362 — 2026-04-17
+
+### Discovery: exclude tracks already in the user's library
+
+The cobweb candidate-writer in `worker.py::_populate_candidates_from_cobweb` joined `artist_cobweb` with `global_song_cache` on exact `artist_name` and inserted every match. For feat-sourced cobweb artists, that pulled in their primary tracks — which in many cases were also already sitting in the user's library (a library track's featured artist points back to the library track itself via the cobweb's enrichment of the feat artist's top 50 songs).
+
+**Fix:** added a `NOT EXISTS` subquery to the candidate-write SQL. A `global_song_cache` row is excluded when the user has *any* `song_metadata_cache` row marked as library (`library_id IS NOT NULL OR date_added_to_library IS NOT NULL`) that matches either by `catalog_id` (same-service) or by non-empty `isrc` (cross-service — prevents a Spotify library entry slipping through as an Apple-catalog candidate with a different catalog_id).
+
+Also purged existing library-matching rows from `recommendation_candidates` on staging via psql so the effect shows up immediately, not only on the next worker cycle.
+
+No migration. No new env vars.
+
+---
+
 ## V 6.361 — 2026-04-17
 
 ### GPU min-batch raised 3 → 15
