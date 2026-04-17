@@ -200,6 +200,13 @@ def score_candidate(
     # top_artists with a 0.3 weight during profile computation.
     from musicmind.engine.profile import parse_artists
     raw_artist_str = candidate.get("artist_name", "")
+    # Primary artist lowercase — used by the calibration-boost lookup below.
+    # V 6.377 removed the direct `artist_name` binding when rewriting the
+    # match loop; the cal branch still needed it and broke at runtime.
+    _parsed_for_primary = parse_artists(raw_artist_str)
+    artist_name = (
+        _parsed_for_primary[0][0].lower() if _parsed_for_primary else ""
+    )
     artist_scores = {a["name"].lower(): a["score"] for a in top_artists}
 
     artist_match = 0.0
