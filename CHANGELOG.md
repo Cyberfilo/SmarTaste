@@ -7,6 +7,22 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.375 — 2026-04-17
+
+### Sound Space plots every library song, excludes worker-discovered tracks
+
+Two related fixes to `get_library_distributions` (`backend/src/musicmind/api/taste/insights.py`):
+
+**1. Library-only scope.** The query now filters on `library_id IS NOT NULL OR date_added_to_library IS NOT NULL` — the same condition the enrichment-status endpoint uses to identify user-added songs. Previously all enriched rows under the user's user_id were included, which mixed in cobweb-discovered discography tracks (songs the worker pulled in because a library artist was related, but the user never actually added). Those are candidate recommendations, not the user's listening taste, so they no longer pollute the tempo histogram, key distribution, acousticness / valence histograms, and scatter.
+
+**2. Full scatter, not a sample.** The `scatter_limit` default flipped from `200` (stride-sampled) to `None` (include every library song). Performance guard remains — if the library exceeds the cap, stride-sampling kicks back in — but for 99% of users every library song now gets its own dot, which is what the user actually expected when looking at "my library's sound space."
+
+Verified on Filippo's staging DB: 429 library songs now plot (vs. the previous 200-stride subsample of 603 mixed rows).
+
+No backend contract change (the response shape is identical; only the rows included differ). No frontend changes required — the existing `useLibraryDistributions` consumer renders whatever the endpoint returns.
+
+---
+
 ## V 6.374 — 2026-04-17
 
 ### Dashboard v3 hotfix #2 — layout shell had the same `flex-1` trap, and `hsl(var(--…))` is invalid on hex vars
