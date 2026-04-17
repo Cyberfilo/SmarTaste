@@ -206,6 +206,7 @@ async def get_profile(
         genre_vector=profile.get("genre_vector", {}),
         top_artists=top_artists,
         audio_trait_preferences=profile.get("audio_trait_preferences", {}),
+        audio_centroid=profile.get("audio_centroid", {}) or {},
         release_year_distribution=profile.get("release_year_distribution", {}),
         services_included=profile.get("services_included", []),
         breadth=BreadthMetrics(**breadth_raw),

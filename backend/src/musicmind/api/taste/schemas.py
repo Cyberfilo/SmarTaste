@@ -54,7 +54,23 @@ class TasteProfileResponse(BaseModel):
         description="Artists sorted by affinity score descending"
     )
     audio_trait_preferences: dict[str, float] = Field(
-        description="Audio trait -> fraction of library"
+        description=(
+            "Apple Music editorial audio tags (e.g. 'Energetic', 'Upbeat') "
+            "and their library-fraction — sparse for most users because Apple "
+            "tags few tracks. Prefer audio_centroid for the actual numeric "
+            "signature."
+        )
+    )
+    audio_centroid: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Weighted mean of Essentia scalar features across the user's "
+            "enriched library — the true quantitative sound signature. Keys: "
+            "tempo (raw BPM, 60-200 range), energy / brightness / "
+            "danceability / acousticness / valence_proxy / beat_strength "
+            "(0-1 scalars, though some can exceed 1.0 for extreme tracks). "
+            "Empty dict until at least one song has been Essentia-enriched."
+        ),
     )
     release_year_distribution: dict[str, float] = Field(
         description="Year -> fraction of library"
