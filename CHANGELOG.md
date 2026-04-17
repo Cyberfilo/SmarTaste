@@ -7,6 +7,32 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.351 — 2026-04-17
+
+### Unify all discovery through the cobweb — stop surfacing unrelated songs
+
+The admin dashboard was showing candidates like Dua Lipa's "New Rules" and Ezra Collective's "Chapter 7" for an Italian-rap-dominant listening profile. Root cause: `_run_cobweb_cycle` in `worker.py` was running *two independent* discovery systems per cycle — the cobweb (feat-parsed related artists, provably tied to the library) and `_run_discovery_for_user` (four parallel strategies — similar-artist / genre-adjacent / editorial / chart — that wrote to `recommendation_candidates` without consulting the user's genre or artist profile). Editorial playlists and chart filters in particular pulled in whatever the platform was currently promoting in Italy, regardless of the user's actual taste.
+
+**Fix:**
+
+- `_run_cobweb_cycle` in `worker.py` now calls a new `_populate_candidates_from_cobweb` after `_build_user_cobweb`, instead of `_run_discovery_for_user`. The new function does a single `INSERT … SELECT` joining `artist_cobweb` (user-scoped, enriched=true) with `global_song_cache` on exact `artist_name` match, writing rows with `strategy_source='cobweb'` and a discovery_weight derived from the cobweb's own priority (normalised to [0.1, 1.0]). `ON CONFLICT` keeps the max weight and refreshes `fetched_at`.
+- `_run_discovery_for_user` is retained as dead code for now — `api/recommendations/service.py` still imports `discover_similar_artists / _genre_adjacent / _editorial / _chart_filter` for its cold-start fallback path. Ripping those imports out cascades into the recommendations pipeline and belongs in a follow-up.
+
+**Data surgery (run before deploy):**
+
+- `user_indexing_status`: force-completed one row that had been stuck at `step=5, step_name='artist_31_of_33'` since 2026-04-12. The compound library-artist name "Keta & Manny Troublez" isn't resolvable by Apple/Spotify artist-search, so the indexer loop cycled on it indefinitely while `updated_at` kept refreshing. `step=7, completed_at=NOW()` unblocks the cobweb cycle (which skips actively-indexing users). Proper compound-name splitting in the indexer is tracked for a later fix.
+- `recommendation_candidates`: truncated (254 rows across 4 strategy_sources deleted). The cobweb cycle will repopulate on the next worker tick with clean cobweb-sourced rows only.
+
+**Expected effect on the admin dashboard:**
+
+- Songs table will shrink then rebuild with every row tracing back to a real library collaboration.
+- The source badge on the artists table was already "feat" for cobweb entries; no change there.
+- Top artists' discography depth is unchanged by this commit — that's a separate concern (indexer step-5 compound-name handling) to be addressed next.
+
+No migration. No new env vars. No frontend changes.
+
+---
+
 ## V 6.350 — 2026-04-17
 
 ### User dashboard redesign — enrichment-derived taste insights replace stale proxy metrics
