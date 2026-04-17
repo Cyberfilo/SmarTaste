@@ -168,7 +168,7 @@ async def main() -> None:
     except Exception:
         logger.warning("Could not ensure preview_audio_cache table", exc_info=True)
 
-    # ── Startup Phase 0: Cleanup ────────────────────────────────────
+    # ── Startup Phase 0: Cleanup + discography migration ──────────────
     await _set_status(engine, "cleanup", "Removing orphaned audio feature rows")
     try:
         from musicmind.api.admin.progress import cleanup_orphaned_features
@@ -200,8 +200,39 @@ async def main() -> None:
     except Exception:
         logger.exception("Excess discovery cleanup failed")
 
-    # ── Startup Phase 1: ISRC backfill (all missing) ────────────────
-    # ISRC enables global dedup — must run before audio download/enrichment
+    # Clean discography rows from per-user tables: user-linked should only
+    # be songs actually in the user's library. Discography songs (from
+    # indexer steps 2-5) belong in global_song_cache only.
+    await _set_status(engine, "cleanup", "Migrating discography to global")
+    try:
+        migrated = await _migrate_discography_to_global(engine)
+        if migrated > 0:
+            logger.info("Discography migration: moved %d songs to global", migrated)
+    except Exception:
+        logger.exception("Discography migration failed")
+
+    # ── Startup Phase 1: GPU FIRST ──────────────────────────────────
+    # On every redeploy, finish GPU enrichment before anything else.
+    # This is the most expensive step and the one most likely to have
+    # gaps from tunnel/endpoint downtime.
+    await _set_status(engine, "startup_gpu", "GPU enrichment (CLAP + MERT) — PRIORITY")
+    try:
+        gpu_stored = await _backfill_gpu_embeddings(engine, settings)
+        if gpu_stored > 0:
+            logger.info("Startup GPU backfill (per-user): %d CLAP/MERT stored", gpu_stored)
+    except Exception:
+        logger.exception("Startup GPU backfill failed")
+
+    # Global GPU backfill (cobweb + discovery tracks in audio_embeddings_global)
+    await _set_status(engine, "startup_gpu_global", "GPU enrichment — global songs")
+    try:
+        gpu_global = await _backfill_gpu_embeddings_global(engine, settings)
+        if gpu_global > 0:
+            logger.info("Startup GPU backfill (global): %d CLAP/MERT stored", gpu_global)
+    except Exception:
+        logger.exception("Startup global GPU backfill failed")
+
+    # ── Startup Phase 2: ISRC backfill (all missing) ────────────────
     await _set_status(engine, "startup_isrc", "Backfilling all missing ISRCs")
     try:
         isrc_found = await _backfill_isrcs(engine, batch_limit=500)
@@ -210,9 +241,7 @@ async def main() -> None:
     except Exception:
         logger.exception("Startup ISRC backfill failed")
 
-    # ── Startup Phase 2: Download + cache preview audio ─────────────
-    # Refresh expired Deezer URLs and cache bytes for all unenriched tracks.
-    # Cached bytes feed both Essentia (Phase 3) and GPU (Phase 4).
+    # ── Startup Phase 3: Download + cache preview audio ─────────────
     await _set_status(engine, "startup_audio", "Downloading preview audio files")
     try:
         downloaded = await _download_all_previews(engine)
@@ -221,8 +250,7 @@ async def main() -> None:
     except Exception:
         logger.exception("Startup audio download failed")
 
-    # ── Startup Phase 3: Essentia/ONNX (CPU, on Railway) ────────────
-    # Uses cached bytes — no URL downloads needed
+    # ── Startup Phase 4: Essentia/ONNX (CPU, on Railway) ────────────
     await _set_status(engine, "startup_essentia", "Essentia analysis (CPU)")
     try:
         lib_enriched = await _fill_library_gaps(engine, settings)
@@ -231,7 +259,7 @@ async def main() -> None:
     except Exception:
         logger.exception("Startup Essentia enrichment failed")
 
-    # ── Startup Phase 4a: EffNet embedding backfill ──────────────────
+    # ── Startup Phase 5: EffNet embedding backfill ──────────────────
     await _set_status(engine, "startup_effnet", "EffNet embedding backfill")
     try:
         backfilled = await _backfill_embeddings(engine, settings)
@@ -239,15 +267,6 @@ async def main() -> None:
             logger.info("Startup EffNet backfill: %d tracks", backfilled)
     except Exception:
         logger.exception("Startup EffNet backfill failed")
-
-    # ── Startup Phase 4b: GPU enrichment (CLAP + MERT via Modal) ──
-    await _set_status(engine, "startup_gpu", "GPU enrichment (CLAP + MERT)")
-    try:
-        gpu_stored = await _backfill_gpu_embeddings(engine, settings)
-        if gpu_stored > 0:
-            logger.info("Startup GPU backfill: %d CLAP/MERT stored", gpu_stored)
-    except Exception:
-        logger.exception("Startup GPU backfill failed")
 
     logger.info("Startup pipeline complete — entering main loop")
 
@@ -386,6 +405,13 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d failed", cycle)
 
+        # ── Phase 3: Library sync (every 2h) ──────────────────────────
+        # Re-fetch user library from Apple/Spotify and enrich new songs.
+        try:
+            await _sync_user_libraries(engine, settings)
+        except Exception:
+            logger.exception("Cycle %d library sync failed", cycle)
+
         # Log summary of permanently-skipped tracks once per cycle
         perm_failed = sum(
             1 for v in _failed_tracks.values()
@@ -403,6 +429,104 @@ async def main() -> None:
 
         await _set_status(engine, "idle", f"Sleeping {POLL_INTERVAL}s", cycle=cycle)
         await asyncio.sleep(POLL_INTERVAL)
+
+
+# ── Discography Migration (per-user → global) ─────────────────────────────
+
+
+async def _migrate_discography_to_global(engine) -> int:
+    """Move discography songs from per-user tables to global-only.
+
+    User-linked tables (song_metadata_cache, audio_features_cache,
+    audio_embeddings) should only contain songs actually in the user's
+    library. Discography tracks from indexer steps 2-5 were historically
+    written per-user; this promotes their enrichment to global tables
+    and deletes the per-user rows.
+
+    Safe to call repeatedly (idempotent via ON CONFLICT DO NOTHING).
+    """
+    migrated = 0
+    try:
+        async with engine.begin() as conn:
+            # Step 1: promote enrichment from per-user to global
+            # audio_features_cache → audio_features_global (by ISRC)
+            promoted = await conn.execute(sa.text("""
+                INSERT INTO audio_features_global
+                  (isrc, tempo, energy, danceability, brightness,
+                   beat_strength, key, scale, loudness_lufs, acousticness,
+                   valence_proxy, feature_source, enriched_at)
+                SELECT s.isrc, af.tempo, af.energy, af.danceability, af.brightness,
+                       af.beat_strength, af.key, af.scale, af.loudness_lufs,
+                       af.acousticness, af.valence_proxy, af.feature_source, af.enriched_at
+                FROM song_metadata_cache s
+                JOIN audio_features_cache af
+                  ON af.catalog_id = s.catalog_id AND af.user_id = s.user_id
+                WHERE s.library_id IS NULL
+                  AND s.date_added_to_library IS NULL
+                  AND s.isrc IS NOT NULL AND s.isrc != '' AND s.isrc != '__NO_ISRC__'
+                  AND af.energy IS NOT NULL
+                ON CONFLICT (isrc) DO NOTHING
+            """))
+            if promoted.rowcount > 0:
+                logger.info("Promoted %d feature rows to global", promoted.rowcount)
+
+            # audio_embeddings → audio_embeddings_global (by ISRC)
+            await conn.execute(sa.text("""
+                INSERT INTO audio_embeddings_global
+                  (isrc, embedding, clap_embedding, mert_embedding)
+                SELECT s.isrc, ae.embedding, ae.clap_embedding, ae.mert_embedding
+                FROM song_metadata_cache s
+                JOIN audio_embeddings ae
+                  ON ae.catalog_id = s.catalog_id AND ae.user_id = s.user_id
+                WHERE s.library_id IS NULL
+                  AND s.date_added_to_library IS NULL
+                  AND s.isrc IS NOT NULL AND s.isrc != '' AND s.isrc != '__NO_ISRC__'
+                ON CONFLICT (isrc) DO NOTHING
+            """))
+
+            # song_metadata_cache → global_song_cache (metadata)
+            await conn.execute(sa.text("""
+                INSERT INTO global_song_cache
+                  (catalog_id, name, artist_name, album_name, genre_names,
+                   isrc, duration_ms, release_date, preview_url, service_source)
+                SELECT catalog_id, name, artist_name, album_name, genre_names,
+                       isrc, duration_ms, release_date, preview_url, service_source
+                FROM song_metadata_cache
+                WHERE library_id IS NULL
+                  AND date_added_to_library IS NULL
+                ON CONFLICT (catalog_id) DO NOTHING
+            """))
+
+            # Step 2: delete per-user discography rows
+            del_emb = await conn.execute(sa.text("""
+                DELETE FROM audio_embeddings ae
+                USING song_metadata_cache s
+                WHERE ae.catalog_id = s.catalog_id AND ae.user_id = s.user_id
+                  AND s.library_id IS NULL AND s.date_added_to_library IS NULL
+            """))
+
+            del_af = await conn.execute(sa.text("""
+                DELETE FROM audio_features_cache af
+                USING song_metadata_cache s
+                WHERE af.catalog_id = s.catalog_id AND af.user_id = s.user_id
+                  AND s.library_id IS NULL AND s.date_added_to_library IS NULL
+            """))
+
+            del_smc = await conn.execute(sa.text("""
+                DELETE FROM song_metadata_cache
+                WHERE library_id IS NULL AND date_added_to_library IS NULL
+            """))
+
+            migrated = del_smc.rowcount
+            if migrated > 0:
+                logger.info(
+                    "Discography cleanup: deleted %d songs, %d features, %d embeddings from per-user",
+                    del_smc.rowcount, del_af.rowcount, del_emb.rowcount,
+                )
+    except Exception:
+        logger.exception("Discography migration failed")
+
+    return migrated
 
 
 # ── Preview Audio Cache Cleanup ──────────────────────────────────────────
@@ -612,6 +736,52 @@ async def _run_cobweb_cycle(
     stats["songs_enriched"] = enriched
 
     return stats
+
+
+# ── Library Sync (2h cadence) ──────────────────────────────────────────
+
+# Track last library sync per user (in-memory; resets on redeploy).
+_last_library_sync: dict[str, float] = {}
+LIBRARY_SYNC_INTERVAL_SECONDS = 2 * 3600  # 2 hours
+
+
+async def _sync_user_libraries(engine, settings) -> None:
+    """Re-fetch each user's library from their connected service and enrich new songs.
+
+    Cadence: every 2h per user (tracked in-memory; resets on redeploy).
+    Uses TasteService.get_profile(force_refresh=True) which:
+    1. Fetches library from Apple/Spotify API
+    2. Caches new songs in song_metadata_cache
+    3. Rebuilds taste_profile_snapshots with new data
+    """
+    from musicmind.db.schema import users
+    from musicmind.security.encryption import EncryptionService
+
+    now = time.monotonic()
+
+    async with engine.begin() as conn:
+        user_rows = (await conn.execute(sa.select(users.c.id))).fetchall()
+
+    encryption = EncryptionService(settings.fernet_key)
+
+    for user_row in user_rows:
+        uid = user_row.id
+        last = _last_library_sync.get(uid, 0.0)
+        if now - last < LIBRARY_SYNC_INTERVAL_SECONDS:
+            continue
+
+        try:
+            from musicmind.api.taste.service import TasteService
+
+            await _set_status(engine, "library_sync", f"Syncing library for {uid[:8]}")
+            await TasteService().get_profile(
+                engine, encryption, settings,
+                user_id=uid, force_refresh=True,
+            )
+            _last_library_sync[uid] = now
+            logger.info("Library sync complete for user %s", uid[:8])
+        except Exception:
+            logger.debug("Library sync failed for user %s", uid[:8], exc_info=True)
 
 
 async def _run_discovery_for_user(
@@ -1327,16 +1497,17 @@ async def _unlink_excess_discoveries(engine) -> int:
 
 
 async def _count_user_linked_gaps(engine) -> int:
-    """Count user-linked songs that still need Essentia enrichment.
+    """Count LIBRARY songs (not discography) that still need Essentia enrichment.
 
-    Includes: songs with no features, AND songs with stale/mixed features
-    from deprecated sources (deezer, reccobeats, soundstat).
-    Excludes: purely essentia-enriched AND purely permanently-failed.
+    Only counts songs the user actually has in their library (library_id or
+    date_added_to_library set). Discography tracks from indexer steps 2-5
+    are global-only and don't block the main loop.
     """
     async with engine.begin() as conn:
         audio_gap = (await conn.execute(sa.text("""
             SELECT count(*) FROM song_metadata_cache s
-            WHERE NOT EXISTS (
+            WHERE (s.library_id IS NOT NULL OR s.date_added_to_library IS NOT NULL)
+              AND NOT EXISTS (
                 SELECT 1 FROM audio_features_cache af
                 WHERE af.catalog_id = s.catalog_id
                   AND af.user_id = s.user_id
@@ -1353,7 +1524,7 @@ async def _count_user_linked_gaps(engine) -> int:
         """))).scalar() or 0
 
     if audio_gap > 0:
-        logger.debug("User-linked gaps: %d songs missing audio features", audio_gap)
+        logger.debug("User-linked gaps: %d library songs missing audio features", audio_gap)
 
     return audio_gap
 
@@ -1398,11 +1569,11 @@ async def _mark_permanently_failed(engine, catalog_id: str, user_id: str) -> Non
 
 
 async def _fill_library_gaps(engine, settings) -> int:
-    """Find ALL user songs missing audio features and enrich them.
+    """Find user LIBRARY songs missing audio features and enrich them.
 
-    Processes every song in song_metadata_cache that lacks audio_features_cache
-    entries — library AND discography. This matches _count_user_linked_gaps()
-    so the main loop doesn't get stuck when non-library songs have gaps.
+    Only processes songs the user actually has in their library (library_id or
+    date_added_to_library set). Discography tracks are global-only and enriched
+    by _enrich_global_songs instead.
     """
     from musicmind.db.schema import (
         audio_features_cache,
@@ -1491,6 +1662,10 @@ async def _fill_library_gaps(engine, settings) -> int:
                 sa.select(song_metadata_cache).where(
                     sa.and_(
                         song_metadata_cache.c.user_id == user_id,
+                        sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ),
                         song_metadata_cache.c.catalog_id.notin_(attempted_ids),
                     )
                 )
@@ -1997,6 +2172,113 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
             )
 
     return total_stored
+
+
+async def _backfill_gpu_embeddings_global(engine, settings) -> int:
+    """GPU backfill for global songs (audio_embeddings_global).
+
+    Same as _backfill_gpu_embeddings but targets the shared ISRC-keyed
+    table. Cobweb + discovery tracks live here; they need CLAP/MERT for
+    scoring. Runs at startup as the first enrichment priority.
+    """
+    import base64
+
+    from musicmind.db.schema import audio_embeddings_global
+    from musicmind.engine.enrichment.gpu_client import enrich_batch_bytes_via_gpu
+    from musicmind.engine.enrichment.orchestrator import _get_cached_audio
+
+    modal_url = getattr(settings, "modal_endpoint_url", None)
+    if not modal_url:
+        logger.debug("Global GPU backfill skipped: no modal_endpoint_url")
+        return 0
+
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(
+                audio_embeddings_global.c.isrc,
+            ).where(
+                sa.and_(
+                    audio_embeddings_global.c.clap_embedding.is_(None),
+                    audio_embeddings_global.c.embedding.isnot(None),
+                )
+            ).limit(200)
+        )
+        rows = result.fetchall()
+
+    if not rows:
+        return 0
+
+    logger.info("Global GPU backfill: %d ISRCs missing CLAP/MERT", len(rows))
+
+    # Map ISRC → catalog_id via global_song_cache for preview lookup
+    from musicmind.db.schema import global_song_cache
+    isrcs = [r.isrc for r in rows if r.isrc]
+    isrc_to_cid: dict[str, str] = {}
+    if isrcs:
+        async with engine.begin() as conn:
+            gsc = await conn.execute(
+                sa.select(
+                    global_song_cache.c.catalog_id,
+                    global_song_cache.c.isrc,
+                ).where(
+                    sa.and_(
+                        global_song_cache.c.isrc.in_(isrcs),
+                        global_song_cache.c.isrc != NO_ISRC_SENTINEL,
+                    )
+                )
+            )
+            for r in gsc:
+                if r.isrc:
+                    isrc_to_cid[r.isrc] = r.catalog_id
+
+    batch_items: list[tuple[str, bytes | None]] = []
+    for r in rows:
+        cid = isrc_to_cid.get(r.isrc, "")
+        cached = await _get_cached_audio(engine, cid) if cid else None
+        if cached:
+            batch_items.append((r.isrc, cached))
+
+    if not batch_items:
+        logger.debug("Global GPU backfill: no cached audio available")
+        return 0
+
+    total = 0
+    gpu_batch_size = 10
+    for i in range(0, len(batch_items), gpu_batch_size):
+        chunk = batch_items[i:i + gpu_batch_size]
+        b64_items = [base64.b64encode(audio).decode("ascii") for _, audio in chunk]
+        try:
+            results = await enrich_batch_bytes_via_gpu(modal_url, b64_items)
+            if not results:
+                continue
+            async with engine.begin() as conn:
+                for j, res in enumerate(results):
+                    if j >= len(chunk):
+                        break
+                    isrc = chunk[j][0]
+                    clap = res.get("clap_embedding")
+                    mert = res.get("mert_embedding")
+                    if clap or mert:
+                        updates: dict[str, Any] = {}
+                        if clap:
+                            updates["clap_embedding"] = clap
+                        if mert:
+                            updates["mert_embedding"] = mert
+                        await conn.execute(
+                            sa.update(audio_embeddings_global)
+                            .where(audio_embeddings_global.c.isrc == isrc)
+                            .values(**updates)
+                        )
+                        total += 1
+        except Exception:
+            logger.warning(
+                "Global GPU batch enrichment failed for %d items",
+                len(chunk),
+            )
+
+    if total > 0:
+        logger.info("Global GPU backfill: %d CLAP/MERT stored", total)
+    return total
 
 
 # ── ISRC Backfill ────────────────────────────────────────────────────────
