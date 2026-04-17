@@ -187,10 +187,32 @@ def score_candidate(
     if has_scalar:
         scalar_score = scalar_audio_similarity(user_audio_centroid, audio_features)
 
-    # ── 4. Artist affinity — penalized if wrong genre ─────
-    artist_name = candidate.get("artist_name", "").lower()
+    # ── 4. Artist affinity — three-tier match, wrong-genre penalised ─────
+    # Tier 1 (primary match): candidate's primary artist is in user's top —
+    #         full score, e.g. "Capo Plaza" on a Capo Plaza track.
+    # Tier 2 (feat match): candidate's primary isn't in top, but one of its
+    #         featured artists is — score discounted by FEATURING_WEIGHT=0.3.
+    #         e.g. a "Lacrim feat. Simba La Rue" track where the user has
+    #         Simba La Rue in their library but not Lacrim.
+    # Tier 3 (no match): neither → 0.
+    # The "candidate's primary was feat'd on library tracks" case is already
+    # handled by build_artist_affinity, which injects feat artists into
+    # top_artists with a 0.3 weight during profile computation.
+    from musicmind.engine.profile import parse_artists
+    raw_artist_str = candidate.get("artist_name", "")
     artist_scores = {a["name"].lower(): a["score"] for a in top_artists}
-    artist_match = artist_scores.get(artist_name, 0.0)
+
+    artist_match = 0.0
+    matched_as = ""
+    for name, component_weight in parse_artists(raw_artist_str):
+        score = artist_scores.get(name.lower(), 0.0)
+        if score <= 0:
+            continue
+        weighted = score * component_weight  # primary 1.0, feat 0.3
+        if weighted > artist_match:
+            artist_match = weighted
+            matched_as = "primary" if component_weight >= 1.0 else "feat"
+
     if artist_match > 0 and genre_score < 0.2:
         artist_match *= 0.3
 
@@ -293,7 +315,12 @@ def score_candidate(
     if has_scalar and scalar_score > 0.7:
         parts.append("similar energy/tempo")
     if artist_match > 0.5:
-        parts.append(f"you like {candidate.get('artist_name', 'this artist')}")
+        if matched_as == "feat":
+            parts.append(
+                f"features an artist you like ({candidate.get('artist_name', '')})"
+            )
+        else:
+            parts.append(f"you like {candidate.get('artist_name', 'this artist')}")
     if cal_boost > 0.1:
         parts.append("top calibrated artist")
     if cross_bonus > 0:
