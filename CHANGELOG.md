@@ -7,6 +7,23 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.366 — 2026-04-17
+
+### Fix: column-name typos in `_migrate_discography_to_global` INSERT
+
+Railway worker was logging `UndefinedColumnError: column "loudness_lufs" of relation "audio_features_global" does not exist` on every cycle. The SQL in `worker._migrate_discography_to_global` that promotes per-user discography enrichment to the global table referenced two columns that don't exist in the live schema:
+
+- `loudness_lufs` — both `audio_features_cache` and `audio_features_global` use plain `loudness`
+- `enriched_at` — only `audio_features_cache` has it; `audio_features_global` has `analyzed_at` with a `NOW()` default
+
+**Fix:** `backend/src/musicmind/worker.py` `_migrate_discography_to_global`:
+- `loudness_lufs` → `loudness` (both INSERT column list and SELECT)
+- Dropped `enriched_at` from the column list; the `NOW()` default on `analyzed_at` fills in automatically
+
+No migration. No schema change. No impact on enrichment logic — this was purely a typo in the migration SQL.
+
+---
+
 ## V 6.365 — 2026-04-17
 
 ### Preview-URL resolution: iTunes Search as the third fallback
