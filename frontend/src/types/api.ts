@@ -46,6 +46,7 @@ export interface TasteProfile {
   genre_vector: Record<string, number>;
   top_artists: ArtistEntry[];
   audio_trait_preferences: Record<string, number>;
+  audio_centroid?: Record<string, number>;
   release_year_distribution: Record<string, number>;
   services_included: string[];
   breadth?: BreadthMetrics | null;

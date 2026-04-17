@@ -95,7 +95,7 @@ function describeSound(traits: Record<string, number>): string[] {
   const dance = traits.danceability ?? 0;
   const valence = traits.valence_proxy ?? 0;
   const acoustic = traits.acousticness ?? 0;
-  const tempo = traits.tempo ?? 0;
+  const tempoBpm = traits.tempo ?? 0; // raw BPM (60-200 range)
   const beat = traits.beat_strength ?? 0;
 
   if (energy > 0.68) descriptors.push("high-energy");
@@ -110,9 +110,36 @@ function describeSound(traits: Record<string, number>): string[] {
   if (acoustic > 0.5) descriptors.push("organic");
   else if (acoustic > 0 && acoustic < 0.2) descriptors.push("electronic");
 
-  if (descriptors.length < 2 && tempo > 0.6) descriptors.push("up-tempo");
+  if (descriptors.length < 2) {
+    if (tempoBpm >= 130) descriptors.push("up-tempo");
+    else if (tempoBpm > 0 && tempoBpm < 90) descriptors.push("slow-paced");
+  }
 
   return descriptors.slice(0, 3);
+}
+
+function clamp01(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  if (v >= 1) return 1;
+  return v;
+}
+
+function normalizeTraitValue(key: string, raw: number): number {
+  // Essentia returns raw BPM for tempo (60-200). Everything else is nominally
+  // 0-1 but danceability / beat_strength can exceed 1.0 on extreme tracks.
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  if (key === "tempo") {
+    // Normalize 60-200 BPM to 0-1 for the radar visualization.
+    const clamped = Math.max(60, Math.min(200, raw));
+    return (clamped - 60) / 140;
+  }
+  return clamp01(raw);
+}
+
+function formatTraitValue(key: string, raw: number): string {
+  if (!Number.isFinite(raw) || raw <= 0) return "—";
+  if (key === "tempo") return `${Math.round(raw)} BPM`;
+  return `${Math.round(clamp01(raw) * 100)}%`;
 }
 
 function topGenreName(genreVector: Record<string, number>): string | null {
@@ -290,13 +317,22 @@ function Artwork({
 }
 
 function SoundSignature({ profile }: { profile: TasteProfile }) {
-  const traits = profile.audio_trait_preferences ?? {};
+  // Prefer audio_centroid (real Essentia scalars) — falls back to the
+  // legacy audio_trait_preferences field only if the centroid is empty,
+  // which shouldn't happen once the profile is rebuilt post-V6.365.
+  const rawCentroid = profile.audio_centroid ?? {};
+  const hasCentroid = Object.values(rawCentroid).some((v) => v > 0);
+  const traits: Record<string, number> = hasCentroid
+    ? rawCentroid
+    : (profile.audio_trait_preferences ?? {});
+
   const orderedTraits = TRAIT_ORDER.map((k) => ({
     key: k,
     label: TRAIT_LABELS[k],
     description: TRAIT_DESCRIPTIONS[k],
-    value: traits[k] ?? 0,
-  })).filter((t) => t.value > 0);
+    raw: traits[k] ?? 0,
+    normalized: normalizeTraitValue(k, traits[k] ?? 0),
+  })).filter((t) => t.raw > 0);
 
   const hasTraits = orderedTraits.length >= 3;
   const descriptors = hasTraits ? describeSound(traits) : [];
@@ -304,7 +340,7 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
 
   const radarData = orderedTraits.map((t) => ({
     trait: t.label,
-    value: Math.max(0, Math.min(100, Math.round(t.value * 100))),
+    value: Math.round(t.normalized * 100),
     fullMark: 100,
   }));
 
@@ -377,22 +413,20 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
 
               <ul className="grid grid-cols-1 gap-2 self-center sm:grid-cols-2">
                 {orderedTraits.map((t) => {
-                  const pct = Math.max(
-                    0,
-                    Math.min(100, Math.round(t.value * 100)),
-                  );
+                  const barPct = Math.round(t.normalized * 100);
+                  const display = formatTraitValue(t.key, t.raw);
                   return (
                     <li key={t.key} className="space-y-1">
                       <div className="flex items-baseline justify-between gap-2">
                         <span className="text-sm font-medium">{t.label}</span>
                         <span className="text-sm font-semibold tabular-nums text-purple-300">
-                          {pct}%
+                          {display}
                         </span>
                       </div>
                       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60">
                         <div
                           className="h-full rounded-full bg-gradient-to-r from-purple-600 to-purple-400 transition-all duration-700"
-                          style={{ width: `${pct}%` }}
+                          style={{ width: `${barPct}%` }}
                         />
                       </div>
                       <p className="text-[11px] text-muted-foreground">
