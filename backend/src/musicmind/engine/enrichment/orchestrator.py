@@ -115,8 +115,9 @@ async def enrich_tracks(
 
         from musicmind.db.schema import audio_embeddings
         from musicmind.engine.enrichment.gpu_client import (
-            enrich_batch_bytes_via_gpu,
-            enrich_batch_via_gpu,
+            GPU_MIN_BATCH,
+            enrich_bytes_concurrent,
+            enrich_urls_concurrent,
         )
 
         # Collect all track catalog_ids that might need GPU enrichment
@@ -184,6 +185,18 @@ async def enrich_tracks(
                 total_gpu, len(bytes_candidates), len(url_candidates),
             )
 
+        # Defer tiny batches to the next worker backfill cycle — it queries
+        # up to 200 pending tracks at once, so these will be batched with
+        # others instead of spinning up the GPU for 1-2 items.
+        if 0 < total_gpu < GPU_MIN_BATCH:
+            logger.info(
+                "Phase 2: deferring %d tracks (< %d min batch) to next "
+                "worker backfill cycle",
+                total_gpu, GPU_MIN_BATCH,
+            )
+            bytes_candidates = []
+            url_candidates = []
+
         # Helper to store GPU results
         async def _store_gpu_result(
             t: dict[str, Any], gpu_data: dict[str, Any],
@@ -218,52 +231,41 @@ async def enrich_tracks(
                 })
             return True
 
-        # Process bytes-based candidates (preferred — no URL expiry)
-        gpu_batch_size = 10
-        for batch_start in range(
-            0, len(bytes_candidates), gpu_batch_size,
-        ):
-            batch = bytes_candidates[
-                batch_start:batch_start + gpu_batch_size
-            ]
+        # Process bytes-based candidates (preferred — no URL expiry).
+        # enrich_bytes_concurrent splits into GPU_BATCH_SIZE chunks and
+        # dispatches up to GPU_MAX_CONCURRENT in parallel.
+        if bytes_candidates:
             b64_items = [
                 base64.b64encode(audio).decode("ascii")
-                for _, audio in batch
+                for _, audio in bytes_candidates
             ]
             try:
-                gpu_results = await enrich_batch_bytes_via_gpu(
+                gpu_results = await enrich_bytes_concurrent(
                     b64_items, modal_endpoint_url,
                 )
-                for (t, _), gpu_data in zip(batch, gpu_results):
+                for (t, _), gpu_data in zip(bytes_candidates, gpu_results):
                     if await _store_gpu_result(t, gpu_data):
                         stats["gpu_enriched"] += 1
             except Exception:
                 logger.warning(
-                    "Phase 2 GPU bytes batch %d-%d failed",
-                    batch_start, batch_start + len(batch),
-                    exc_info=True,
+                    "Phase 2 GPU bytes dispatch failed (%d items)",
+                    len(bytes_candidates), exc_info=True,
                 )
 
         # Process URL-based fallback candidates
-        for batch_start in range(
-            0, len(url_candidates), gpu_batch_size,
-        ):
-            batch = url_candidates[
-                batch_start:batch_start + gpu_batch_size
-            ]
-            batch_urls = [url for _, url in batch]
+        if url_candidates:
+            urls = [url for _, url in url_candidates]
             try:
-                gpu_results = await enrich_batch_via_gpu(
-                    batch_urls, modal_endpoint_url,
+                gpu_results = await enrich_urls_concurrent(
+                    urls, modal_endpoint_url,
                 )
-                for (t, _), gpu_data in zip(batch, gpu_results):
+                for (t, _), gpu_data in zip(url_candidates, gpu_results):
                     if await _store_gpu_result(t, gpu_data):
                         stats["gpu_enriched"] += 1
             except Exception:
                 logger.warning(
-                    "Phase 2 GPU URL batch %d-%d failed",
-                    batch_start, batch_start + len(batch),
-                    exc_info=True,
+                    "Phase 2 GPU URL dispatch failed (%d items)",
+                    len(url_candidates), exc_info=True,
                 )
 
         if total_gpu > 0:
