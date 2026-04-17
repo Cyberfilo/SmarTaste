@@ -414,16 +414,27 @@ async def _enrich_single_track(
                 isrc=isrc or None,
             )
             if preview_url:
-                # Cache the Deezer URL for future use
-                async with engine.begin() as conn:
-                    from musicmind.db.schema import song_metadata_cache as smc
-                    await conn.execute(
-                        sa.update(smc)
-                        .where(sa.and_(smc.c.catalog_id == catalog_id))
-                        .values(preview_url=preview_url)
-                    )
+                await _cache_preview_url(engine, catalog_id, preview_url)
         except Exception:
             logger.debug("Deezer preview fallback failed for %s", catalog_id)
+
+    # Second fallback: iTunes Search API. Apple's public catalogue has
+    # stronger coverage than Deezer for Italian rap / drill — Apple is the
+    # dominant service in that market, Deezer is a distant third. Same MP3
+    # format + 30s length, so Essentia consumes it identically.
+    if not preview_url:
+        try:
+            from musicmind.engine.enrichment.itunes import (
+                search_preview_url as itunes_search_preview_url,
+            )
+            preview_url = await itunes_search_preview_url(
+                name=track.get("name", ""),
+                artist_name=track.get("artist_name", ""),
+            )
+            if preview_url:
+                await _cache_preview_url(engine, catalog_id, preview_url)
+        except Exception:
+            logger.debug("iTunes preview fallback failed for %s", catalog_id)
 
     # No preview URL from any source → permanently mark as failed
     if not preview_url:
@@ -603,6 +614,27 @@ def _merge_features(
             feature_source[field] = source_name
             filled += 1
     return filled
+
+
+async def _cache_preview_url(engine: Any, catalog_id: str, preview_url: str) -> None:
+    """Persist a resolved preview URL to BOTH song_metadata_cache and
+    global_song_cache. A single catalog_id lives in exactly one of the two
+    for any given enrichment, so the updates with no matching row are
+    silent no-ops — cheaper than branching on which table owns the row.
+    """
+    from musicmind.db.schema import global_song_cache, song_metadata_cache as smc
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.update(smc)
+            .where(smc.c.catalog_id == catalog_id)
+            .values(preview_url=preview_url)
+        )
+        await conn.execute(
+            sa.update(global_song_cache)
+            .where(global_song_cache.c.catalog_id == catalog_id)
+            .values(preview_url=preview_url)
+        )
 
 
 async def _get_cached_audio(engine: Any, catalog_id: str) -> bytes | None:
