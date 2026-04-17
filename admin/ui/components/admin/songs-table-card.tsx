@@ -161,7 +161,6 @@ function SongRowView({
         </td>
         <td className="px-3 py-2">
           {row.artwork_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
             <img
               src={row.artwork_url}
               alt=""

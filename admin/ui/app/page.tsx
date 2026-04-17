@@ -3,17 +3,16 @@
 /**
  * Admin dashboard — enrichment pipeline monitoring, per-song + per-artist
  * drill-down, worker heartbeat, diagnostic insights. Auto-refreshes every 30s.
- * Restricted to users with is_admin flag.
+ *
+ * Gate is handled upstream by the Python admin service (HMAC cookie over
+ * ADMIN_PASSWORD). By the time this page renders the visitor is authorised.
  */
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
   Database,
-  Loader2,
   Music,
   Shield,
   ShieldAlert,
@@ -22,7 +21,6 @@ import {
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useAuthStore } from "@/stores/auth-store";
 import { apiFetch } from "@/lib/api";
 import { SongsTableCard } from "@/components/admin/songs-table-card";
 import { ArtistsTableCard } from "@/components/admin/artists-table-card";
@@ -82,8 +80,6 @@ interface DiagnosticsResponse {
   };
 }
 
-// ── Helpers ──────────────────────────────────────────────────
-
 const REFRESH_INTERVAL = 30_000;
 
 function timeAgo(iso: string | null | undefined): string {
@@ -95,23 +91,10 @@ function timeAgo(iso: string | null | undefined): string {
   return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
-// ── Component ────────────────────────────────────────────────
-
 export default function AdminPage() {
-  const router = useRouter();
-  const { user, isLoading: authLoading } = useAuthStore();
-
-  // Redirect non-admins
-  useEffect(() => {
-    if (!authLoading && user && !user.is_admin) {
-      router.replace("/dashboard");
-    }
-  }, [authLoading, user, router]);
-
   const { data: status, isLoading: statusLoading } = useQuery<SystemStatus>({
     queryKey: ["admin-status"],
     queryFn: () => apiFetch("/api/admin/status"),
-    enabled: !!user?.is_admin,
     refetchInterval: REFRESH_INTERVAL,
     staleTime: REFRESH_INTERVAL - 5000,
   });
@@ -119,7 +102,6 @@ export default function AdminPage() {
   const { data: worker, isLoading: workerLoading } = useQuery<WorkerStatus>({
     queryKey: ["admin-worker"],
     queryFn: () => apiFetch("/api/admin/worker-status"),
-    enabled: !!user?.is_admin,
     refetchInterval: REFRESH_INTERVAL,
     staleTime: REFRESH_INTERVAL - 5000,
   });
@@ -127,23 +109,9 @@ export default function AdminPage() {
   const { data: diagnostics } = useQuery<DiagnosticsResponse>({
     queryKey: ["admin-diagnostics"],
     queryFn: () => apiFetch("/api/admin/diagnostics"),
-    enabled: !!user?.is_admin,
     refetchInterval: REFRESH_INTERVAL,
     staleTime: REFRESH_INTERVAL - 5000,
   });
-
-  // Gate: don't render until auth is resolved
-  if (authLoading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (!user?.is_admin) {
-    return null;
-  }
 
   const isLoading = statusLoading || workerLoading;
 
@@ -155,21 +123,32 @@ export default function AdminPage() {
           <Shield className="h-6 w-6 text-purple-400" />
           <div>
             <h1 className="text-2xl font-bold tracking-tight">
-              Admin Dashboard
+              SmarTaste Admin
             </h1>
             <p className="text-sm text-muted-foreground">
               Enrichment pipeline monitoring
               {status && (
-                <span className="ml-2 text-xs opacity-60">
-                  v{status.version}
-                </span>
+                <span className="ml-2 text-xs opacity-60">v{status.version}</span>
               )}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />
-          Auto-refresh 30s
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />
+            Auto-refresh 30s
+          </span>
+          <a
+            href="/auth/logout"
+            className="rounded border border-border px-2 py-1 text-[11px] hover:bg-muted"
+            onClick={async (e) => {
+              e.preventDefault();
+              await fetch("/auth/logout", { method: "POST" });
+              window.location.href = "/login";
+            }}
+          >
+            Log out
+          </a>
         </div>
       </div>
 
@@ -241,10 +220,10 @@ export default function AdminPage() {
         />
       </div>
 
-      {/* ── 2. Songs Table (per-song enrichment grid) ───────── */}
+      {/* ── 2. Songs Table ─────────────────────────────────── */}
       <SongsTableCard />
 
-      {/* ── 3. Artists Table (source + library/discovery ratio) */}
+      {/* ── 3. Artists Table ──────────────────────────────── */}
       <ArtistsTableCard />
 
       {/* ── 4. Insights Panel ──────────────────────────────── */}
@@ -272,7 +251,7 @@ export default function AdminPage() {
         </Card>
       )}
 
-      {/* ── 5. Failure Analysis (from logs DB) ─────────────── */}
+      {/* ── 5. Failure Analysis ────────────────────────────── */}
       {diagnostics?.failure_analysis &&
         diagnostics.failure_analysis.today.length > 0 && (
           <Card>
@@ -305,8 +284,6 @@ export default function AdminPage() {
     </div>
   );
 }
-
-// ── Sub-components ───────────────────────────────────────────
 
 function OverviewCard({
   icon: Icon,

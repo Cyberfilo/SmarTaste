@@ -7,6 +7,56 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.340 — 2026-04-17
+
+### Admin dashboard relocated from main frontend to the standalone admin Railway service
+
+The V 6.330 React dashboard (songs/artists drill-down tables + overview bar + diagnostics) was originally built inside the user-facing Next.js frontend at `frontend/src/app/(app)/admin/`. It now lives on its own Railway service (`admin.music.menghi.dev`, same URL as before), built into the existing FastAPI container as a static Next.js export.
+
+**Why the move:**
+- Keep admin JS out of the user-facing bundle (smaller bundle for normal users, reduced attack surface)
+- Decouple admin deploy cadence from the main frontend
+- Dedicated domain/auth surface — admin goes through the single-password HMAC cookie gate, not the main app's JWT flow
+
+**What changed:**
+
+- `admin/ui/` — new Next.js 16 app (static-export mode, `output: "export"`)
+  - `app/page.tsx` — ex-frontend admin page, with `useAuthStore` gate + `useRouter` redirect removed (the Python gate already redirects to `/login` before the page ever loads). Adds a tiny log-out link in the header.
+  - `app/layout.tsx` + `app/providers.tsx` — root layout, DM Sans + Sora fonts, dark theme hardcoded, `QueryClientProvider` wrapper.
+  - `components/admin/{songs-table-card,artists-table-card,status-dot}.tsx` — moved verbatim.
+  - `components/ui/{card,badge,button,skeleton}.tsx` — copied from main frontend (~270 lines of shadcn primitives).
+  - `hooks/use-admin-tables.ts` — moved verbatim.
+  - `lib/api.ts` — stripped-down same-origin `fetch` wrapper. No CSRF, no JWT refresh — not needed because the Python proxy handles auth upstream. On 401 it redirects to `/login`.
+  - `lib/utils.ts` — just `cn`.
+  - `app/globals.css` — full SmarTaste token system copied so the admin UI matches the main app visually.
+
+- `admin/Dockerfile` — now two-stage:
+  1. `node:20-slim` builds the Next.js static export (`npm install && npm run build` → `/ui/out`)
+  2. `python:3.14-slim` serves FastAPI and the bundled `out/` copied to `/app/static`
+
+- `admin/app.py`:
+  - `GET /` now returns `FileResponse(static/index.html)` after the admin cookie check, instead of reading `templates/dashboard.html`.
+  - `/_next/*` mounted via `StaticFiles` (hashed assets, public — shell only, no data).
+  - `/favicon.ico` fallback added.
+  - Login page (`/login`), proxy (`/api/*`, SSE `/api/admin/logs/stream`), and all auth endpoints are unchanged.
+
+- `admin/templates/dashboard.html` — **deleted** (1178 lines of vanilla JS). `login.html` kept.
+
+- `frontend/` — admin code removed entirely:
+  - `frontend/src/app/(app)/admin/` (deleted)
+  - `frontend/src/components/admin/` (deleted)
+  - `frontend/src/hooks/use-admin-tables.ts` (deleted)
+
+**Unchanged:**
+- Backend CORS, cookie domain, JWT, CSRF — all untouched. The admin service reverse-proxies `/api/*` server-to-server, so the browser only ever talks to `admin.music.menghi.dev`. No cross-origin complications.
+- Env var contract on the admin service: `ADMIN_PASSWORD`, `ADMIN_SECRET`, `BACKEND_URL`, `NOCODB_URL`, `PORT` — same as before.
+- `admin.music.menghi.dev` URL.
+- `/api/admin/*` endpoint surface on the backend.
+
+**Decommissioning note:** the main frontend no longer exposes `/admin`. Visiting `music.menghi.dev/admin` will 404 from the Next.js app. Use `admin.music.menghi.dev` exclusively.
+
+---
+
 ## V 6.330 — 2026-04-17
 
 ### Admin dashboard: songs + artists tables replace stale aggregate cards
