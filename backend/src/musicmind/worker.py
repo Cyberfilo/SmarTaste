@@ -2386,10 +2386,16 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
             mert = gpu_data.get("mert_768")
             if clap or mert:
                 async with engine.begin() as conn:
+                    # COALESCE(existing, new) — keep whichever column was
+                    # already populated; only fill NULLs. Prevents a pointless
+                    # overwrite when we re-ran GPU only to get MERT and the
+                    # existing CLAP was already good. Argument order matters:
+                    # COALESCE(:new, existing) would *always* overwrite; we
+                    # want the opposite.
                     await conn.execute(sa.text(
                         "UPDATE audio_embeddings"
-                        " SET clap_embedding = COALESCE(:clap, clap_embedding),"
-                        "     mert_embedding = COALESCE(:mert, mert_embedding)"
+                        " SET clap_embedding = COALESCE(clap_embedding, :clap),"
+                        "     mert_embedding = COALESCE(mert_embedding, :mert)"
                         " WHERE catalog_id = :cid AND user_id = :uid"
                     ), {
                         "cid": cid, "uid": user_id,
@@ -2517,7 +2523,15 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         return 0
 
     async def _apply_results(queue_items, gpu_results) -> int:
-        """Shared DB-writer for both bytes and URL result batches."""
+        """Shared DB-writer for both bytes and URL result batches.
+
+        Uses COALESCE(existing, new) semantics so a column that's already
+        populated is never overwritten. When we revisit a CLAP-only /
+        MERT-NULL row, the GPU wastefully recomputes CLAP too — that
+        redundant inference cost is unavoidable without a GPU-worker
+        protocol change, but at least we avoid the matching wasted DB
+        write.
+        """
         stored = 0
         async with engine.begin() as conn:
             for (isrc, _), res in zip(queue_items, gpu_results):
@@ -2530,9 +2544,15 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                     continue
                 updates: dict[str, Any] = {}
                 if clap:
-                    updates["clap_embedding"] = json.dumps(clap)
+                    updates["clap_embedding"] = sa.func.coalesce(
+                        audio_embeddings_global.c.clap_embedding,
+                        json.dumps(clap),
+                    )
                 if mert:
-                    updates["mert_embedding"] = json.dumps(mert)
+                    updates["mert_embedding"] = sa.func.coalesce(
+                        audio_embeddings_global.c.mert_embedding,
+                        json.dumps(mert),
+                    )
                 await conn.execute(
                     sa.update(audio_embeddings_global)
                     .where(audio_embeddings_global.c.isrc == isrc)
