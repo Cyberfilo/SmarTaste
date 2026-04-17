@@ -7,6 +7,57 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.371 — 2026-04-17
+
+### Startup orchestration: backend plans, worker executes — strict USER → DISCOVERED drains
+
+The old startup flow ran five parallel phases on the worker AND a fire-and-forget chain on the backend lifespan — both services racing on the same tables, both calling `_backfill_isrcs`, `_fill_library_gaps`, `_backfill_gpu_embeddings` concurrently. Postgres serialized writes so nothing corrupted, but the doubled work wasted API quota + GPU spend, and the global/discovered side kicked off in parallel with user-linked work, so a signed-up user whose library still had ISRC gaps saw discovery-only tracks getting GPU-processed ahead of their own library songs.
+
+**New design:**
+
+1. **Backend (`app.py` `_dispatch_startup_work`):**
+   - Counts `lib_gaps`, `isrc_gaps`, `gpu_gaps` in the DB.
+   - Builds the natural-language plan, logs it.
+   - Writes the plan as JSON to `worker_status.detail` with `phase='startup_plan_ready'` so the admin dashboard shows the expected work before the worker has reported any progress.
+   - **Returns without dispatching any chain.** Backend is now inspector-only.
+
+2. **Worker (`worker.py main()`):**
+   - Phase 0 cleanup unchanged (orphan cleanup, preview cache purge, discography-to-global migration).
+   - Phase 1 — **`_drain_user_linked`** — loops `ISRC → preview/audio → Essentia → EffNet → GPU` until `_count_user_linked_gaps` returns 0 or no step makes progress. Max 10 passes with per-pass log deltas.
+   - Phase 2 — **`_drain_discovered`** — same loop shape for `ISRC → _enrich_global_songs → _backfill_gpu_embeddings_global` (with V 6.367 URL fallback).
+   - Only then enters the main cycle.
+
+3. **New helpers:** `_count_global_gaps` mirrors the existing `_count_user_linked_gaps`. `_drain_user_linked` and `_drain_discovered` are exhaustive drain loops with progress tracking + break-on-stuck guards.
+
+**Why this shape:**
+- Strict ordering inside each drain matches pipeline dependency (can't GPU a track that hasn't been Essentia'd; can't Essentia a track without preview URL; preview URL sometimes needs ISRC).
+- USER before DISCOVERED maps onto the existing main-loop invariant that cobweb is skipped while any user gap remains — the refactor extends that priority rule to startup.
+- Loop-until-zero-or-stuck means a deploy that interrupts enrichment midway no longer wastes a whole main-loop cycle waiting to retry; the drain itself retries.
+- Eliminating the backend chain means each backfill function runs on exactly one process per startup.
+
+**Worker log shape post-deploy:**
+
+```
+── Startup: USER-LINKED drain ──
+User drain pass 1: +120 isrc, +85 prev, +12 ess, +8 eff, +33 gpu  (42 user gaps remain)
+User drain pass 2: +40 isrc, +42 prev, +30 ess, +15 eff, +18 gpu  (5 user gaps remain)
+User drain pass 3: +3 isrc, +2 prev, +3 ess, +0 eff, +0 gpu  (0 user gaps remain)
+✓ User-linked drain complete after 3 pass(es)
+── Startup: DISCOVERED drain ──
+Discovered drain pass 1: +60 isrc, +50 ess, +125 gpu  (320 global gaps remain)
+...
+✓ Discovered drain complete after 4 pass(es)
+Startup drains complete — entering main loop
+```
+
+No migration. No new env vars. No DB schema change (reuses `worker_status.detail`). Tests: 20/20 pass.
+
+**Follow-ups tracked:**
+- Move `_backfill_gpu_embeddings_global` into main-loop Phase 5 too (currently only runs during discovered drain + cobweb, so new global MERT gaps wait for next deploy).
+- Optional: richer per-phase rows in a `startup_plan` table for step-by-step admin UI without parsing JSON.
+
+---
+
 ## V 6.370 — 2026-04-17
 
 ### Dashboard v3 — drop discovery noise, chart the enrichment data, fix the missing-artwork root cause
