@@ -342,7 +342,7 @@ async def discover_genre_adjacent(
 
     try:
         client = _get_shared_client()
-        for genre in top_genres[:3]:
+        for genre in top_genres:
             try:
                 if service == "spotify":
                     genre_slug = genre.lower().replace("/", " ")
@@ -469,7 +469,7 @@ async def discover_editorial(
 
     try:
         client = _get_shared_client()
-        for genre in top_genres[:3]:
+        for genre in top_genres:
             try:
                 if service == "spotify":
                     # Spotify search: use genre: filter + year range for fresh tracks

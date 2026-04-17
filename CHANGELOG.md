@@ -7,6 +7,37 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.320 — 2026-04-17
+
+### Backend-orchestrated worker + unified discovery + artwork + score breakdown
+
+Four coordinated fixes that make the recommendation pipeline coherent end-to-end. The backend now acts as the coordinator and the worker as the executor; discovery is unified into a single broader pass; artwork actually renders; the scoring breakdown matches the engine.
+
+#### Artwork pipeline (migration 025)
+- Added `artwork_url` column to `global_song_cache` — the shared song pool had no artwork field, so anything sourced from the worker (cobweb + discovery) returned an empty string to the frontend. All four write sites now populate it: `_run_discovery_for_user`, `_fetch_artist_songs_globally`, `_migrate_discography_to_global`, and `indexer._fetch_and_enrich_discography`.
+- `_load_candidates_from_db` now selects and maps `artwork_url` → `artwork_url_template` on the result dict so `get_recommendations` forwards it to the API response.
+- Migration backfills `artwork_url` from `song_metadata_cache.artwork_url_template` by catalog_id for the 995 existing global songs that lost artwork when the `_migrate_discography_to_global` ran in V 6.310.
+
+#### Score breakdown (aligned with V 6.300 scoring)
+- `get_scoring_breakdown` rewritten to match the actual scorer's 6 weighted dimensions (CLAP/MERT/EffNet/genre/scalar/artist) plus 6 modifiers (discovery bonus, cross-strategy bonus, calibration boost, mood boost, diversity penalty, staleness penalty).
+- Falls back to `global_song_cache` + ISRC-joined global embeddings when a song isn't in the user's per-user tables, so discovery candidates can be inspected too.
+- Uses `compute_context_weights` so reported weights reflect the user's effective scoring (e.g. redistributed when embeddings are missing), not the static `DEFAULT_WEIGHTS`.
+- Frontend `ScoreBreakdown` component rewritten: separate "Weighted dimensions" section (6 bars) and "Modifiers" section (6 bars with +/- signed values scaled against their absolute cap).
+
+#### Unified discovery (lifted caps, strategies internal)
+- Worker's `_run_discovery_for_user` now uses `top_artists[:15]` (was 5), `top_genres[:10]` (was 5), `total_budget=200` for similar-artist crawl (was 40), and `limit=50` per-genre for genre-adjacent/editorial/chart (was 20-30).
+- Removed the hard-coded `top_genres[:3]` cap inside `discover_genre_adjacent` and `discover_editorial` — the caller controls how many genres to walk.
+- Expected steady-state candidate pool: ~1000–1500 per user per 6h cycle (vs ~200 before).
+- Recommendations API: `/api/recommendations` no longer sends strategy/mood from the frontend (params remain accepted as no-ops for backward compat). Response still carries `strategy_source` per item as internal metadata.
+- Frontend: `StrategySelector` and `MoodFilter` components removed from `RecommendationFeed`.
+
+#### Backend startup orchestration (app.py lifespan)
+- On backend boot, FastAPI lifespan inspects DB state and dispatches worker tasks as background work. Chain: `_fill_library_gaps` → `_backfill_isrcs` → `_backfill_gpu_embeddings` (+ `_global`) → `_run_cobweb_cycle`.
+- Logs gap counts upfront so you can tell from the boot log whether there's work to do: `library_gaps=N, isrc_gaps=M, gpu_gaps=K`.
+- `asyncio.create_task` — boot never blocks on enrichment. The worker process continues polling in parallel; both share the DB, so duplicate work is serialized by Postgres transactions.
+
+---
+
 ## V 6.310 — 2026-04-16
 
 ### Worker-driven discovery (recommendations API becomes a read)

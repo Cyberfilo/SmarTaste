@@ -65,14 +65,11 @@ export interface AudioFeaturesResponse {
 
 // ── Hooks ──────────────────────────────────────────────
 
-export function useRecommendations(strategy: string, mood: string | null) {
-  const params = new URLSearchParams({ strategy, limit: "20" });
-  if (mood) {
-    params.set("mood", mood);
-  }
+export function useRecommendations() {
+  const params = new URLSearchParams({ limit: "20" });
 
   return useQuery<RecommendationsResponse>({
-    queryKey: ["recommendations", strategy, mood],
+    queryKey: ["recommendations"],
     queryFn: () => apiFetch<RecommendationsResponse>(`/api/recommendations?${params}`),
   });
 }

@@ -24,6 +24,126 @@ from musicmind.security.encryption import EncryptionService
 _settings = Settings()
 
 
+async def _dispatch_startup_work(engine, settings) -> None:
+    """Inspect DB state on boot and dispatch worker tasks as background work.
+
+    Backend is the coordinator; worker is the executor. This runs during
+    the FastAPI lifespan AFTER the app is ready to serve requests — it
+    uses asyncio.create_task so boot never blocks on enrichment.
+
+    Order of operations:
+    1. Library enrichment gaps → fire worker's _fill_library_gaps
+    2. ISRC backfill gaps → fire _backfill_isrcs
+    3. GPU (CLAP/MERT) gaps → fire _backfill_gpu_embeddings + _global
+    4. Cobweb + discovery → fire _run_cobweb_cycle
+    """
+    import asyncio
+    import logging
+
+    log = logging.getLogger("musicmind.startup")
+
+    # Count each kind of gap so we log a useful summary.
+    async with engine.begin() as conn:
+        try:
+            lib_gaps = (await conn.execute(sa.text("""
+                SELECT count(*) FROM song_metadata_cache s
+                WHERE (s.library_id IS NOT NULL OR s.date_added_to_library IS NOT NULL)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM audio_features_cache af
+                    WHERE af.catalog_id = s.catalog_id AND af.user_id = s.user_id
+                      AND af.energy IS NOT NULL
+                  )
+            """))).scalar() or 0
+        except Exception:
+            lib_gaps = -1
+
+        try:
+            isrc_gaps = (await conn.execute(sa.text("""
+                SELECT count(*) FROM song_metadata_cache
+                WHERE (isrc IS NULL OR isrc = '') AND isrc IS DISTINCT FROM '__NO_ISRC__'
+            """))).scalar() or 0
+        except Exception:
+            isrc_gaps = -1
+
+        try:
+            gpu_gaps = (await conn.execute(sa.text("""
+                SELECT count(*) FROM audio_embeddings_global
+                WHERE clap_embedding IS NULL AND embedding IS NOT NULL
+            """))).scalar() or 0
+        except Exception:
+            gpu_gaps = -1
+
+    log.info(
+        "Backend startup orchestration: library_gaps=%d, isrc_gaps=%d, gpu_gaps=%d",
+        lib_gaps, isrc_gaps, gpu_gaps,
+    )
+
+    # Lazy import — worker is part of same package, no cross-service HTTP
+    try:
+        from musicmind import worker as wk
+    except Exception:
+        log.warning("Worker module import failed; backend cannot orchestrate")
+        return
+
+    async def _task_library() -> None:
+        if lib_gaps <= 0:
+            return
+        try:
+            enriched = await wk._fill_library_gaps(engine, settings)
+            log.info("Backend-triggered library enrichment: %d enriched", enriched)
+        except Exception:
+            log.exception("Backend-triggered library enrichment failed")
+
+    async def _task_isrc() -> None:
+        if isrc_gaps <= 0:
+            return
+        try:
+            found = await wk._backfill_isrcs(engine, batch_limit=500)
+            log.info("Backend-triggered ISRC backfill: %d found", found)
+        except Exception:
+            log.exception("Backend-triggered ISRC backfill failed")
+
+    async def _task_gpu() -> None:
+        try:
+            per_user = await wk._backfill_gpu_embeddings(engine, settings)
+            if per_user > 0:
+                log.info(
+                    "Backend-triggered GPU backfill (per-user): %d CLAP/MERT", per_user,
+                )
+            if gpu_gaps > 0:
+                globally = await wk._backfill_gpu_embeddings_global(engine, settings)
+                if globally > 0:
+                    log.info(
+                        "Backend-triggered GPU backfill (global): %d CLAP/MERT",
+                        globally,
+                    )
+        except Exception:
+            log.exception("Backend-triggered GPU backfill failed")
+
+    async def _task_cobweb() -> None:
+        try:
+            stats = await wk._run_cobweb_cycle(engine, settings)
+            log.info(
+                "Backend-triggered cobweb cycle: %d artists, %d songs cached, %d discovery candidates",
+                stats.get("cobweb_artists", 0),
+                stats.get("songs_cached", 0),
+                stats.get("discovery_candidates", 0),
+            )
+        except Exception:
+            log.exception("Backend-triggered cobweb cycle failed")
+
+    # Run tasks in the documented order; each awaits its predecessor so
+    # ISRC is done before GPU (which needs ISRCs to look up global embeddings)
+    # and library gaps are filled before cobweb (user-linked priority).
+    async def _chain() -> None:
+        await _task_library()
+        await _task_isrc()
+        await _task_gpu()
+        await _task_cobweb()
+
+    asyncio.create_task(_chain())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and tear down application resources."""
@@ -96,6 +216,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _logging.getLogger(__name__).warning(
                 "Failed to connect logging database, continuing without", exc_info=True,
             )
+
+    # ── Backend orchestration: verify state + trigger worker if gaps exist ──
+    # Backend is the coordinator; worker is the executor. On boot, we inspect
+    # what needs to happen and dispatch worker functions as background tasks.
+    # Worker process continues polling in parallel — both share the DB, so
+    # duplicate work is serialized by Postgres. Fire-and-forget: boot should
+    # not block on enrichment.
+    try:
+        await _dispatch_startup_work(engine, _settings)
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).exception(
+            "Backend startup orchestration failed (non-fatal)"
+        )
 
     yield
 
