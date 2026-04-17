@@ -320,14 +320,25 @@ _KEY_ALIASES = {  # Essentia uses flat names; map to sharp equivalents for displ
 
 
 async def get_library_distributions(
-    engine, *, user_id: str, scatter_limit: int = 200,
+    engine, *, user_id: str, scatter_limit: int | None = None,
 ) -> dict[str, Any]:
     """Aggregate Essentia enrichment data into dashboard-ready distributions.
 
     Returns tempo histogram (fixed BPM bins), key × mode table (major/minor
-    counts per of 12 pitch classes), acousticness histogram, valence
-    histogram, plus a sampled energy/danceability scatter with track names
-    for tooltip display.
+    counts per 12 pitch classes), acousticness histogram, valence histogram,
+    plus an energy/danceability scatter of **every library song** — the
+    scatter intentionally shows all of the user's own songs so they can see
+    their full library's cloud, not a sample.
+
+    Scope: this function ONLY includes library-origin rows
+    (`library_id IS NOT NULL OR date_added_to_library IS NOT NULL`).
+    Worker-discovered tracks (songs the cobweb pulled in because an artist
+    was related, but the user never added) are excluded — those represent
+    candidate recommendations, not the user's actual taste.
+
+    Args:
+        scatter_limit: Optional hard cap on scatter points for very large
+            libraries (>5k songs). None means "no cap — include every point".
     """
     async with engine.begin() as conn:
         rows = await conn.execute(
@@ -358,6 +369,12 @@ async def get_library_distributions(
                 sa.and_(
                     audio_features_cache.c.user_id == user_id,
                     audio_features_cache.c.energy.isnot(None),
+                    # Library-only: user explicitly added these songs.
+                    # Discography / cobweb rows have both columns NULL.
+                    sa.or_(
+                        song_metadata_cache.c.library_id.isnot(None),
+                        song_metadata_cache.c.date_added_to_library.isnot(None),
+                    ),
                 )
             )
         )
@@ -438,11 +455,16 @@ async def get_library_distributions(
         for i, c in enumerate(v_bins)
     ]
 
-    # Scatter (energy × danceability, sampled for viz-tractable N)
+    # Scatter (energy × danceability): every library song that has both scalars.
+    # Only stride-sample if the library exceeds the optional cap, which is a
+    # performance guard for >5k-song libraries — for most users, every song
+    # becomes a dot.
     scatter: list[dict[str, Any]] = []
-    # Stride sample to stay within scatter_limit without statistical bias
-    stride = max(1, len(all_rows) // scatter_limit)
-    for r in all_rows[::stride]:
+    source_rows = all_rows
+    if scatter_limit is not None and len(all_rows) > scatter_limit:
+        stride = max(1, len(all_rows) // scatter_limit)
+        source_rows = all_rows[::stride]
+    for r in source_rows:
         if r.energy is None or r.danceability is None:
             continue
         scatter.append({
