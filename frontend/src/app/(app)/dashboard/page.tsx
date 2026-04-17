@@ -335,7 +335,7 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
 
         {hasTraits ? (
           <>
-            <p className="mb-5 text-lg leading-snug sm:text-xl">
+            <p className="mb-5 text-lg leading-snug text-[#FFF5EB] sm:text-xl">
               Your library sounds{" "}
               {descriptors.map((d, i) => (
                 <span key={d}>
@@ -367,11 +367,11 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
                     outerRadius="75%"
                     data={radarData}
                   >
-                    <PolarGrid stroke="hsl(var(--border))" />
+                    <PolarGrid stroke="#a855f733" />
                     <PolarAngleAxis
                       dataKey="trait"
                       tick={{
-                        fill: "hsl(var(--muted-foreground))",
+                        fill: "#FFF5EB",
                         fontSize: 10,
                       }}
                     />
@@ -384,10 +384,11 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
                     />
                     <Tooltip
                       contentStyle={{
-                        background: "hsl(var(--card))",
-                        border: "1px solid hsl(var(--border))",
+                        background: "#1A1530",
+                        border: "1px solid #a855f755",
                         borderRadius: "8px",
                         fontSize: "12px",
+                        color: "#FFF5EB",
                       }}
                       formatter={(v) => [`${v}%`, ""]}
                     />
@@ -402,7 +403,9 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
                   return (
                     <li key={t.key} className="space-y-1">
                       <div className="flex items-baseline justify-between gap-2">
-                        <span className="text-sm font-medium">{t.label}</span>
+                        <span className="text-sm font-medium text-[#FFF5EB]">
+                          {t.label}
+                        </span>
                         <span className="text-sm font-semibold tabular-nums text-purple-300">
                           {display}
                         </span>
