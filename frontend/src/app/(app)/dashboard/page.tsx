@@ -582,15 +582,36 @@ function ScatterTooltip({
   if (!active || !payload || payload.length === 0) return null;
   const p = payload[0].payload;
   return (
-    <div className="rounded-md border border-border bg-card px-2.5 py-2 text-[11px] shadow-lg">
-      <p className="font-semibold">{p.name}</p>
-      <p className="text-muted-foreground">{p.artist_name}</p>
+    <div className="rounded-md border border-border bg-[#0f0a1f] px-2.5 py-2 text-[11px] text-foreground shadow-lg">
+      <p className="font-semibold text-white">{p.name}</p>
+      <p className="text-neutral-300">{p.artist_name}</p>
       <p className="mt-1 tabular-nums text-purple-300">
         Energy {Math.round(p.energy * 100)}% · Dance{" "}
         {Math.round(p.danceability * 100)}%
       </p>
     </div>
   );
+}
+
+function computeAxisDomain(
+  values: number[],
+  pad = 0.08,
+  min = 0,
+  max = 1,
+): [number, number] {
+  if (values.length === 0) return [min, max];
+  const lo = Math.max(min, Math.min(...values) - pad);
+  const hi = Math.min(max, Math.max(...values) + pad);
+  // Always show at least a 0.35 range so a tightly-clustered library
+  // still gets a readable spread rather than a squished line.
+  if (hi - lo < 0.35) {
+    const mid = (hi + lo) / 2;
+    return [
+      Math.max(min, mid - 0.175),
+      Math.min(max, mid + 0.175),
+    ];
+  }
+  return [Number(lo.toFixed(2)), Number(hi.toFixed(2))];
 }
 
 function SoundSpaceCard() {
@@ -632,68 +653,73 @@ function SoundSpaceCard() {
           ? "groove-heavy, low-intensity"
           : "mellow & sparse";
 
+  const xDomain = computeAxisDomain(scatter.map((p) => p.danceability));
+  const yDomain = computeAxisDomain(scatter.map((p) => p.energy));
+
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardContent className="pt-4">
         <SectionLabel
           icon={Activity}
-          hint={`${scatter.length} songs plotted · mostly ${dominantLabel}`}
+          hint={`${scatter.length} songs · mostly ${dominantLabel}`}
         >
           Sound Space
         </SectionLabel>
         <p className="mb-2 text-xs text-muted-foreground">
           Every dot is a song. Horizontal = danceability · vertical = energy.
-          Hover a dot for the track.
+          Hover for the track name.
         </p>
-        <ResponsiveContainer width="100%" height={280}>
-          <ScatterChart margin={{ top: 8, right: 12, bottom: 8, left: -10 }}>
-            <CartesianGrid
-              strokeDasharray="3 3"
-              stroke="hsl(var(--border))"
-              strokeOpacity={0.4}
-            />
-            <XAxis
-              type="number"
-              dataKey="danceability"
-              domain={[0, 1]}
-              tickFormatter={(v) => `${Math.round(v * 100)}%`}
-              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-              label={{
-                value: "Danceability →",
-                position: "insideBottom",
-                offset: -2,
-                fontSize: 10,
-                fill: "hsl(var(--muted-foreground))",
-              }}
-            />
-            <YAxis
-              type="number"
-              dataKey="energy"
-              domain={[0, 1]}
-              tickFormatter={(v) => `${Math.round(v * 100)}%`}
-              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-              width={40}
-              label={{
-                value: "Energy ↑",
-                angle: -90,
-                position: "insideLeft",
-                offset: 10,
-                fontSize: 10,
-                fill: "hsl(var(--muted-foreground))",
-              }}
-            />
-            <ZAxis type="number" range={[28, 28]} />
-            <Tooltip
-              cursor={{ strokeDasharray: "3 3", stroke: "#A855F7" }}
-              content={<ScatterTooltip />}
-            />
-            <Scatter data={scatter} fill="#A855F7" fillOpacity={0.55} />
-          </ScatterChart>
-        </ResponsiveContainer>
+        <div className="w-full overflow-hidden">
+          <ResponsiveContainer width="100%" height={240}>
+            <ScatterChart margin={{ top: 10, right: 16, bottom: 24, left: 8 }}>
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="#a855f733"
+                vertical={false}
+              />
+              <XAxis
+                type="number"
+                dataKey="danceability"
+                domain={xDomain}
+                tickFormatter={(v) => `${Math.round(v * 100)}%`}
+                tick={{ fill: "#a5adba", fontSize: 10 }}
+                tickLine={false}
+                axisLine={{ stroke: "#2a2342" }}
+                label={{
+                  value: "Danceability →",
+                  position: "insideBottom",
+                  offset: -14,
+                  fontSize: 10,
+                  fill: "#a5adba",
+                }}
+              />
+              <YAxis
+                type="number"
+                dataKey="energy"
+                domain={yDomain}
+                tickFormatter={(v) => `${Math.round(v * 100)}%`}
+                tick={{ fill: "#a5adba", fontSize: 10 }}
+                tickLine={false}
+                axisLine={{ stroke: "#2a2342" }}
+                width={44}
+                label={{
+                  value: "Energy ↑",
+                  angle: -90,
+                  position: "insideLeft",
+                  offset: 16,
+                  fontSize: 10,
+                  fill: "#a5adba",
+                }}
+              />
+              <ZAxis type="number" range={[36, 36]} />
+              <Tooltip
+                cursor={{ strokeDasharray: "3 3", stroke: "#A855F7" }}
+                content={<ScatterTooltip />}
+              />
+              <Scatter data={scatter} fill="#A855F7" fillOpacity={0.65} />
+            </ScatterChart>
+          </ResponsiveContainer>
+        </div>
       </CardContent>
     </Card>
   );
@@ -711,8 +737,8 @@ function TempoTooltip({
   if (!active || !payload || payload.length === 0) return null;
   const p = payload[0].payload;
   return (
-    <div className="rounded-md border border-border bg-card px-2.5 py-2 text-[11px] shadow-lg">
-      <p className="font-semibold tabular-nums">{p.range} BPM</p>
+    <div className="rounded-md border border-border bg-[#0f0a1f] px-2.5 py-2 text-[11px] shadow-lg">
+      <p className="font-semibold tabular-nums text-white">{p.range} BPM</p>
       <p className="tabular-nums text-purple-300">{p.count} songs</p>
     </div>
   );
@@ -746,7 +772,7 @@ function TempoProfileCard() {
   );
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardContent className="pt-4">
         <SectionLabel
           icon={Timer}
@@ -759,44 +785,46 @@ function TempoProfileCard() {
         >
           Tempo Profile
         </SectionLabel>
-        <ResponsiveContainer width="100%" height={180}>
-          <BarChart
-            data={hist}
-            margin={{ top: 4, right: 8, bottom: 0, left: -20 }}
-          >
-            <CartesianGrid
-              strokeDasharray="3 3"
-              stroke="hsl(var(--border))"
-              strokeOpacity={0.4}
-              vertical={false}
-            />
-            <XAxis
-              dataKey="range"
-              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-            />
-            <YAxis
-              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-              allowDecimals={false}
-            />
-            <Tooltip
-              cursor={{ fill: "hsl(var(--muted) / 0.3)" }}
-              content={<TempoTooltip />}
-            />
-            <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={40}>
-              {hist.map((b, i) => (
-                <Cell
-                  key={i}
-                  fill={b.range === peakBin.range ? "#A855F7" : "#7E22CE"}
-                  fillOpacity={b.range === peakBin.range ? 1 : 0.55}
-                />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+        <div className="w-full overflow-hidden">
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart
+              data={hist}
+              margin={{ top: 4, right: 8, bottom: 0, left: -16 }}
+            >
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="#a855f733"
+                vertical={false}
+              />
+              <XAxis
+                dataKey="range"
+                tick={{ fill: "#a5adba", fontSize: 10 }}
+                tickLine={false}
+                axisLine={false}
+              />
+              <YAxis
+                tick={{ fill: "#a5adba", fontSize: 10 }}
+                tickLine={false}
+                axisLine={false}
+                allowDecimals={false}
+                width={28}
+              />
+              <Tooltip
+                cursor={{ fill: "#a855f722" }}
+                content={<TempoTooltip />}
+              />
+              <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={40}>
+                {hist.map((b, i) => (
+                  <Cell
+                    key={i}
+                    fill={b.range === peakBin.range ? "#A855F7" : "#7E22CE"}
+                    fillOpacity={b.range === peakBin.range ? 1 : 0.55}
+                  />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
       </CardContent>
     </Card>
   );
@@ -836,7 +864,7 @@ function KeyModeCard() {
   );
 
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardContent className="pt-4">
         <SectionLabel
           icon={KeyRound}
@@ -1246,16 +1274,24 @@ export default function DashboardPage() {
         <>
           <SoundSignature profile={profile} />
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <GenreDNA genreVector={profile.genre_vector} />
-            <TopArtistsCard artists={profile.top_artists} />
+          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="min-w-0">
+              <GenreDNA genreVector={profile.genre_vector} />
+            </div>
+            <div className="min-w-0">
+              <TopArtistsCard artists={profile.top_artists} />
+            </div>
           </div>
 
           <SoundSpaceCard />
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <TempoProfileCard />
-            <KeyModeCard />
+          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="min-w-0">
+              <TempoProfileCard />
+            </div>
+            <div className="min-w-0">
+              <KeyModeCard />
+            </div>
           </div>
 
           <RecentlyAnalyzedStrip />
