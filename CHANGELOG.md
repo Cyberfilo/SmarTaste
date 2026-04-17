@@ -7,6 +7,30 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.372 — 2026-04-17
+
+### Dashboard v3 hotfix — contained layout, readable tooltips, zoomed scatter
+
+V 6.370 shipped the new layout but three visual problems remained in the wild:
+
+**1. Horizontal page scroll still happened.** Tailwind `grid md:grid-cols-2` creates two-column tracks where each child defaults to `min-width: auto` — which means any child whose content is wider than the column (Recharts ResponsiveContainer that hasn't measured yet, or Musical Keys bars at `flex-1`) can push the column out and the whole page with it.
+
+**Fix:** replaced every `md:grid-cols-2` with `md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]`, which explicitly declares that each column can shrink to 0 min-width. Wrapped every grid child in a `<div className="min-w-0">` as a guard for grandchildren. Added `min-w-0 overflow-hidden` to all three chart cards (SoundSpace / TempoProfile / MusicalKeys).
+
+**2. Custom tooltips had no explicit text color** — text inherited from the SVG container and rendered black on a dark card background. Invisible.
+
+**Fix:** hardcoded `bg-[#0f0a1f]` (deep purple-black, matches palette regardless of how `--card` resolves) and explicit `text-white` / `text-neutral-300` / `text-purple-300` on every tooltip row.
+
+**3. Sound Space wasted the 0-50% danceability half** for libraries that cluster above 50% — Filippo's library has every song above 50% danceability, so the left half of the plot was dead space and the data looked like a vertical smear.
+
+**Fix:** new `computeAxisDomain(values, pad=0.08)` helper computes `[min-pad, max+pad]` clamped to [0, 1], with a minimum 0.35-wide visible range so a tightly-clustered library still reads as a 2D cloud. Applied to both X (danceability) and Y (energy) axes. Vertical grid lines removed (horizontal only). Axis labels shifted to concrete `#a5adba`.
+
+Other small fixes: Sound Space height 280px → 240px, dot size 28 → 36, opacity 0.55 → 0.65; Tempo Profile YAxis width 28, tighter left margin; CartesianGrid uses concrete `#a855f733` instead of CSS variables.
+
+No backend changes. No new endpoints. No dependency changes.
+
+---
+
 ## V 6.371 — 2026-04-17
 
 ### Startup orchestration: backend plans, worker executes — strict USER → DISCOVERED drains
