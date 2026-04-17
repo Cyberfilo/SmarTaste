@@ -7,6 +7,21 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.382 — 2026-04-17
+
+### Fix MERT float16/float32 mismatch on MPS local GPU
+
+MERT inference on the local GPU server (`gpu-worker-local/server.py`) failed on every item with `Input type (MPSFloatType) and weight type (MPSHalfType) should be the same`. The startup validation converted the model to float16 for speed but tested with float32 inputs (MPS auto-casted during the test but not during real inference). Every MERT result returned `None`, which the worker silently skipped — contributing to global MERT = 0.
+
+Fix: disable the float16 path entirely. MERT runs in float32 on MPS. Slight RAM increase (~200MB) but MERT actually works now.
+
+This was the third and final layer blocking global MERT:
+1. V 6.381 — COALESCE type mismatch in DB write-back
+2. V 6.380 — dead/missing preview URLs for 387/390 rows
+3. **V 6.382 — MERT float16 crash on local GPU server**
+
+---
+
 ## V 6.381 — 2026-04-17
 
 ### Fix COALESCE type mismatch killing global GPU write-back
