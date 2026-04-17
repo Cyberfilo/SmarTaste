@@ -196,6 +196,45 @@ class RecentEnrichmentsResponse(BaseModel):
     total: int = Field(default=0, description="Number returned")
 
 
+class TempoBin(BaseModel):
+    range: str = Field(description="BPM range label, e.g. '100-115'")
+    count: int = Field(description="Songs falling in this BPM bucket")
+    low: float = Field(description="Low-inclusive BPM boundary")
+    high: float = Field(description="High-exclusive BPM boundary")
+
+
+class KeyBucket(BaseModel):
+    key: str = Field(description="Pitch class (C, C#, D, ..., B)")
+    major: int = Field(description="Songs in this key with major scale")
+    minor: int = Field(description="Songs in this key with minor scale")
+
+
+class DistributionBucket(BaseModel):
+    bucket: str = Field(description="Range label (e.g. '0-10%')")
+    count: int
+
+
+class ScatterPoint(BaseModel):
+    catalog_id: str
+    name: str
+    artist_name: str
+    energy: float = Field(description="Essentia energy scalar, 0-1")
+    danceability: float = Field(description="Essentia danceability scalar, 0-1")
+
+
+class LibraryDistributionsResponse(BaseModel):
+    """Aggregated Essentia data ready for dashboard charts."""
+
+    total_songs: int
+    avg_tempo: float = Field(default=0.0, description="Mean BPM across enriched library")
+    total_keyed: int = Field(default=0, description="Songs with resolved key+scale")
+    tempo_histogram: list[TempoBin] = Field(default_factory=list)
+    key_distribution: list[KeyBucket] = Field(default_factory=list)
+    acousticness_histogram: list[DistributionBucket] = Field(default_factory=list)
+    valence_histogram: list[DistributionBucket] = Field(default_factory=list)
+    scatter: list[ScatterPoint] = Field(default_factory=list)
+
+
 class BreadthMetrics(BaseModel):
     """Library-breadth numbers derived client-side from the taste snapshot.
 

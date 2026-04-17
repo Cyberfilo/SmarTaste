@@ -16,9 +16,11 @@ from fastapi import (
 
 from musicmind.api.rate_limit import TASTE_LIMIT, limiter
 from musicmind.api.taste.insights import (
+    clean_genre_vector,
     compute_breadth_metrics,
     compute_sonic_neighbors,
     get_artist_artworks,
+    get_library_distributions,
     get_recent_enrichments,
 )
 from musicmind.api.taste.schemas import (
@@ -26,6 +28,7 @@ from musicmind.api.taste.schemas import (
     AudioTraitsResponse,
     BreadthMetrics,
     GenreEntry,
+    LibraryDistributionsResponse,
     RecentEnrichment,
     RecentEnrichmentsResponse,
     SonicNeighbor,
@@ -170,11 +173,32 @@ async def get_profile(
         for a in raw_artists
         if isinstance(a, dict) and a.get("name")
     ]
+    # Generate an Apple developer token for catalog search fallback on artist
+    # artwork (required when the user's library rows have empty artwork
+    # templates — which is true for any library indexed before V 6.365).
+    developer_token: str | None = None
+    try:
+        from musicmind.api.services.service import generate_apple_developer_token
+
+        settings = request.app.state.settings
+        developer_token = generate_apple_developer_token(
+            settings.apple_team_id,
+            settings.apple_key_id,
+            settings.apple_private_key_path,
+            private_key_b64=settings.apple_private_key_b64,
+        )
+    except Exception:
+        logger.debug(
+            "Apple developer token generation failed; "
+            "artist artwork will fall back to library-only lookup"
+        )
+
     try:
         artworks = await get_artist_artworks(
             request.app.state.engine,
             user_id=current_user["user_id"],
             artist_names=artist_names,
+            developer_token=developer_token,
         )
     except Exception:
         logger.debug("Artist artwork lookup failed; returning profile without artwork")
@@ -192,8 +216,12 @@ async def get_profile(
         for a in raw_artists
     ]
 
+    # Clean genre vector for display — strip "" / "Musica" noise + merge
+    # redundant parent genres that Apple sometimes double-tags.
+    cleaned_genres = clean_genre_vector(profile.get("genre_vector", {}) or {})
+
     breadth_raw = compute_breadth_metrics(
-        genre_vector=profile.get("genre_vector", {}) or {},
+        genre_vector=cleaned_genres,
         top_artists=raw_artists if isinstance(raw_artists, list) else [],
     )
 
@@ -203,7 +231,7 @@ async def get_profile(
         total_songs_analyzed=profile.get("total_songs_analyzed", 0),
         listening_hours_estimated=profile.get("listening_hours_estimated", 0.0),
         familiarity_score=profile.get("familiarity_score", 0.0),
-        genre_vector=profile.get("genre_vector", {}),
+        genre_vector=cleaned_genres,
         top_artists=top_artists,
         audio_trait_preferences=profile.get("audio_trait_preferences", {}),
         audio_centroid=profile.get("audio_centroid", {}) or {},
@@ -538,6 +566,35 @@ async def get_sonic_neighbors(
         neighbors=neighbors,
         note=None if neighbors else "No matching discovery artists found yet.",
     )
+
+
+@router.get("/distributions")
+@limiter.limit(TASTE_LIMIT)
+async def get_distributions_endpoint(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+) -> LibraryDistributionsResponse:
+    """Aggregated Essentia enrichment ready for interactive charts.
+
+    Returns tempo histogram (7 BPM buckets), key × mode (12 keys × major/minor),
+    acousticness + valence histograms (10 buckets each), and an energy ×
+    danceability scatter sample (up to 200 points with track metadata for
+    tooltip display). Computed on the fly from audio_features_cache — no cache
+    layer, query is <50ms for libraries under 5000 songs.
+    """
+    engine = request.app.state.engine
+    user_id = current_user["user_id"]
+
+    try:
+        data = await get_library_distributions(engine, user_id=user_id)
+    except Exception:
+        logger.exception("get_library_distributions failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to compute library distributions",
+        )
+
+    return LibraryDistributionsResponse(**data)
 
 
 @router.get("/recent-enrichments")

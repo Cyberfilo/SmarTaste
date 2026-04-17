@@ -7,6 +7,83 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.370 — 2026-04-17
+
+### Dashboard v3 — drop discovery noise, chart the enrichment data, fix the missing-artwork root cause
+
+Follow-up to V 6.365. User feedback: Sonic Neighbors pushed the page past the viewport width, Release Era wasn't interesting, artwork was missing everywhere, and the genres pulled from Apple Music were polluted with empty strings and the Italian catch-all "Musica". This release removes the dead weight, fixes artwork at the source, normalizes genres, and replaces Release Era with three interactive charts driven by the Essentia enrichment data that was already sitting unused in `audio_features_cache`.
+
+**Root-cause artwork fix (the most impactful change):**
+
+`backend/src/musicmind/api/taste/fetch.py` was hardcoding `artwork_url_template=""` for both Apple Music library items and Spotify tracks instead of extracting the real URL from the provider response. Confirmed via DB query: 0/679 songs in Filippo's library had an `artwork_url_template` — not because Apple didn't return one but because we were throwing it away. Two-line fix per provider:
+
+- Apple Music library loop now reads `attributes.artwork.url` (the `{w}x{h}bb.jpg` template) and `attributes.artwork.bgColor` from the library-songs response.
+- Spotify track mapper now reads `album.images[0].url` (largest available) — Spotify doesn't use an {w}×{h} template, it just ships pre-sized URLs, so the template slot stores the concrete URL and the frontend's artwork expander passes through any string without `{w}` placeholders unchanged.
+
+Existing songs will backfill artwork on the next library sync (happens on next service-connection refresh or whenever the indexer retouches a row). New songs get artwork from first ingest.
+
+**Artist artwork via Apple Music catalog search (lazy + cached):**
+
+User-library album art is the *album* cover; users asked for real artist portraits. Added a three-tier resolution in `get_artist_artworks`:
+
+1. Module-level in-memory cache (`_ARTIST_ARTWORK_CACHE`) — fast path for repeat requests within a process. Empty strings cached too so we don't retry known misses.
+2. User-library album art as a fallback (uses the V 6.370 artwork fix above).
+3. Apple Music catalog `/v1/catalog/{us|it|gb}/search?types=artists&limit=1` with the app's developer token (no user OAuth needed — catalog search is public data). Tries 3 storefronts in order, accepts only name-matched hits (Apple's fuzzy search can return unrelated artists for short queries like "Shiva"), returns the artwork template. All N top-artist fetches are `asyncio.gather`'d with a 4s per-request timeout.
+
+The /profile endpoint already passes the developer token through; existing callers of `get_artist_artworks` get the third tier for free.
+
+**New `GET /api/taste/distributions` endpoint** (`backend/src/musicmind/api/taste/insights.py`):
+
+Aggregates Essentia enrichment data into dashboard-ready chart data — no intermediate storage, computed on the fly (<50ms for libraries under 5k songs). Returns:
+
+- `tempo_histogram`: 7 fixed BPM buckets (60-80 / 80-100 / 100-115 / 115-130 / 130-150 / 150-180 / 180+). For Filippo: 603 songs, avg 109 BPM, peak in 100-115 (classic modern hip-hop tempo).
+- `key_distribution`: 12 pitch classes × {major, minor}. Normalizes Essentia's flat names (`Bb`, `Eb`) to sharp equivalents (`A#`, `D#`) for consistent rendering. For Filippo: heavily minor-keyed (Bb minor, F minor, F# minor dominant — rap's tonal signature).
+- `acousticness_histogram` + `valence_histogram`: 10 buckets each, 0-1 normalized.
+- `scatter`: up to 200 sampled songs with `{catalog_id, name, artist_name, energy, danceability}` for the interactive Sound Space chart. Stride-sampled (not random) to keep the view stable across requests.
+
+**New `clean_genre_vector()` normalization** (`insights.py`):
+
+- Blocklist: `""`, `"musica"`, `"música"`, `"music"` (Apple's localization-artifact catch-all) stripped before rendering.
+- Merge map: `"Rap"` and `"Hip-Hop"` fold into `"Hip-Hop/Rap"` when the compound label is already present (prevents double-counting parent + child on the same track). Same for `"Soul"` / `"R&B"` → `"R&B/Soul"`.
+
+Applied in the `/profile` endpoint response path so existing snapshots benefit without re-computation. Filippo's pre-clean genre vector had 14 entries including `""` (0.88%) and `"Musica"` (10.97%); post-clean it has 11 clean entries dominated by Hip-Hop/Rap.
+
+**Frontend — dashboard layout v3:**
+
+*Removed:*
+- `SonicNeighborsCard` — caused horizontal page scroll on the 4-column grid, and was too abstract for users who don't know what a centroid is. Endpoint stays live for future use.
+- `ReleaseEraCard` — year distribution didn't answer a question users had.
+
+*Added:*
+- `SoundSpaceCard` — **the new hero chart**. Recharts `ScatterChart` plotting every enriched song as a dot on an Energy × Danceability plane. Hovering a dot shows the song name, artist, and exact percentages. Header tag-line auto-classifies the dominant quadrant ("mostly high-energy & danceable" vs. "groove-heavy, low-intensity").
+- `TempoProfileCard` — BPM-bucket bar chart with the peak bucket highlighted in bright violet. Header shows the library's mean BPM + peak bucket label.
+- `KeyModeCard` — per-key horizontal bars split into a major segment (light violet) and a minor segment (dark violet) for all 12 pitch classes. Immediately reveals the library's tonal bias (hip-hop users see a wall of minor, pop users see the opposite). Header shows overall major/minor ratio.
+
+*Fixed:*
+- `RecentlyAnalyzedStrip` now wraps the scroll region in a `Card` with `overflow-hidden` and an inner `overflow-x-auto` — prevents the 12 × 144px tile row from leaking past the card's right edge and triggering page-level horizontal scroll. Also handles `artwork_url` fallback via `global_song_cache.artwork_url` when the user-library template is empty (pre-fix libraries).
+- Top-level page has `min-w-0` on the root container so no child element can force horizontal scroll.
+
+*Layout order (new):*
+
+```
+Calibration
+Sound Signature hero (full width)
+Genre DNA  |  Top Artists            (side-by-side)
+Sound Space scatter                   (full width)
+Tempo Profile  |  Musical Keys        (side-by-side)
+Recently Analyzed                     (full width, scrolls within card)
+Library Snapshot                      (full width, 2-column dl)
+Tab nav
+```
+
+**New frontend types + hook:** `TempoBin`, `KeyBucket`, `DistributionBucket`, `ScatterPoint`, `LibraryDistributionsResponse`. `useLibraryDistributions()` with a 15-min stale time.
+
+**Why all three new charts are genuinely interactive:** Sound Space has per-dot tooltips with track metadata. Tempo Profile highlights the peak bucket and shows "X songs at this BPM" on hover. Musical Keys shows count + major/minor split per-bar on hover via the browser title attribute (lightweight, no extra JS). Every chart uses direct labels or tooltips — no detached legend, no eye travel.
+
+No migration. No new dependencies. No backend dependency additions. The only permanent backend cost is a module-level dict for the artist-artwork cache (bounded by artist names in the system, self-limiting).
+
+---
+
 ## V 6.367 — 2026-04-17
 
 ### Global GPU backfill: URL fallback + 500-row limit — drain the MERT-only backlog

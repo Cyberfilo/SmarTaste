@@ -8,6 +8,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import type {
   AudioTraitsResponse,
+  LibraryDistributionsResponse,
   RecentEnrichmentsResponse,
   SonicNeighborsResponse,
   TasteProfile,
@@ -66,5 +67,14 @@ export function useRecentEnrichments(limit = 12) {
         `/api/taste/recent-enrichments?limit=${limit}`,
       ),
     staleTime: 5 * 60 * 1000, // shorter — this data is fresher-dependent
+  });
+}
+
+export function useLibraryDistributions() {
+  return useQuery<LibraryDistributionsResponse>({
+    queryKey: ["taste", "distributions"],
+    queryFn: () =>
+      apiFetch<LibraryDistributionsResponse>("/api/taste/distributions"),
+    staleTime: 15 * 60 * 1000,
   });
 }

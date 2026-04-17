@@ -5,29 +5,34 @@ import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { toast } from "sonner";
 import {
-  Calendar,
+  Activity,
   Database,
   Fingerprint,
+  KeyRound,
   Music,
   Plug,
-  Radar as RadarIcon,
   Sparkles,
-  TrendingUp,
+  Timer,
   Users,
   Waves,
   Zap,
 } from "lucide-react";
 import {
-  Area,
-  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
   PolarAngleAxis,
   PolarGrid,
   Radar,
   RadarChart,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
+  ZAxis,
 } from "recharts";
 
 import { Button } from "@/components/ui/button";
@@ -39,14 +44,16 @@ import {
 } from "@/hooks/use-calibration";
 import { useServices } from "@/hooks/use-services";
 import {
+  useLibraryDistributions,
   useRecentEnrichments,
-  useSonicNeighbors,
   useTasteProfile,
 } from "@/hooks/use-taste";
 import type {
+  KeyBucket,
   RecentEnrichment,
-  SonicNeighbor,
+  ScatterPoint,
   TasteProfile,
+  TempoBin,
 } from "@/types/api";
 
 const tabs = [
@@ -87,6 +94,29 @@ const TRAIT_DESCRIPTIONS: Record<string, string> = {
   tempo: "Preference for faster BPM",
 };
 
+// ── Value helpers ────────────────────────────────────────────────────
+
+function clamp01(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  if (v >= 1) return 1;
+  return v;
+}
+
+function normalizeTraitValue(key: string, raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  if (key === "tempo") {
+    const clamped = Math.max(60, Math.min(200, raw));
+    return (clamped - 60) / 140;
+  }
+  return clamp01(raw);
+}
+
+function formatTraitValue(key: string, raw: number): string {
+  if (!Number.isFinite(raw) || raw <= 0) return "—";
+  if (key === "tempo") return `${Math.round(raw)} BPM`;
+  return `${Math.round(clamp01(raw) * 100)}%`;
+}
+
 // ── Narrative generation ─────────────────────────────────────────────
 
 function describeSound(traits: Record<string, number>): string[] {
@@ -95,7 +125,7 @@ function describeSound(traits: Record<string, number>): string[] {
   const dance = traits.danceability ?? 0;
   const valence = traits.valence_proxy ?? 0;
   const acoustic = traits.acousticness ?? 0;
-  const tempoBpm = traits.tempo ?? 0; // raw BPM (60-200 range)
+  const tempoBpm = traits.tempo ?? 0;
   const beat = traits.beat_strength ?? 0;
 
   if (energy > 0.68) descriptors.push("high-energy");
@@ -118,56 +148,11 @@ function describeSound(traits: Record<string, number>): string[] {
   return descriptors.slice(0, 3);
 }
 
-function clamp01(v: number): number {
-  if (!Number.isFinite(v) || v <= 0) return 0;
-  if (v >= 1) return 1;
-  return v;
-}
-
-function normalizeTraitValue(key: string, raw: number): number {
-  // Essentia returns raw BPM for tempo (60-200). Everything else is nominally
-  // 0-1 but danceability / beat_strength can exceed 1.0 on extreme tracks.
-  if (!Number.isFinite(raw) || raw <= 0) return 0;
-  if (key === "tempo") {
-    // Normalize 60-200 BPM to 0-1 for the radar visualization.
-    const clamped = Math.max(60, Math.min(200, raw));
-    return (clamped - 60) / 140;
-  }
-  return clamp01(raw);
-}
-
-function formatTraitValue(key: string, raw: number): string {
-  if (!Number.isFinite(raw) || raw <= 0) return "—";
-  if (key === "tempo") return `${Math.round(raw)} BPM`;
-  return `${Math.round(clamp01(raw) * 100)}%`;
-}
-
 function topGenreName(genreVector: Record<string, number>): string | null {
   const entries = Object.entries(genreVector);
   if (entries.length === 0) return null;
   const [name] = entries.sort(([, a], [, b]) => b - a)[0];
   return name;
-}
-
-function describeEra(yearDist: Record<string, number>): {
-  range: string;
-  peak: string;
-  peakShare: number;
-} | null {
-  const entries = Object.entries(yearDist)
-    .map(([y, c]) => [Number(y), Number(c)] as const)
-    .filter(([y, c]) => y > 1950 && y < 2100 && c > 0)
-    .sort((a, b) => a[0] - b[0]);
-  if (entries.length === 0) return null;
-  const total = entries.reduce((sum, [, c]) => sum + c, 0);
-  const minYear = entries[0][0];
-  const maxYear = entries[entries.length - 1][0];
-  const peak = entries.reduce((best, cur) => (cur[1] > best[1] ? cur : best));
-  return {
-    range: minYear === maxYear ? `${minYear}` : `${minYear}–${maxYear}`,
-    peak: String(peak[0]),
-    peakShare: Math.round((peak[1] / total) * 100),
-  };
 }
 
 function formatService(services: string[], fallback: string): string {
@@ -249,7 +234,7 @@ function SkeletonBlock() {
   );
 }
 
-// ── Card sub-components ──────────────────────────────────────────────
+// ── Shared sub-components ────────────────────────────────────────────
 
 function SectionLabel({
   icon: Icon,
@@ -316,10 +301,9 @@ function Artwork({
   );
 }
 
+// ── Sound Signature hero ────────────────────────────────────────────
+
 function SoundSignature({ profile }: { profile: TasteProfile }) {
-  // Prefer audio_centroid (real Essentia scalars) — falls back to the
-  // legacy audio_trait_preferences field only if the centroid is empty,
-  // which shouldn't happen once the profile is rebuilt post-V6.365.
   const rawCentroid = profile.audio_centroid ?? {};
   const hasCentroid = Object.values(rawCentroid).some((v) => v > 0);
   const traits: Record<string, number> = hasCentroid
@@ -457,112 +441,11 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
   );
 }
 
-function SonicNeighborsCard() {
-  const { data, isLoading } = useSonicNeighbors(8);
-
-  if (isLoading) {
-    return (
-      <Card>
-        <CardContent className="pt-4">
-          <SectionLabel icon={RadarIcon}>Sonic Neighbors</SectionLabel>
-          <div className="grid animate-pulse grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-3 rounded-lg bg-muted/40 p-3"
-              >
-                <div className="h-12 w-12 shrink-0 rounded-md bg-muted" />
-                <div className="min-w-0 flex-1 space-y-2">
-                  <div className="h-3 w-3/4 rounded bg-muted" />
-                  <div className="h-2 w-1/2 rounded bg-muted" />
-                </div>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  const neighbors = data?.neighbors ?? [];
-  const note = data?.note;
-
-  if (neighbors.length === 0) {
-    return (
-      <Card>
-        <CardContent className="pt-4">
-          <SectionLabel icon={RadarIcon}>Sonic Neighbors</SectionLabel>
-          <p className="py-6 text-center text-sm text-muted-foreground">
-            {note ??
-              "No sonic neighbors to show yet — keep listening while the pipeline finishes."}
-          </p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card>
-      <CardContent className="pt-4">
-        <SectionLabel
-          icon={RadarIcon}
-          hint="CLAP-centroid match · discovery only"
-        >
-          Sonic Neighbors
-        </SectionLabel>
-        <p className="mb-3 text-xs text-muted-foreground">
-          Artists not in your library whose sound most closely matches your
-          CLAP centroid.
-        </p>
-        <ul className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-          {neighbors.map((n: SonicNeighbor) => {
-            const pct = Math.round(Math.max(0, n.similarity) * 100);
-            return (
-              <li key={n.artist_name}>
-                <div className="group flex items-center gap-3 rounded-lg border border-border/40 bg-muted/20 p-2.5 transition-colors hover:border-purple-500/40 hover:bg-purple-500/5">
-                  <Artwork
-                    url={n.artwork_url}
-                    fallbackText={n.artist_name}
-                    size="md"
-                    rounded="md"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p
-                      className="truncate text-sm font-medium"
-                      title={n.artist_name}
-                    >
-                      {n.artist_name}
-                    </p>
-                    <p
-                      className="truncate text-[11px] text-muted-foreground"
-                      title={n.sample_song_name}
-                    >
-                      {n.sample_song_name || "—"}
-                    </p>
-                    <div className="mt-1.5 flex items-center gap-2">
-                      <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted/60">
-                        <div
-                          className="h-full rounded-full bg-gradient-to-r from-purple-600 to-purple-400"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                      <span className="text-[10px] font-semibold tabular-nums text-purple-300">
-                        {pct}%
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      </CardContent>
-    </Card>
-  );
-}
+// ── Genre DNA & Top Artists ──────────────────────────────────────────
 
 function GenreDNA({ genreVector }: { genreVector: Record<string, number> }) {
   const entries = Object.entries(genreVector)
+    .filter(([name, w]) => name && w > 0)
     .sort(([, a], [, b]) => b - a)
     .slice(0, 8);
 
@@ -600,7 +483,7 @@ function GenreDNA({ genreVector }: { genreVector: Record<string, number> }) {
                 >
                   {name}
                 </span>
-                <div className="w-24 sm:w-36">
+                <div className="w-20 sm:w-32">
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                     <div
                       className="h-full rounded-full bg-gradient-to-r from-purple-600 to-purple-400 transition-all duration-500"
@@ -667,7 +550,7 @@ function TopArtistsCard({
                     {artist.song_count === 1 ? "" : "s"}
                   </p>
                 </div>
-                <div className="w-16 sm:w-24">
+                <div className="w-14 sm:w-20">
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                     <div
                       className="h-full rounded-full bg-gradient-to-r from-purple-600 to-purple-400 transition-all duration-500"
@@ -687,10 +570,344 @@ function TopArtistsCard({
   );
 }
 
+// ── Sound Space (energy × danceability scatter) ──────────────────────
+
+function ScatterTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: ScatterPoint }>;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const p = payload[0].payload;
+  return (
+    <div className="rounded-md border border-border bg-card px-2.5 py-2 text-[11px] shadow-lg">
+      <p className="font-semibold">{p.name}</p>
+      <p className="text-muted-foreground">{p.artist_name}</p>
+      <p className="mt-1 tabular-nums text-purple-300">
+        Energy {Math.round(p.energy * 100)}% · Dance{" "}
+        {Math.round(p.danceability * 100)}%
+      </p>
+    </div>
+  );
+}
+
+function SoundSpaceCard() {
+  const { data, isLoading } = useLibraryDistributions();
+
+  if (isLoading) return <SkeletonBlock />;
+
+  const scatter = data?.scatter ?? [];
+
+  if (scatter.length === 0) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <SectionLabel icon={Activity}>Sound Space</SectionLabel>
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            Not enough enriched songs yet to plot the library's sound space.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Quadrant summary — how does the library cluster?
+  const q = { hiHi: 0, hiLo: 0, loHi: 0, loLo: 0 };
+  for (const p of scatter) {
+    const hiEnergy = p.energy >= 0.5;
+    const hiDance = p.danceability >= 0.5;
+    if (hiEnergy && hiDance) q.hiHi++;
+    else if (hiEnergy && !hiDance) q.hiLo++;
+    else if (!hiEnergy && hiDance) q.loHi++;
+    else q.loLo++;
+  }
+  const dominantLabel =
+    q.hiHi >= q.hiLo && q.hiHi >= q.loHi && q.hiHi >= q.loLo
+      ? "high-energy & danceable"
+      : q.hiLo >= q.loHi && q.hiLo >= q.loLo
+        ? "high-energy, low-groove"
+        : q.loHi >= q.loLo
+          ? "groove-heavy, low-intensity"
+          : "mellow & sparse";
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <SectionLabel
+          icon={Activity}
+          hint={`${scatter.length} songs plotted · mostly ${dominantLabel}`}
+        >
+          Sound Space
+        </SectionLabel>
+        <p className="mb-2 text-xs text-muted-foreground">
+          Every dot is a song. Horizontal = danceability · vertical = energy.
+          Hover a dot for the track.
+        </p>
+        <ResponsiveContainer width="100%" height={280}>
+          <ScatterChart margin={{ top: 8, right: 12, bottom: 8, left: -10 }}>
+            <CartesianGrid
+              strokeDasharray="3 3"
+              stroke="hsl(var(--border))"
+              strokeOpacity={0.4}
+            />
+            <XAxis
+              type="number"
+              dataKey="danceability"
+              domain={[0, 1]}
+              tickFormatter={(v) => `${Math.round(v * 100)}%`}
+              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
+              tickLine={false}
+              axisLine={false}
+              label={{
+                value: "Danceability →",
+                position: "insideBottom",
+                offset: -2,
+                fontSize: 10,
+                fill: "hsl(var(--muted-foreground))",
+              }}
+            />
+            <YAxis
+              type="number"
+              dataKey="energy"
+              domain={[0, 1]}
+              tickFormatter={(v) => `${Math.round(v * 100)}%`}
+              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
+              tickLine={false}
+              axisLine={false}
+              width={40}
+              label={{
+                value: "Energy ↑",
+                angle: -90,
+                position: "insideLeft",
+                offset: 10,
+                fontSize: 10,
+                fill: "hsl(var(--muted-foreground))",
+              }}
+            />
+            <ZAxis type="number" range={[28, 28]} />
+            <Tooltip
+              cursor={{ strokeDasharray: "3 3", stroke: "#A855F7" }}
+              content={<ScatterTooltip />}
+            />
+            <Scatter data={scatter} fill="#A855F7" fillOpacity={0.55} />
+          </ScatterChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Tempo Profile ────────────────────────────────────────────────────
+
+function TempoTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: TempoBin }>;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const p = payload[0].payload;
+  return (
+    <div className="rounded-md border border-border bg-card px-2.5 py-2 text-[11px] shadow-lg">
+      <p className="font-semibold tabular-nums">{p.range} BPM</p>
+      <p className="tabular-nums text-purple-300">{p.count} songs</p>
+    </div>
+  );
+}
+
+function TempoProfileCard() {
+  const { data, isLoading } = useLibraryDistributions();
+
+  if (isLoading) return <SkeletonBlock />;
+
+  const hist = data?.tempo_histogram ?? [];
+  const total = hist.reduce((s, b) => s + b.count, 0);
+  const avg = data?.avg_tempo ?? 0;
+
+  if (total === 0) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <SectionLabel icon={Timer}>Tempo Profile</SectionLabel>
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            No BPM data yet.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const peakBin = hist.reduce(
+    (best, cur) => (cur.count > best.count ? cur : best),
+    hist[0],
+  );
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <SectionLabel
+          icon={Timer}
+          hint={
+            <span>
+              avg <span className="text-purple-300 tabular-nums">{avg}</span>{" "}
+              BPM · peak {peakBin.range}
+            </span>
+          }
+        >
+          Tempo Profile
+        </SectionLabel>
+        <ResponsiveContainer width="100%" height={180}>
+          <BarChart
+            data={hist}
+            margin={{ top: 4, right: 8, bottom: 0, left: -20 }}
+          >
+            <CartesianGrid
+              strokeDasharray="3 3"
+              stroke="hsl(var(--border))"
+              strokeOpacity={0.4}
+              vertical={false}
+            />
+            <XAxis
+              dataKey="range"
+              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
+              tickLine={false}
+              axisLine={false}
+            />
+            <YAxis
+              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
+              tickLine={false}
+              axisLine={false}
+              allowDecimals={false}
+            />
+            <Tooltip
+              cursor={{ fill: "hsl(var(--muted) / 0.3)" }}
+              content={<TempoTooltip />}
+            />
+            <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={40}>
+              {hist.map((b, i) => (
+                <Cell
+                  key={i}
+                  fill={b.range === peakBin.range ? "#A855F7" : "#7E22CE"}
+                  fillOpacity={b.range === peakBin.range ? 1 : 0.55}
+                />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Key & Mode ───────────────────────────────────────────────────────
+
+function KeyModeCard() {
+  const { data, isLoading } = useLibraryDistributions();
+
+  if (isLoading) return <SkeletonBlock />;
+
+  const keys: KeyBucket[] = data?.key_distribution ?? [];
+  const total = keys.reduce((s, k) => s + k.major + k.minor, 0);
+
+  if (total === 0) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <SectionLabel icon={KeyRound}>Musical Keys</SectionLabel>
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            Key analysis not available yet.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const totalMajor = keys.reduce((s, k) => s + k.major, 0);
+  const totalMinor = keys.reduce((s, k) => s + k.minor, 0);
+  const majorPct = Math.round((totalMajor / total) * 100);
+  const minorPct = 100 - majorPct;
+
+  const max = keys.reduce(
+    (m, k) => Math.max(m, k.major + k.minor),
+    1,
+  );
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <SectionLabel
+          icon={KeyRound}
+          hint={
+            <span>
+              <span className="text-purple-300 tabular-nums">{majorPct}%</span>{" "}
+              major ·{" "}
+              <span className="text-purple-300 tabular-nums">{minorPct}%</span>{" "}
+              minor
+            </span>
+          }
+        >
+          Musical Keys
+        </SectionLabel>
+        <p className="mb-3 text-xs text-muted-foreground">
+          Per-key major (lighter) vs. minor (darker) distribution.
+        </p>
+        <ul className="space-y-1.5">
+          {keys.map((k) => {
+            const count = k.major + k.minor;
+            const pct = Math.round((count / max) * 100);
+            const majorWidth =
+              count > 0 ? (k.major / count) * pct : 0;
+            const minorWidth =
+              count > 0 ? (k.minor / count) * pct : 0;
+            return (
+              <li key={k.key} className="flex items-center gap-2">
+                <span className="w-5 text-right text-[11px] font-semibold tabular-nums text-muted-foreground">
+                  {k.key}
+                </span>
+                <div className="relative h-3 flex-1 overflow-hidden rounded-full bg-muted/50">
+                  <div
+                    className="absolute inset-y-0 left-0 bg-purple-400/80"
+                    style={{ width: `${majorWidth}%` }}
+                    title={`${k.major} ${k.key} major`}
+                  />
+                  <div
+                    className="absolute inset-y-0 bg-purple-700"
+                    style={{
+                      left: `${majorWidth}%`,
+                      width: `${minorWidth}%`,
+                    }}
+                    title={`${k.minor} ${k.key} minor`}
+                  />
+                </div>
+                <span className="w-8 text-right text-[10px] tabular-nums text-muted-foreground">
+                  {count}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+        <div className="mt-3 flex items-center gap-3 text-[10px] text-muted-foreground">
+          <span className="flex items-center gap-1.5">
+            <span className="h-2 w-3 rounded-sm bg-purple-400/80" /> major
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="h-2 w-3 rounded-sm bg-purple-700" /> minor
+          </span>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Recently Analyzed ────────────────────────────────────────────────
+
 function RecentTrackTile({ item }: { item: RecentEnrichment }) {
   const bpm = item.tempo ? Math.round(item.tempo) : null;
   return (
-    <div className="w-36 shrink-0 space-y-1.5">
+    <div className="w-32 shrink-0 space-y-1.5 sm:w-36">
       {item.artwork_url ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -698,12 +915,12 @@ function RecentTrackTile({ item }: { item: RecentEnrichment }) {
           alt=""
           aria-hidden="true"
           loading="lazy"
-          className="h-36 w-36 rounded-md object-cover ring-1 ring-border/40"
+          className="h-32 w-32 rounded-md object-cover ring-1 ring-border/40 sm:h-36 sm:w-36"
         />
       ) : (
         <div
           aria-hidden="true"
-          className="flex h-36 w-36 items-center justify-center rounded-md bg-gradient-to-br from-purple-700/40 to-purple-900/60 text-sm font-semibold text-purple-100 ring-1 ring-border/40"
+          className="flex h-32 w-32 items-center justify-center rounded-md bg-gradient-to-br from-purple-700/40 to-purple-900/60 text-sm font-semibold text-purple-100 ring-1 ring-border/40 sm:h-36 sm:w-36"
         >
           {initials(item.artist_name || item.name)}
         </div>
@@ -738,8 +955,8 @@ function RecentlyAnalyzedStrip() {
           <SectionLabel icon={Zap}>Recently Analyzed</SectionLabel>
           <div className="flex animate-pulse gap-3 overflow-hidden">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="w-36 shrink-0 space-y-2">
-                <div className="h-36 w-36 rounded-md bg-muted" />
+              <div key={i} className="w-32 shrink-0 space-y-2 sm:w-36">
+                <div className="h-32 w-32 rounded-md bg-muted sm:h-36 sm:w-36" />
                 <div className="h-3 w-3/4 rounded bg-muted" />
                 <div className="h-2 w-1/2 rounded bg-muted" />
               </div>
@@ -766,7 +983,7 @@ function RecentlyAnalyzedStrip() {
   }
 
   return (
-    <Card>
+    <Card className="overflow-hidden">
       <CardContent className="pt-4">
         <SectionLabel
           icon={Zap}
@@ -774,107 +991,19 @@ function RecentlyAnalyzedStrip() {
         >
           Recently Analyzed
         </SectionLabel>
-        <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-2 [scrollbar-width:thin]">
-          {items.map((item: RecentEnrichment) => (
-            <RecentTrackTile key={item.catalog_id} item={item} />
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function ReleaseEraCard({
-  yearDist,
-}: {
-  yearDist: Record<string, number>;
-}) {
-  const era = describeEra(yearDist);
-  const recent = Object.entries(yearDist)
-    .map(([y, c]) => [Number(y), Number(c)] as const)
-    .filter(([y, c]) => y > 1950 && y < 2100 && c > 0)
-    .sort((a, b) => a[0] - b[0])
-    .slice(-15);
-
-  if (recent.length === 0 || !era) {
-    return (
-      <Card>
-        <CardContent className="pt-4">
-          <SectionLabel icon={Calendar}>Release Era</SectionLabel>
-          <p className="py-6 text-center text-sm text-muted-foreground">
-            No release years detected yet.
-          </p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  const chartData = recent.map(([year, songs]) => ({
-    year: String(year),
-    songs,
-    isPeak: String(year) === era.peak,
-  }));
-
-  return (
-    <Card>
-      <CardContent className="pt-4">
-        <div className="mb-3 flex items-baseline justify-between gap-4">
-          <SectionLabel icon={Calendar}>Release Era</SectionLabel>
-          <div className="text-right">
-            <p className="text-sm font-semibold tabular-nums">{era.range}</p>
-            <p className="text-[11px] text-muted-foreground">
-              Peak: <span className="text-purple-300">{era.peak}</span> ·{" "}
-              {era.peakShare}% of library
-            </p>
+        <div className="overflow-x-auto pb-2 [scrollbar-width:thin]">
+          <div className="flex gap-3">
+            {items.map((item: RecentEnrichment) => (
+              <RecentTrackTile key={item.catalog_id} item={item} />
+            ))}
           </div>
         </div>
-        <ResponsiveContainer width="100%" height={180}>
-          <AreaChart
-            data={chartData}
-            margin={{ top: 5, right: 8, bottom: 0, left: -20 }}
-          >
-            <defs>
-              <linearGradient id="eraGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#A855F7" stopOpacity={0.45} />
-                <stop offset="95%" stopColor="#A855F7" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <XAxis
-              dataKey="year"
-              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-              interval="preserveStartEnd"
-            />
-            <YAxis
-              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
-              tickLine={false}
-              axisLine={false}
-              allowDecimals={false}
-              width={32}
-            />
-            <Tooltip
-              contentStyle={{
-                background: "hsl(var(--card))",
-                border: "1px solid hsl(var(--border))",
-                borderRadius: "8px",
-                fontSize: "12px",
-              }}
-              formatter={(v) => [`${v} songs`, "Count"]}
-            />
-            <Area
-              type="monotone"
-              dataKey="songs"
-              stroke="#A855F7"
-              strokeWidth={2}
-              fill="url(#eraGradient)"
-            />
-          </AreaChart>
-        </ResponsiveContainer>
       </CardContent>
     </Card>
   );
 }
+
+// ── Library Snapshot ─────────────────────────────────────────────────
 
 function LibrarySnapshot({ profile }: { profile: TasteProfile }) {
   const uniqueGenres = Object.keys(profile.genre_vector).length;
@@ -900,7 +1029,7 @@ function LibrarySnapshot({ profile }: { profile: TasteProfile }) {
     {
       label: "Genres detected",
       value: uniqueGenres.toLocaleString(),
-      hint: uniqueGenres > 0 ? "regional-weighted" : undefined,
+      hint: uniqueGenres > 0 ? "cleaned + deduped" : undefined,
     },
     {
       label: "Ranked artists",
@@ -936,14 +1065,12 @@ function LibrarySnapshot({ profile }: { profile: TasteProfile }) {
   return (
     <Card>
       <CardContent className="pt-4">
-        <SectionLabel icon={Database} hint={<TrendingUp className="h-3 w-3" />}>
-          Library Snapshot
-        </SectionLabel>
-        <dl className="divide-y divide-border/40">
+        <SectionLabel icon={Database}>Library Snapshot</SectionLabel>
+        <dl className="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
           {rows.map((r) => (
             <div
               key={r.label}
-              className="flex items-baseline justify-between gap-4 py-2 first:pt-0 last:pb-0"
+              className="flex items-baseline justify-between gap-4 border-b border-border/40 py-2 last:border-b-0 sm:last:border-b"
             >
               <dt className="text-xs text-muted-foreground">{r.label}</dt>
               <dd className="text-right">
@@ -1002,7 +1129,7 @@ export default function DashboardPage() {
   const isEmpty = !isLoading && !error && !profile;
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6">
       <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
         Dashboard
       </h1>
@@ -1085,16 +1212,17 @@ export default function DashboardPage() {
       {isLoading ? (
         <>
           <SkeletonHero />
+          <div className="grid gap-4 md:grid-cols-2">
+            <SkeletonBlock />
+            <SkeletonBlock />
+          </div>
           <SkeletonBlock />
           <div className="grid gap-4 md:grid-cols-2">
             <SkeletonBlock />
             <SkeletonBlock />
           </div>
           <SkeletonBlock />
-          <div className="grid gap-4 md:grid-cols-[3fr_2fr]">
-            <SkeletonBlock />
-            <SkeletonBlock />
-          </div>
+          <SkeletonBlock />
         </>
       ) : isEmpty ? (
         <Card>
@@ -1118,19 +1246,21 @@ export default function DashboardPage() {
         <>
           <SoundSignature profile={profile} />
 
-          <SonicNeighborsCard />
-
           <div className="grid gap-4 md:grid-cols-2">
             <GenreDNA genreVector={profile.genre_vector} />
             <TopArtistsCard artists={profile.top_artists} />
           </div>
 
+          <SoundSpaceCard />
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <TempoProfileCard />
+            <KeyModeCard />
+          </div>
+
           <RecentlyAnalyzedStrip />
 
-          <div className="grid gap-4 md:grid-cols-[3fr_2fr]">
-            <ReleaseEraCard yearDist={profile.release_year_distribution} />
-            <LibrarySnapshot profile={profile} />
-          </div>
+          <LibrarySnapshot profile={profile} />
         </>
       ) : null}
 
