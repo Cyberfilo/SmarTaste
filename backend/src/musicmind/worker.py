@@ -2494,10 +2494,13 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         len(rows_both), len(rows_mert_only),
     )
 
-    # Map ALL relevant ISRCs → (catalog_id, preview_url) in one query
+    # Map ALL relevant ISRCs → (catalog_id, preview_url, name, artist) in one
+    # query. name + artist_name are needed for iTunes re-resolution when the
+    # stored preview_url is missing or expired.
     all_isrcs = [r.isrc for r in (rows_both + rows_mert_only) if r.isrc]
     isrc_to_cid: dict[str, str] = {}
     isrc_to_url: dict[str, str] = {}
+    isrc_to_meta: dict[str, tuple[str, str]] = {}  # isrc → (name, artist)
     if all_isrcs:
         async with engine.begin() as conn:
             gsc = await conn.execute(
@@ -2505,6 +2508,8 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                     global_song_cache.c.catalog_id,
                     global_song_cache.c.isrc,
                     global_song_cache.c.preview_url,
+                    global_song_cache.c.name,
+                    global_song_cache.c.artist_name,
                 ).where(global_song_cache.c.isrc.in_(all_isrcs))
             )
             for r in gsc:
@@ -2512,13 +2517,61 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                     isrc_to_cid[r.isrc] = r.catalog_id
                     if r.preview_url:
                         isrc_to_url[r.isrc] = r.preview_url
+                    if r.name and r.artist_name:
+                        isrc_to_meta[r.isrc] = (r.name, r.artist_name)
+
+    itunes_resolved = 0
+    itunes_attempts = 0
+    max_itunes_per_cycle = 50
+
+    async def _itunes_resolve(isrc: str) -> bytes | None:
+        """Re-resolve preview URL via iTunes Search, download, and cache.
+
+        Capped at max_itunes_per_cycle attempts per worker cycle so the
+        main loop isn't blocked for 20+ minutes. Remaining rows get
+        picked up next cycle (URLs persist once resolved).
+        """
+        nonlocal itunes_resolved, itunes_attempts
+        if itunes_attempts >= max_itunes_per_cycle:
+            return None
+        from musicmind.engine.enrichment.itunes import (
+            search_preview_url as itunes_search_preview_url,
+        )
+        meta = isrc_to_meta.get(isrc)
+        if not meta:
+            return None
+        name, artist = meta
+        itunes_attempts += 1
+        # iTunes rate limit is ~20 req/min; space calls ~3.5s apart
+        await asyncio.sleep(3.5)
+        try:
+            url = await itunes_search_preview_url(name=name, artist_name=artist)
+        except Exception:
+            return None
+        if not url:
+            return None
+        audio = await _download_preview(url)
+        if not audio:
+            return None
+        cid = isrc_to_cid.get(isrc, "")
+        if cid:
+            await _cache_preview_audio(engine, cid, audio, url)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.update(global_song_cache)
+                    .where(global_song_cache.c.catalog_id == cid)
+                    .values(preview_url=url)
+                )
+        isrc_to_url[isrc] = url
+        itunes_resolved += 1
+        return audio
 
     async def _resolve_bytes(isrc: str) -> bytes | None:
-        """Return audio bytes: cached first, else download-and-cache.
+        """Return audio bytes: cached → existing URL → iTunes re-resolve.
 
-        Download failures (403 on expired Deezer CDN, 404 on dead iTunes,
-        timeouts) return None so the row skips this cycle entirely rather
-        than wasting a GPU dispatch on a dead URL.
+        When the stored preview_url is missing or expired (Deezer 403),
+        falls back to iTunes Search API using track name + artist. Saves
+        the fresh URL to global_song_cache so subsequent cycles skip this.
         """
         cid = isrc_to_cid.get(isrc, "")
         if not cid:
@@ -2527,15 +2580,13 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         if cached:
             return cached
         url = isrc_to_url.get(isrc, "")
-        if not url:
-            return None
-        audio = await _download_preview(url)
-        if audio:
-            # Persist bytes so the next GPU pass + any future re-run read
-            # from preview_audio_cache and skip the CDN round-trip.
-            await _cache_preview_audio(engine, cid, audio, url)
-            return audio
-        return None
+        if url:
+            audio = await _download_preview(url)
+            if audio:
+                await _cache_preview_audio(engine, cid, audio, url)
+                return audio
+        # Stored URL missing or dead — try iTunes re-resolution
+        return await _itunes_resolve(isrc)
 
     async def _build_queue(rows) -> list[tuple[str, bytes]]:
         q: list[tuple[str, bytes]] = []
@@ -2550,9 +2601,10 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
 
     logger.info(
         "Global GPU backfill queues: %d both (from %d rows), "
-        "%d mert-only (from %d rows) — dead URLs skipped",
+        "%d mert-only (from %d rows) — %d URLs re-resolved via iTunes",
         len(both_queue), len(rows_both),
         len(mert_queue), len(rows_mert_only),
+        itunes_resolved,
     )
 
     async def _apply_results(queue_items, gpu_results) -> int:
