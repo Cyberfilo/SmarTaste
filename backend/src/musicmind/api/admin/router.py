@@ -623,6 +623,213 @@ async def rebuild_taste_profiles(
     }
 
 
+@router.get("/songs-table")
+async def admin_songs_table(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Paginated, per-song enrichment grid for the admin dashboard.
+
+    Each row reports presence booleans for:
+      essentia (audio_features_cache.energy IS NOT NULL)
+      clap    (audio_embeddings.clap_embedding IS NOT NULL, or global by ISRC)
+      mert    (same, for MERT)
+      isrc    (valid ISRC that's not the NO_ISRC sentinel)
+      cached_audio (preview_audio_cache row exists)
+      user_linked  (in song_metadata_cache with library_id or date_added)
+    """
+    engine = request.app.state.engine
+    limit = max(1, min(limit, 200))
+
+    async with engine.begin() as conn:
+        total = (await conn.execute(sa.text("""
+            SELECT count(*) FROM (
+                SELECT catalog_id FROM song_metadata_cache
+                UNION
+                SELECT catalog_id FROM global_song_cache
+            ) s
+        """))).scalar() or 0
+
+        rows = (await conn.execute(sa.text("""
+            WITH merged AS (
+                SELECT s.catalog_id,
+                       coalesce(s.name, g.name, '') AS name,
+                       coalesce(s.artist_name, g.artist_name, '') AS artist_name,
+                       coalesce(NULLIF(s.artwork_url_template, ''),
+                                NULLIF(g.artwork_url, ''), '') AS artwork_url,
+                       coalesce(s.isrc, g.isrc) AS isrc,
+                       (s.library_id IS NOT NULL
+                        OR s.date_added_to_library IS NOT NULL) AS user_linked
+                FROM song_metadata_cache s
+                FULL OUTER JOIN global_song_cache g
+                  ON s.catalog_id = g.catalog_id
+                LIMIT :lim OFFSET :off
+            )
+            SELECT
+                m.catalog_id, m.name, m.artist_name, m.artwork_url,
+                m.isrc, m.user_linked,
+                EXISTS (
+                    SELECT 1 FROM audio_features_cache af
+                    WHERE af.catalog_id = m.catalog_id AND af.energy IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM audio_features_global afg
+                    WHERE afg.isrc = m.isrc AND afg.energy IS NOT NULL
+                ) AS has_essentia,
+                EXISTS (
+                    SELECT 1 FROM audio_embeddings ae
+                    WHERE ae.catalog_id = m.catalog_id AND ae.clap_embedding IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM audio_embeddings_global aeg
+                    WHERE aeg.isrc = m.isrc AND aeg.clap_embedding IS NOT NULL
+                ) AS has_clap,
+                EXISTS (
+                    SELECT 1 FROM audio_embeddings ae
+                    WHERE ae.catalog_id = m.catalog_id AND ae.mert_embedding IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM audio_embeddings_global aeg
+                    WHERE aeg.isrc = m.isrc AND aeg.mert_embedding IS NOT NULL
+                ) AS has_mert,
+                EXISTS (
+                    SELECT 1 FROM preview_audio_cache p
+                    WHERE p.catalog_id = m.catalog_id
+                ) AS has_cached_audio
+            FROM merged m
+        """), {"lim": limit, "off": offset})).fetchall()
+
+    items = [
+        {
+            "catalog_id": r.catalog_id,
+            "name": r.name or "",
+            "artist_name": r.artist_name or "",
+            "artwork_url": r.artwork_url or "",
+            "isrc_ok": bool(r.isrc) and r.isrc != "__NO_ISRC__",
+            "user_linked": bool(r.user_linked),
+            "has_essentia": bool(r.has_essentia),
+            "has_clap": bool(r.has_clap),
+            "has_mert": bool(r.has_mert),
+            "has_cached_audio": bool(r.has_cached_audio),
+        }
+        for r in rows
+    ]
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@router.get("/artists-table")
+async def admin_artists_table(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Paginated per-artist grid. Columns:
+      source: library | cobweb | feat  (how the artist entered our system)
+      user: owning user email if any
+      tracks_total / tracks_library (how many + how many in user libraries)
+      discovery_pct: 1 - (library / total), as a percentage
+    """
+    engine = request.app.state.engine
+    limit = max(1, min(limit, 200))
+
+    async with engine.begin() as conn:
+        # Total distinct artists across library + global + cobweb
+        total = (await conn.execute(sa.text("""
+            SELECT count(DISTINCT artist_name) FROM (
+                SELECT artist_name FROM song_metadata_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM global_song_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM artist_cobweb WHERE artist_name <> ''
+            ) a
+        """))).scalar() or 0
+
+        rows = (await conn.execute(sa.text("""
+            WITH all_artists AS (
+                SELECT artist_name FROM song_metadata_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM global_song_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM artist_cobweb WHERE artist_name <> ''
+            ),
+            library_counts AS (
+                SELECT artist_name, count(*) AS c, max(user_id) AS any_user
+                FROM song_metadata_cache
+                WHERE (library_id IS NOT NULL OR date_added_to_library IS NOT NULL)
+                GROUP BY artist_name
+            ),
+            disco_counts AS (
+                SELECT artist_name, count(*) AS c
+                FROM song_metadata_cache
+                WHERE library_id IS NULL AND date_added_to_library IS NULL
+                GROUP BY artist_name
+            ),
+            global_counts AS (
+                SELECT artist_name, count(*) AS c
+                FROM global_song_cache GROUP BY artist_name
+            ),
+            cobweb_flag AS (
+                SELECT DISTINCT artist_name, 1 AS in_cobweb FROM artist_cobweb
+            )
+            SELECT a.artist_name,
+                   coalesce(lc.c, 0) AS library_tracks,
+                   coalesce(dc.c, 0) AS disco_tracks,
+                   coalesce(gc.c, 0) AS global_tracks,
+                   coalesce(cf.in_cobweb, 0) AS in_cobweb,
+                   lc.any_user AS any_user
+            FROM all_artists a
+            LEFT JOIN library_counts lc ON lc.artist_name = a.artist_name
+            LEFT JOIN disco_counts   dc ON dc.artist_name = a.artist_name
+            LEFT JOIN global_counts  gc ON gc.artist_name = a.artist_name
+            LEFT JOIN cobweb_flag    cf ON cf.artist_name = a.artist_name
+            ORDER BY coalesce(lc.c, 0) DESC, coalesce(gc.c, 0) DESC,
+                     a.artist_name
+            LIMIT :lim OFFSET :off
+        """), {"lim": limit, "off": offset})).fetchall()
+
+    # User email lookup for any_user id
+    any_user_ids = {r.any_user for r in rows if r.any_user}
+    email_by_uid: dict[str, str] = {}
+    if any_user_ids:
+        async with engine.begin() as conn:
+            urows = await conn.execute(
+                sa.select(users.c.id, users.c.email).where(
+                    users.c.id.in_(list(any_user_ids))
+                )
+            )
+            for u in urows:
+                email_by_uid[u.id] = u.email
+
+    items = []
+    for r in rows:
+        total_tracks = int(r.library_tracks) + int(r.disco_tracks)
+        # Prefer "library" if the artist is in any user's library, else
+        # "cobweb" if in artist_cobweb, else "feat" (appears as featured in
+        # a library track — implicit when neither library nor cobweb flag).
+        if r.library_tracks > 0:
+            source = "library"
+        elif r.in_cobweb:
+            source = "cobweb"
+        else:
+            source = "feat"
+        discovery_pct = (
+            round(100 * r.disco_tracks / total_tracks, 1)
+            if total_tracks > 0 else 0.0
+        )
+        items.append({
+            "artist_name": r.artist_name,
+            "source": source,
+            "user": email_by_uid.get(r.any_user, "") if r.any_user else "",
+            "tracks_library": int(r.library_tracks),
+            "tracks_discovered": int(r.disco_tracks),
+            "tracks_total": total_tracks,
+            "tracks_global": int(r.global_tracks),
+            "discovery_pct": discovery_pct,
+            "library_pct": round(100 - discovery_pct, 1),
+        })
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
 @router.post("/reindex/{user_id}")
 async def reindex_user(
     request: Request,

@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import sqlalchemy as sa
 from fastapi import FastAPI
+
+# Uvicorn configures its own loggers but leaves `musicmind.*` at the Python
+# default WARNING — which silently swallows orchestration + worker logs on
+# Railway. Force INFO on the root musicmind namespace so those lines show up.
+_mm_logger = logging.getLogger("musicmind")
+_mm_logger.setLevel(logging.INFO)
+if not _mm_logger.handlers:
+    _h = logging.StreamHandler(sys.stderr)
+    _h.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    _mm_logger.addHandler(_h)
+_mm_logger.propagate = False
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -73,10 +88,20 @@ async def _dispatch_startup_work(engine, settings) -> None:
         except Exception:
             gpu_gaps = -1
 
-    log.info(
-        "Backend startup orchestration: library_gaps=%d, isrc_gaps=%d, gpu_gaps=%d",
-        lib_gaps, isrc_gaps, gpu_gaps,
-    )
+    # Build a natural-language plan and print what the backend is asking
+    # the worker to do. Railway log viewer shows these as readable narration.
+    plan: list[str] = []
+    if lib_gaps > 0:
+        plan.append(f"enrich {lib_gaps} library songs missing audio features")
+    if isrc_gaps > 0:
+        plan.append(f"look up {isrc_gaps} missing ISRCs via Deezer + MusicBrainz")
+    if gpu_gaps > 0:
+        plan.append(f"fill {gpu_gaps} global CLAP/MERT embeddings on the GPU")
+    plan.append("run a cobweb + discovery cycle to grow the candidate pool")
+
+    log.info("── Backend booted. Telling worker to: ──")
+    for i, step in enumerate(plan, 1):
+        log.info("  %d. %s", i, step)
 
     # Lazy import — worker is part of same package, no cross-service HTTP
     try:
@@ -88,49 +113,54 @@ async def _dispatch_startup_work(engine, settings) -> None:
     async def _task_library() -> None:
         if lib_gaps <= 0:
             return
+        log.info("▶ Worker: starting library enrichment for %d tracks", lib_gaps)
         try:
             enriched = await wk._fill_library_gaps(engine, settings)
-            log.info("Backend-triggered library enrichment: %d enriched", enriched)
+            log.info("✓ Worker: library enrichment done — %d tracks got audio features", enriched)
         except Exception:
-            log.exception("Backend-triggered library enrichment failed")
+            log.exception("✗ Worker: library enrichment crashed")
 
     async def _task_isrc() -> None:
         if isrc_gaps <= 0:
             return
+        log.info("▶ Worker: starting ISRC backfill for up to 500 tracks")
         try:
             found = await wk._backfill_isrcs(engine, batch_limit=500)
-            log.info("Backend-triggered ISRC backfill: %d found", found)
+            log.info(
+                "✓ Worker: ISRC backfill done — %d ISRCs found (unfindable ones marked NO_ISRC)",
+                found,
+            )
         except Exception:
-            log.exception("Backend-triggered ISRC backfill failed")
+            log.exception("✗ Worker: ISRC backfill crashed")
 
     async def _task_gpu() -> None:
         try:
-            per_user = await wk._backfill_gpu_embeddings(engine, settings)
-            if per_user > 0:
+            if gpu_gaps > 0 or True:  # always try — per-user may have gaps too
                 log.info(
-                    "Backend-triggered GPU backfill (per-user): %d CLAP/MERT", per_user,
+                    "▶ Worker: starting GPU backfill (CLAP + MERT via local/Modal GPU)"
                 )
-            if gpu_gaps > 0:
-                globally = await wk._backfill_gpu_embeddings_global(engine, settings)
-                if globally > 0:
-                    log.info(
-                        "Backend-triggered GPU backfill (global): %d CLAP/MERT",
-                        globally,
-                    )
+                per_user = await wk._backfill_gpu_embeddings(engine, settings)
+                if per_user > 0:
+                    log.info("✓ Worker: per-user GPU backfill stored %d CLAP/MERT", per_user)
+                if gpu_gaps > 0:
+                    globally = await wk._backfill_gpu_embeddings_global(engine, settings)
+                    if globally > 0:
+                        log.info("✓ Worker: global GPU backfill stored %d CLAP/MERT", globally)
         except Exception:
-            log.exception("Backend-triggered GPU backfill failed")
+            log.exception("✗ Worker: GPU backfill crashed")
 
     async def _task_cobweb() -> None:
+        log.info("▶ Worker: starting cobweb + discovery cycle")
         try:
             stats = await wk._run_cobweb_cycle(engine, settings)
             log.info(
-                "Backend-triggered cobweb cycle: %d artists, %d songs cached, %d discovery candidates",
+                "✓ Worker: cobweb cycle done — %d new artists, %d songs cached globally, %d discovery candidates upserted",
                 stats.get("cobweb_artists", 0),
                 stats.get("songs_cached", 0),
                 stats.get("discovery_candidates", 0),
             )
         except Exception:
-            log.exception("Backend-triggered cobweb cycle failed")
+            log.exception("✗ Worker: cobweb cycle crashed")
 
     # Run tasks in the documented order; each awaits its predecessor so
     # ISRC is done before GPU (which needs ISRCs to look up global embeddings)
