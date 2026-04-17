@@ -7,6 +7,18 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.380 — 2026-04-17
+
+### iTunes re-resolution for global MERT backfill
+
+Global MERT embeddings were stuck at 0 because the 390 CLAP-only rows in `audio_embeddings_global` had dead or missing preview URLs: 273 had no URL at all, 114 had expired Deezer CDN links (403), and only 3 had working iTunes URLs. The `_backfill_gpu_embeddings_global` helper in `worker.py` tried to download from the stored URL but never attempted to re-resolve a fresh one — so the `mert_queue` was always empty or below `GPU_MIN_BATCH`, deferring forever.
+
+**Fix:** `_resolve_bytes` now falls back to `search_preview_url` from `itunes.py` when the stored URL is missing or download fails. On success, the fresh iTunes URL is written back to `global_song_cache.preview_url` and the audio bytes are cached in `preview_audio_cache`, so subsequent cycles skip the CDN round-trip entirely.
+
+Rate-limited to ~17 req/min (3.5s sleep) to stay under iTunes' ~20 req/min IP cap. Capped at 50 iTunes attempts per worker cycle (~3 min wall time) so the main loop isn't blocked. With 390 rows, full drain takes ~8 cycles.
+
+---
+
 ## V 6.375 — 2026-04-17
 
 ### Sound Space plots every library song, excludes worker-discovered tracks
