@@ -208,26 +208,37 @@ def _extract_dsp_features(es: Any, audio: Any) -> ExtractedFeatures:
         key_extractor = es.KeyExtractor()
         key, scale, key_strength = key_extractor(audio)
 
-        # Energy (RMS-based, normalized to ~0-1)
+        # Energy (RMS-based, normalized to ~0-1). The `* 10` multiplier of
+        # earlier versions saturated at 1.0 for any modern master (RMS ~0.15+
+        # × 10 = 1.5+ → clamped to 1.0). Reduced to `* 4` which maps typical
+        # modern-rap RMS (~0.15–0.25) to 0.6–1.0 — still bright but actually
+        # discriminative across tracks.
         rms = es.RMS()
         energy_raw = float(rms(audio))
-        energy = min(1.0, energy_raw * 10)
+        energy = min(1.0, energy_raw * 4)
 
-        # Danceability
+        # Danceability — Essentia returns 0–5+ range, not 0–1. Rescale by
+        # dividing by 2.5 (empirical: the 95th percentile for contemporary
+        # dance-centric genres sits around 2.5). Values above 2.5 still
+        # clamp to 1.0 but that's < 5% of real library data.
         dance = es.Danceability()
         danceability_raw, _ = dance(audio)
+        danceability = min(1.0, float(danceability_raw) / 2.5)
 
         # Spectral centroid (brightness proxy, normalized)
         centroid = es.SpectralCentroidTime()
         brightness_raw = float(centroid(audio))
         brightness = min(1.0, brightness_raw / 8000)
 
-        # Beat strength (may be scalar or array depending on Essentia version)
+        # Beat strength — beats_confidence from Essentia is 0–5+ (unbounded
+        # for very percussive tracks). Divide-by-4 maps typical rap / dance
+        # percussion (2–4) to 0.5–1.0.
         try:
             bc = beats_confidence
-            beat_strength = float(bc.mean() if hasattr(bc, "mean") else bc)
+            bs_raw = float(bc.mean() if hasattr(bc, "mean") else bc)
         except (TypeError, ValueError):
-            beat_strength = 0.5
+            bs_raw = 0.5
+        beat_strength = min(1.0, bs_raw / 4.0)
 
         # Loudness (EBUR128)
         loudness_lufs = None
@@ -241,7 +252,7 @@ def _extract_dsp_features(es: Any, audio: Any) -> ExtractedFeatures:
         return ExtractedFeatures(
             tempo=round(float(bpm), 1),
             energy=round(energy, 3),
-            danceability=round(float(danceability_raw), 3),
+            danceability=round(danceability, 3),
             brightness=round(brightness, 3),
             beat_strength=round(beat_strength, 3),
             key=key,
