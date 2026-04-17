@@ -31,6 +31,11 @@ def _spotify_track_to_cache_dict(track: dict[str, Any]) -> dict[str, Any]:
     artist_name = artists[0].get("name", "") if artists else ""
     album = track.get("album", {})
     ext_ids = track.get("external_ids", {})
+    # Spotify ships album art as a list of {url, width, height} — pick the
+    # largest and store it verbatim (it is NOT an {w}x{h} template, so the
+    # frontend's Apple-style expander will pass it through unchanged).
+    album_images = album.get("images") or []
+    album_art_url = album_images[0].get("url", "") if album_images else ""
     return {
         "catalog_id": track.get("id", ""),
         "library_id": None,
@@ -46,7 +51,7 @@ def _spotify_track_to_cache_dict(track: dict[str, Any]) -> dict[str, Any]:
         "has_lyrics": False,
         "content_rating": None,
         "artwork_bg_color": "",
-        "artwork_url_template": "",
+        "artwork_url_template": album_art_url,
         "preview_url": track.get("preview_url") or "",
         "user_rating": None,
         "date_added_to_library": None,
@@ -379,6 +384,7 @@ async def fetch_apple_music_library(
                 for resource in items:
                     attrs = resource.get("attributes", {})
                     play_params = attrs.get("playParams", {})
+                    artwork = attrs.get("artwork") or {}
                     results.append({
                         "catalog_id": (
                             play_params.get("catalogId")
@@ -396,8 +402,8 @@ async def fetch_apple_music_library(
                         "audio_traits": attrs.get("audioTraits", []),
                         "has_lyrics": attrs.get("hasLyrics", False),
                         "content_rating": attrs.get("contentRating"),
-                        "artwork_bg_color": "",
-                        "artwork_url_template": "",
+                        "artwork_bg_color": artwork.get("bgColor") or "",
+                        "artwork_url_template": artwork.get("url") or "",
                         "preview_url": "",
                         "user_rating": None,
                         "date_added_to_library": attrs.get("dateAdded"),

@@ -11,12 +11,14 @@ Rendered into response schemas by the router layer.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import sqlalchemy as sa
 
 from musicmind.db.schema import (
@@ -25,6 +27,16 @@ from musicmind.db.schema import (
     global_song_cache,
     song_metadata_cache,
 )
+
+# Module-level in-memory artist artwork cache — keyed by artist_name.lower().
+# Process restart loses it, which is fine (Apple catalog search is cheap).
+# Value "" means "we tried and Apple returned nothing" — prevents retry spam.
+_ARTIST_ARTWORK_CACHE: dict[str, str] = {}
+
+# Apple Music storefront order for artist catalog search. "us" first for the
+# widest catalog, Italian fallback because many of this project's users listen
+# to Italian artists not indexed in the US catalog.
+_APPLE_STOREFRONTS = ("us", "it", "gb")
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +62,71 @@ def format_apple_artwork(template: str | None, size: int = APPLE_ARTWORK_SIZE_ME
     return template.replace("{w}", s).replace("{h}", s).replace("{f}", "jpg")
 
 
+def _expand_artwork_url(raw: str, size: int) -> str:
+    """Accept either a Spotify-style already-resolved URL or an Apple template."""
+    if not raw:
+        return ""
+    if "{w}" in raw or "{h}" in raw:
+        return format_apple_artwork(raw, size)
+    return raw
+
+
+async def _fetch_apple_artist_artwork(
+    artist_name: str, *, developer_token: str, size: int,
+) -> str:
+    """Hit Apple Music catalog search for one artist's portrait.
+
+    Tries multiple storefronts in order and returns the first hit with an
+    artwork template. Returns "" on miss or error.
+    """
+    headers = {"Authorization": f"Bearer {developer_token}"}
+    async with httpx.AsyncClient(timeout=4.0) as client:
+        for storefront in _APPLE_STOREFRONTS:
+            try:
+                resp = await client.get(
+                    f"https://api.music.apple.com/v1/catalog/{storefront}/search",
+                    headers=headers,
+                    params={
+                        "term": artist_name,
+                        "types": "artists",
+                        "limit": 1,
+                    },
+                )
+                if resp.status_code != 200:
+                    continue
+                data = resp.json().get("results", {}).get("artists", {}).get("data", [])
+                if not data:
+                    continue
+                attrs = data[0].get("attributes", {}) or {}
+                # Only accept results whose name matches (case-insensitive) —
+                # Apple's fuzzy match can return totally unrelated artists.
+                returned_name = (attrs.get("name") or "").lower().strip()
+                if returned_name != artist_name.lower().strip():
+                    continue
+                artwork = attrs.get("artwork") or {}
+                template = artwork.get("url") or ""
+                if template:
+                    return format_apple_artwork(template, size)
+            except (httpx.HTTPError, ValueError, KeyError):
+                continue
+    return ""
+
+
 async def get_artist_artworks(
-    engine, *, user_id: str, artist_names: list[str], size: int = APPLE_ARTWORK_SIZE_SMALL,
+    engine,
+    *,
+    user_id: str,
+    artist_names: list[str],
+    size: int = APPLE_ARTWORK_SIZE_SMALL,
+    developer_token: str | None = None,
 ) -> dict[str, str]:
     """Return {artist_name_lower: artwork_url} for the supplied artists.
 
-    Picks one representative song per artist from the user's own library
-    (preferring the most recently added). Empty string when nothing is found.
+    Resolution order per artist:
+      1) In-memory cache (fast path for repeat requests within process)
+      2) User's own library song artwork (album cover for a representative song)
+      3) Apple Music catalog search for the artist's portrait
+    Empty string when nothing is found.
     """
     if not artist_names:
         return {}
@@ -65,35 +135,86 @@ async def get_artist_artworks(
         return {}
 
     result: dict[str, str] = {}
-    async with engine.begin() as conn:
-        rows = await conn.execute(
-            sa.select(
-                song_metadata_cache.c.artist_name,
-                song_metadata_cache.c.artwork_url_template,
-                song_metadata_cache.c.date_added_to_library,
-                song_metadata_cache.c.fetched_at,
-            )
-            .where(
-                sa.and_(
-                    song_metadata_cache.c.user_id == user_id,
-                    sa.func.lower(song_metadata_cache.c.artist_name).in_(
-                        [a.lower() for a in targets]
-                    ),
-                    song_metadata_cache.c.artwork_url_template.isnot(None),
-                    song_metadata_cache.c.artwork_url_template != "",
-                )
-            )
-            .order_by(
-                sa.func.coalesce(
+    to_fetch: list[str] = []
+
+    # Step 1: in-memory cache
+    for name in targets:
+        key = name.lower()
+        if key in _ARTIST_ARTWORK_CACHE:
+            cached = _ARTIST_ARTWORK_CACHE[key]
+            if cached:
+                result[key] = cached
+            # else: tried previously and got empty — don't re-fetch this turn
+
+    missing = [
+        n for n in targets
+        if n.lower() not in result and n.lower() not in _ARTIST_ARTWORK_CACHE
+    ]
+
+    # Step 2: library album art (Apple template OR Spotify full URL)
+    if missing:
+        async with engine.begin() as conn:
+            rows = await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.artist_name,
+                    song_metadata_cache.c.artwork_url_template,
                     song_metadata_cache.c.date_added_to_library,
                     song_metadata_cache.c.fetched_at,
-                ).desc()
+                )
+                .where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == user_id,
+                        sa.func.lower(song_metadata_cache.c.artist_name).in_(
+                            [a.lower() for a in missing]
+                        ),
+                        song_metadata_cache.c.artwork_url_template.isnot(None),
+                        song_metadata_cache.c.artwork_url_template != "",
+                    )
+                )
+                .order_by(
+                    sa.func.coalesce(
+                        song_metadata_cache.c.date_added_to_library,
+                        song_metadata_cache.c.fetched_at,
+                    ).desc()
+                )
             )
+            for row in rows:
+                key = (row.artist_name or "").lower()
+                if key and key not in result:
+                    url = _expand_artwork_url(row.artwork_url_template, size)
+                    if url:
+                        result[key] = url
+                        to_fetch.append(key)  # pipe to cache after loop
+
+        for k in to_fetch:
+            _ARTIST_ARTWORK_CACHE[k] = result[k]
+
+    # Step 3: Apple Music catalog search for still-missing artists
+    still_missing = [
+        n for n in targets
+        if n.lower() not in result and n.lower() not in _ARTIST_ARTWORK_CACHE
+    ]
+    if still_missing and developer_token:
+        async def _fetch_one(name: str) -> tuple[str, str]:
+            url = await _fetch_apple_artist_artwork(
+                name,
+                developer_token=developer_token,
+                size=APPLE_ARTWORK_SIZE_MEDIUM,  # artist portraits look better at 240
+            )
+            return name.lower(), url
+
+        fetched = await asyncio.gather(
+            *(_fetch_one(n) for n in still_missing),
+            return_exceptions=True,
         )
-        for row in rows:
-            key = (row.artist_name or "").lower()
-            if key and key not in result:
-                result[key] = format_apple_artwork(row.artwork_url_template, size)
+        for entry in fetched:
+            if isinstance(entry, BaseException):
+                continue
+            key, url = entry
+            _ARTIST_ARTWORK_CACHE[key] = url  # cache both hits and misses ("")
+            if url:
+                result[key] = url
+
     return result
 
 
@@ -103,8 +224,10 @@ async def get_recent_enrichments(
     """Last N songs enriched for this user (worker's freshest output).
 
     Joins `audio_features_cache` (the "analyzed" side) with
-    `song_metadata_cache` (for artwork + display name). Ordered by
-    enriched_at DESC with a fallback to analyzed_at for older rows.
+    `song_metadata_cache` (for artwork + display name) and falls back to
+    `global_song_cache.artwork_url` when the user-library template is empty
+    (older libraries indexed before the artwork_url_template fix was on).
+    Ordered by enriched_at DESC with analyzed_at fallback.
     """
     async with engine.begin() as conn:
         rows = await conn.execute(
@@ -114,6 +237,7 @@ async def get_recent_enrichments(
                 song_metadata_cache.c.artist_name,
                 song_metadata_cache.c.album_name,
                 song_metadata_cache.c.artwork_url_template,
+                global_song_cache.c.artwork_url.label("global_artwork_url"),
                 audio_features_cache.c.tempo,
                 audio_features_cache.c.energy,
                 audio_features_cache.c.danceability,
@@ -129,6 +253,10 @@ async def get_recent_enrichments(
                         audio_features_cache.c.user_id
                         == song_metadata_cache.c.user_id,
                     ),
+                ).outerjoin(
+                    global_song_cache,
+                    global_song_cache.c.catalog_id
+                    == song_metadata_cache.c.catalog_id,
                 )
             )
             .where(
@@ -148,14 +276,19 @@ async def get_recent_enrichments(
         items: list[dict[str, Any]] = []
         for row in rows:
             ts = row.enriched_at or row.analyzed_at
+            artwork = _expand_artwork_url(
+                row.artwork_url_template or "", APPLE_ARTWORK_SIZE_SMALL,
+            )
+            if not artwork and row.global_artwork_url:
+                artwork = _expand_artwork_url(
+                    row.global_artwork_url, APPLE_ARTWORK_SIZE_SMALL,
+                )
             items.append({
                 "catalog_id": row.catalog_id or "",
                 "name": row.name or "",
                 "artist_name": row.artist_name or "",
                 "album_name": row.album_name or "",
-                "artwork_url": format_apple_artwork(
-                    row.artwork_url_template, APPLE_ARTWORK_SIZE_SMALL,
-                ),
+                "artwork_url": artwork,
                 "enriched_at": ts.isoformat() if ts is not None else None,
                 "tempo": float(row.tempo) if row.tempo is not None else None,
                 "energy": float(row.energy) if row.energy is not None else None,
@@ -164,6 +297,212 @@ async def get_recent_enrichments(
                 ),
             })
         return items
+
+
+# ── Library distributions (interactive chart data) ────────────────────
+
+TEMPO_BINS = [
+    (60, 80, "60-80"),
+    (80, 100, "80-100"),
+    (100, 115, "100-115"),
+    (115, 130, "115-130"),
+    (130, 150, "130-150"),
+    (150, 180, "150-180"),
+    (180, 220, "180+"),
+]
+
+_MUSICAL_KEY_ORDER = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+]
+_KEY_ALIASES = {  # Essentia uses flat names; map to sharp equivalents for display
+    "Db": "C#", "Eb": "D#", "Gb": "F#", "Ab": "G#", "Bb": "A#",
+}
+
+
+async def get_library_distributions(
+    engine, *, user_id: str, scatter_limit: int = 200,
+) -> dict[str, Any]:
+    """Aggregate Essentia enrichment data into dashboard-ready distributions.
+
+    Returns tempo histogram (fixed BPM bins), key × mode table (major/minor
+    counts per of 12 pitch classes), acousticness histogram, valence
+    histogram, plus a sampled energy/danceability scatter with track names
+    for tooltip display.
+    """
+    async with engine.begin() as conn:
+        rows = await conn.execute(
+            sa.select(
+                song_metadata_cache.c.catalog_id,
+                song_metadata_cache.c.name,
+                song_metadata_cache.c.artist_name,
+                audio_features_cache.c.tempo,
+                audio_features_cache.c.energy,
+                audio_features_cache.c.danceability,
+                audio_features_cache.c.acousticness,
+                audio_features_cache.c.valence_proxy,
+                audio_features_cache.c.key,
+                audio_features_cache.c.scale,
+            )
+            .select_from(
+                audio_features_cache.join(
+                    song_metadata_cache,
+                    sa.and_(
+                        audio_features_cache.c.catalog_id
+                        == song_metadata_cache.c.catalog_id,
+                        audio_features_cache.c.user_id
+                        == song_metadata_cache.c.user_id,
+                    ),
+                )
+            )
+            .where(
+                sa.and_(
+                    audio_features_cache.c.user_id == user_id,
+                    audio_features_cache.c.energy.isnot(None),
+                )
+            )
+        )
+        all_rows = list(rows)
+
+    if not all_rows:
+        return {
+            "total_songs": 0,
+            "tempo_histogram": [],
+            "key_distribution": [],
+            "acousticness_histogram": [],
+            "valence_histogram": [],
+            "scatter": [],
+        }
+
+    # Tempo histogram
+    tempo_counts = [0] * len(TEMPO_BINS)
+    tempos: list[float] = []
+    for r in all_rows:
+        t = r.tempo
+        if t is None or not (0 < t < 400):
+            continue
+        tempos.append(float(t))
+        for i, (lo, hi, _) in enumerate(TEMPO_BINS):
+            if lo <= t < hi:
+                tempo_counts[i] += 1
+                break
+    tempo_histogram = [
+        {"range": label, "count": cnt, "low": lo, "high": hi}
+        for (lo, hi, label), cnt in zip(TEMPO_BINS, tempo_counts)
+    ]
+    avg_tempo = (sum(tempos) / len(tempos)) if tempos else 0.0
+
+    # Key × mode
+    key_counts: dict[str, dict[str, int]] = {
+        k: {"major": 0, "minor": 0} for k in _MUSICAL_KEY_ORDER
+    }
+    total_keyed = 0
+    for r in all_rows:
+        if not r.key or not r.scale:
+            continue
+        key = _KEY_ALIASES.get(r.key, r.key)
+        if key not in key_counts:
+            continue
+        mode = (r.scale or "").lower()
+        if mode not in ("major", "minor"):
+            continue
+        key_counts[key][mode] += 1
+        total_keyed += 1
+    key_distribution = [
+        {"key": k, "major": counts["major"], "minor": counts["minor"]}
+        for k, counts in key_counts.items()
+    ]
+
+    # Acousticness histogram (0-1, 10 bins)
+    ac_bins = [0] * 10
+    for r in all_rows:
+        if r.acousticness is None:
+            continue
+        v = max(0.0, min(1.0, float(r.acousticness)))
+        idx = min(9, int(v * 10))
+        ac_bins[idx] += 1
+    acousticness_histogram = [
+        {"bucket": f"{i*10}-{(i+1)*10}%", "count": c}
+        for i, c in enumerate(ac_bins)
+    ]
+
+    # Valence histogram (0-1, 10 bins)
+    v_bins = [0] * 10
+    for r in all_rows:
+        if r.valence_proxy is None:
+            continue
+        v = max(0.0, min(1.0, float(r.valence_proxy)))
+        idx = min(9, int(v * 10))
+        v_bins[idx] += 1
+    valence_histogram = [
+        {"bucket": f"{i*10}-{(i+1)*10}%", "count": c}
+        for i, c in enumerate(v_bins)
+    ]
+
+    # Scatter (energy × danceability, sampled for viz-tractable N)
+    scatter: list[dict[str, Any]] = []
+    # Stride sample to stay within scatter_limit without statistical bias
+    stride = max(1, len(all_rows) // scatter_limit)
+    for r in all_rows[::stride]:
+        if r.energy is None or r.danceability is None:
+            continue
+        scatter.append({
+            "catalog_id": r.catalog_id or "",
+            "name": r.name or "",
+            "artist_name": r.artist_name or "",
+            "energy": max(0.0, min(1.0, float(r.energy))),
+            "danceability": max(0.0, min(1.0, float(r.danceability))),
+        })
+
+    return {
+        "total_songs": len(all_rows),
+        "avg_tempo": round(avg_tempo, 1),
+        "total_keyed": total_keyed,
+        "tempo_histogram": tempo_histogram,
+        "key_distribution": key_distribution,
+        "acousticness_histogram": acousticness_histogram,
+        "valence_histogram": valence_histogram,
+        "scatter": scatter,
+    }
+
+
+# ── Genre normalization for display ───────────────────────────────────
+
+# Raw service genres we want to drop from the dashboard entirely.
+# "Musica" and "Música" are Apple's Italian/Spanish "catch-all" label
+# applied when Apple can't identify a real genre — not meaningful signal.
+# Empty string appears when the API returns no genre data.
+_GENRE_BLOCKLIST = {"", "musica", "música", "music"}
+
+# Redundant parent genres to roll up into their more-specific sibling.
+# "Rap" → "Hip-Hop/Rap", "Hip-Hop" → "Hip-Hop/Rap" — Apple occasionally
+# returns the parent and the compound label on the same song, double-counting.
+_GENRE_MERGE_INTO_COMPOUND = {
+    "Rap": "Hip-Hop/Rap",
+    "Hip-Hop": "Hip-Hop/Rap",
+    "Soul": "R&B/Soul",
+    "R&B": "R&B/Soul",
+}
+
+
+def clean_genre_vector(genre_vector: dict[str, float]) -> dict[str, float]:
+    """Strip blocklist entries and merge redundant parent/child labels.
+
+    Returned dict sums to the same total as the input minus blocklist weight
+    (so "Hip-Hop/Rap" stays stable if "Rap" was already its child); callers
+    using % formatting still get percentages that add up correctly.
+    """
+    cleaned: dict[str, float] = {}
+    for name, weight in genre_vector.items():
+        key = (name or "").strip()
+        if key.lower() in _GENRE_BLOCKLIST:
+            continue
+        merged_to = _GENRE_MERGE_INTO_COMPOUND.get(key)
+        # Only merge if the compound label is actually present in the vector
+        if merged_to and merged_to in genre_vector:
+            cleaned[merged_to] = cleaned.get(merged_to, 0.0) + weight
+            continue
+        cleaned[key] = cleaned.get(key, 0.0) + weight
+    return cleaned
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

@@ -85,6 +85,43 @@ export interface RecentEnrichmentsResponse {
   total: number;
 }
 
+export interface TempoBin {
+  range: string;
+  count: number;
+  low: number;
+  high: number;
+}
+
+export interface KeyBucket {
+  key: string;
+  major: number;
+  minor: number;
+}
+
+export interface DistributionBucket {
+  bucket: string;
+  count: number;
+}
+
+export interface ScatterPoint {
+  catalog_id: string;
+  name: string;
+  artist_name: string;
+  energy: number;
+  danceability: number;
+}
+
+export interface LibraryDistributionsResponse {
+  total_songs: number;
+  avg_tempo: number;
+  total_keyed: number;
+  tempo_histogram: TempoBin[];
+  key_distribution: KeyBucket[];
+  acousticness_histogram: DistributionBucket[];
+  valence_histogram: DistributionBucket[];
+  scatter: ScatterPoint[];
+}
+
 export interface TopGenresResponse {
   service: string;
   genres: GenreEntry[];
