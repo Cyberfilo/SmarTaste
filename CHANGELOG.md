@@ -7,6 +7,30 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.321 — 2026-04-17
+
+### GPU batching: bigger, concurrent, and two long-standing bugs fixed
+
+Local Mac GPU logs showed a lot of `1 items processed` lines — trickle tracks getting their own 3-second GPU round-trip. Fixed in three ways:
+
+#### Bigger + concurrent batches
+- `gpu_batch_size` raised from 10 → 25 everywhere (per-user backfill, global backfill, orchestrator Phase 2). With CLAP-tiny + float16-MERT on MPS this is well within memory.
+- New `enrich_bytes_concurrent` / `enrich_urls_concurrent` helpers in `gpu_client.py` split a flat list of items into chunks and dispatch up to `GPU_MAX_CONCURRENT=3` in parallel via `asyncio.gather` + semaphore. The local server pipelines audio decode of one batch with GPU inference of another, cutting wall time ~2-3x on larger queues.
+
+#### Min-batch deferral
+- `GPU_MIN_BATCH=3` sentinel: if the pending pool has fewer than 3 tracks, the GPU call is skipped and deferred to the next worker cycle where more tracks will likely be ready. Applies to orchestrator Phase 2, worker per-user backfill, and worker global backfill. Eliminates 1-item round-trips entirely.
+
+#### Two latent bugs in `_backfill_gpu_embeddings_global`
+- **Arg order**: `enrich_batch_bytes_via_gpu(modal_url, b64_items)` had the arguments swapped — it was being called with `modal_url` as the audio list and `b64_items` as the endpoint URL. Every global GPU call failed silently, which is why `audio_embeddings_global.clap_embedding` stayed at 0 for all 995 rows even when the GPU endpoint was up.
+- **Key names**: the same function was reading `res.get("clap_embedding")` but the GPU handler actually returns `clap_512` / `mert_768`. Both keys are fixed in the refactor.
+
+Expected impact on next redeploy:
+- No more "1 items processed" log lines
+- Existing 995 global tracks without CLAP/MERT will now actually get them (concurrent batches of 25)
+- Tracks with cached audio bytes saturate the GPU: 75 items in flight per round-trip cycle vs 10 before
+
+---
+
 ## V 6.320 — 2026-04-17
 
 ### Backend-orchestrated worker + unified discovery + artwork + score breakdown

@@ -2065,7 +2065,8 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
         users,
     )
     from musicmind.engine.enrichment.gpu_client import (
-        enrich_batch_bytes_via_gpu,
+        GPU_MIN_BATCH,
+        enrich_bytes_concurrent,
     )
     from musicmind.engine.enrichment.orchestrator import _get_cached_audio
 
@@ -2098,96 +2099,91 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
         if not rows:
             continue
 
+        # Resolve cached audio for each catalog_id (those without bytes
+        # are skipped — URL fallback isn't used by the backfill path).
+        bytes_batch: list[tuple[str, bytes]] = []
+        skipped_no_bytes = 0
+        for row in rows:
+            cached = await _get_cached_audio(engine, row.catalog_id)
+            if cached:
+                bytes_batch.append((row.catalog_id, cached))
+            else:
+                skipped_no_bytes += 1
+
+        if not bytes_batch:
+            if skipped_no_bytes:
+                logger.debug(
+                    "GPU backfill: %d tracks for user %s had no cached audio",
+                    skipped_no_bytes, user_id[:8],
+                )
+            continue
+
+        # Defer very small queues — next worker cycle will batch them
+        # with more tracks. Prevents 1-item GPU round-trips.
+        if len(bytes_batch) < GPU_MIN_BATCH:
+            logger.info(
+                "GPU backfill: only %d tracks for user %s, deferring to "
+                "next cycle (min batch %d)",
+                len(bytes_batch), user_id[:8], GPU_MIN_BATCH,
+            )
+            continue
+
         logger.info(
-            "GPU backfill: %d tracks for user %s",
-            len(rows), user_id[:8],
+            "GPU backfill: %d tracks for user %s (concurrent batched)",
+            len(bytes_batch), user_id[:8],
         )
 
-        # Build batch: prefer cached bytes, fall back to DB preview URL
-        batch_items: list[tuple[str, str | None, bytes | None]] = []
-        for row in rows:
-            cid = row.catalog_id
-            cached = await _get_cached_audio(engine, cid)
-            batch_items.append((cid, None, cached))
+        b64_items = [
+            base64.b64encode(audio).decode("ascii")
+            for _, audio in bytes_batch
+        ]
+        try:
+            results = await enrich_bytes_concurrent(b64_items, modal_url)
+        except Exception:
+            logger.warning(
+                "GPU backfill dispatch failed for user %s",
+                user_id[:8], exc_info=True,
+            )
+            continue
 
-        # Process in GPU batches of 10
-        gpu_batch_size = 10
-        for i in range(0, len(batch_items), gpu_batch_size):
-            chunk = batch_items[i:i + gpu_batch_size]
-
-            # Split into bytes-based and URL-based
-            bytes_chunk = [
-                (cid, audio)
-                for cid, _, audio in chunk if audio
-            ]
-            url_chunk = [
-                cid for cid, _, audio in chunk if not audio
-            ]
-
-            # Bytes-based GPU call
-            if bytes_chunk:
-                b64_items = [
-                    base64.b64encode(audio).decode("ascii")
-                    for _, audio in bytes_chunk
-                ]
-                try:
-                    results = await enrich_batch_bytes_via_gpu(
-                        b64_items, modal_url,
-                    )
-                    for (cid, _), gpu_data in zip(
-                        bytes_chunk, results,
-                    ):
-                        if not gpu_data:
-                            continue
-                        # Store CLAP/MERT independently — one may
-                        # succeed while the other fails (e.g., MERT
-                        # can't read M4A via soundfile)
-                        clap = gpu_data.get("clap_512")
-                        mert = gpu_data.get("mert_768")
-                        if clap or mert:
-                            async with engine.begin() as conn:
-                                await conn.execute(sa.text(
-                                    "UPDATE audio_embeddings"
-                                    " SET clap_embedding ="
-                                    "   COALESCE(:clap,"
-                                    "     clap_embedding),"
-                                    "     mert_embedding ="
-                                    "   COALESCE(:mert,"
-                                    "     mert_embedding)"
-                                    " WHERE catalog_id = :cid"
-                                    "   AND user_id = :uid"
-                                ), {
-                                    "cid": cid, "uid": user_id,
-                                    "clap": json.dumps(clap)
-                                    if clap else None,
-                                    "mert": json.dumps(mert)
-                                    if mert else None,
-                                })
-                            total_stored += 1
-                        if gpu_data.get("error"):
-                            logger.debug(
-                                "GPU partial error for %s: %s",
-                                cid,
-                                gpu_data["error"][:100],
-                            )
-                except Exception:
-                    logger.warning(
-                        "GPU backfill batch failed",
-                        exc_info=True,
-                    )
-
-            # Log skipped tracks without cached audio
-            if url_chunk:
+        user_stored = 0
+        for (cid, _), gpu_data in zip(bytes_batch, results):
+            if not gpu_data:
+                continue
+            # Store CLAP and MERT independently — one may succeed while
+            # the other fails (e.g., MERT can't read M4A via soundfile).
+            clap = gpu_data.get("clap_512")
+            mert = gpu_data.get("mert_768")
+            if clap or mert:
+                async with engine.begin() as conn:
+                    await conn.execute(sa.text(
+                        "UPDATE audio_embeddings"
+                        " SET clap_embedding = COALESCE(:clap, clap_embedding),"
+                        "     mert_embedding = COALESCE(:mert, mert_embedding)"
+                        " WHERE catalog_id = :cid AND user_id = :uid"
+                    ), {
+                        "cid": cid, "uid": user_id,
+                        "clap": json.dumps(clap) if clap else None,
+                        "mert": json.dumps(mert) if mert else None,
+                    })
+                user_stored += 1
+            if gpu_data.get("error"):
                 logger.debug(
-                    "GPU backfill: %d tracks without cached audio"
-                    " (user %s), skipping",
-                    len(url_chunk), user_id[:8],
+                    "GPU partial error for %s: %s",
+                    cid, gpu_data["error"][:100],
                 )
 
-        if total_stored > 0:
+        if skipped_no_bytes:
+            logger.debug(
+                "GPU backfill: %d tracks without cached audio (user %s), skipped",
+                skipped_no_bytes, user_id[:8],
+            )
+
+        total_stored += user_stored
+        if user_stored > 0:
             logger.info(
                 "GPU backfill: %d CLAP/MERT stored for user %s",
-                total_stored, user_id[:8],
+                user_stored, user_id[:8],
             )
 
     return total_stored
@@ -2203,7 +2199,10 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
     import base64
 
     from musicmind.db.schema import audio_embeddings_global
-    from musicmind.engine.enrichment.gpu_client import enrich_batch_bytes_via_gpu
+    from musicmind.engine.enrichment.gpu_client import (
+        GPU_MIN_BATCH,
+        enrich_bytes_concurrent,
+    )
     from musicmind.engine.enrichment.orchestrator import _get_cached_audio
 
     modal_url = getattr(settings, "modal_endpoint_url", None)
@@ -2250,7 +2249,7 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                 if r.isrc:
                     isrc_to_cid[r.isrc] = r.catalog_id
 
-    batch_items: list[tuple[str, bytes | None]] = []
+    batch_items: list[tuple[str, bytes]] = []
     for r in rows:
         cid = isrc_to_cid.get(r.isrc, "")
         cached = await _get_cached_audio(engine, cid) if cid else None
@@ -2261,39 +2260,51 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         logger.debug("Global GPU backfill: no cached audio available")
         return 0
 
+    # Defer very small queues
+    if len(batch_items) < GPU_MIN_BATCH:
+        logger.info(
+            "Global GPU backfill: only %d items, deferring to next cycle "
+            "(min batch %d)",
+            len(batch_items), GPU_MIN_BATCH,
+        )
+        return 0
+
+    b64_items = [
+        base64.b64encode(audio).decode("ascii")
+        for _, audio in batch_items
+    ]
+    try:
+        results = await enrich_bytes_concurrent(b64_items, modal_url)
+    except Exception:
+        logger.warning(
+            "Global GPU dispatch failed for %d items",
+            len(batch_items), exc_info=True,
+        )
+        return 0
+
     total = 0
-    gpu_batch_size = 10
-    for i in range(0, len(batch_items), gpu_batch_size):
-        chunk = batch_items[i:i + gpu_batch_size]
-        b64_items = [base64.b64encode(audio).decode("ascii") for _, audio in chunk]
-        try:
-            results = await enrich_batch_bytes_via_gpu(modal_url, b64_items)
-            if not results:
+    async with engine.begin() as conn:
+        for (isrc, _), res in zip(batch_items, results):
+            if not res:
                 continue
-            async with engine.begin() as conn:
-                for j, res in enumerate(results):
-                    if j >= len(chunk):
-                        break
-                    isrc = chunk[j][0]
-                    clap = res.get("clap_embedding")
-                    mert = res.get("mert_embedding")
-                    if clap or mert:
-                        updates: dict[str, Any] = {}
-                        if clap:
-                            updates["clap_embedding"] = clap
-                        if mert:
-                            updates["mert_embedding"] = mert
-                        await conn.execute(
-                            sa.update(audio_embeddings_global)
-                            .where(audio_embeddings_global.c.isrc == isrc)
-                            .values(**updates)
-                        )
-                        total += 1
-        except Exception:
-            logger.warning(
-                "Global GPU batch enrichment failed for %d items",
-                len(chunk),
+            # Note: GPU handler returns keys clap_512 / mert_768 (not
+            # clap_embedding / mert_embedding — that earlier mismatch was
+            # why global CLAP/MERT stayed at zero).
+            clap = res.get("clap_512")
+            mert = res.get("mert_768")
+            if not (clap or mert):
+                continue
+            updates: dict[str, Any] = {}
+            if clap:
+                updates["clap_embedding"] = json.dumps(clap)
+            if mert:
+                updates["mert_embedding"] = json.dumps(mert)
+            await conn.execute(
+                sa.update(audio_embeddings_global)
+                .where(audio_embeddings_global.c.isrc == isrc)
+                .values(**updates)
             )
+            total += 1
 
     if total > 0:
         logger.info("Global GPU backfill: %d CLAP/MERT stored", total)
