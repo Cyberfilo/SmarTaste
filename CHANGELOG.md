@@ -7,6 +7,68 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.330 — 2026-04-17
+
+### Admin dashboard: songs + artists tables replace stale aggregate cards
+
+The old admin page showed aggregate rollups (Pipeline Stages, Per-User Table, Recent Worker Activity) that didn't answer "which specific song / artist is missing what". Two new drill-down tables consume the `/api/admin/songs-table` and `/api/admin/artists-table` endpoints shipped in `67be61c` (V 6.322).
+
+**Songs table** (`components/admin/songs-table-card.tsx`)
+- Paginated (25 / 50 / 100 per page, prev/next controls)
+- Columns: artwork (40×40 thumbnail) · title/artist · ESSENTIA · CLAP · MERT · ISRC · CACHED AUDIO · USER-LINKED
+- Each status column renders an emerald (true) or red (false) dot via the new `StatusDot` primitive
+- Click any row → inline details section with catalog_id + per-field booleans. Click again to collapse.
+- Artwork rendered directly from `global_song_cache.artwork_url` (already pre-expanded to 300×300 server-side)
+
+**Artists table** (`components/admin/artists-table-card.tsx`)
+- Same pagination shape
+- Columns: artist · source (library / cobweb / feat with icon + colored badge) · owning user email · stacked library/discovered bar (emerald = library, amber = discovery) · discovery %
+- Source badges: 👤 library (emerald, `User` icon) · 🕸 cobweb (purple, `Network` icon) · 🤝 feat (amber, `Handshake` icon)
+
+**Removed** (rolled into the new tables' drill-down):
+- Pipeline Stages card — per-song dots answer the same question more granularly
+- Per-User Enrichment table — artists table groups by artist (more useful than "user has X of Y")
+- Recent Worker Activity card — superseded by V 6.322's natural-language orchestration logs in Railway
+
+**Kept:**
+- System Overview metric bar (5 cards: Users / Songs / Enriched % / Worker / Today)
+- Diagnostic Insights panel
+- Failure Analysis (today's enrichment failures by stage)
+
+**New frontend files:**
+- `src/hooks/use-admin-tables.ts` — TanStack Query hooks with `placeholderData` for smooth pagination
+- `src/components/admin/status-dot.tsx` — reusable red/green/grey 2.5px dot
+- `src/components/admin/songs-table-card.tsx` — songs table + expandable row
+- `src/components/admin/artists-table-card.tsx` — artists table + source badge + stacked bar
+
+Net: +3 files, ~268 lines removed from `page.tsx` (3 aggregate sections + dead imports + dead sub-components `PipelineStage` + `CellWithPct`).
+
+---
+
+## V 6.322 — 2026-04-17
+
+### Natural-language startup logs + songs/artists admin endpoints
+
+Uvicorn leaves `musicmind.*` loggers at WARNING, silently dropping backend orchestration narration on Railway. V 6.322 forces the `musicmind` namespace to INFO with a stderr handler on module import — startup logs now appear.
+
+Orchestration messages rewritten as readable narration:
+
+```
+── Backend booted. Telling worker to: ──
+  1. enrich 12 library songs missing audio features
+  2. fill 995 global CLAP/MERT embeddings on the GPU
+  3. run a cobweb + discovery cycle to grow the candidate pool
+▶ Worker: starting library enrichment for 12 tracks
+✓ Worker: library enrichment done — 12 tracks got audio features
+...
+```
+
+New admin endpoints feeding V 6.330's dashboard rebuild:
+- `GET /api/admin/songs-table?limit=N&offset=M` — per-song enrichment grid with has_essentia / has_clap / has_mert / isrc_ok / has_cached_audio / user_linked booleans. Joins per-user and global tables so a song enriched either way reads green.
+- `GET /api/admin/artists-table?limit=N&offset=M` — per-artist source (library / cobweb / feat) + owning user + library/discovered/global counts + discovery_pct. Ordered by library_tracks DESC so top artists land first.
+
+---
+
 ## V 6.321 — 2026-04-17
 
 ### GPU batching: bigger, concurrent, and two long-standing bugs fixed
