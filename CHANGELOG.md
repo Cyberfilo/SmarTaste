@@ -7,6 +7,34 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.367 — 2026-04-17
+
+### Global GPU backfill: URL fallback + 500-row limit — drain the MERT-only backlog
+
+The V 6.363 WHERE-clause fix made `_backfill_gpu_embeddings_global` *visible* to the 143 CLAP-only / MERT-NULL rows, but it still couldn't *process* them. The function only had a bytes path (`enrich_bytes_concurrent`), reading from `preview_audio_cache` via `_get_cached_audio`. Those 143 rows had gone through GPU once (got CLAP) and then the 7-day `preview_audio_cache` cleanup deleted their audio bytes. Without cached audio, no bytes → skipped. Under this logic the 143-row backlog could only clear if each track's audio was re-downloaded, which the worker doesn't trigger for already-Essentia'd rows.
+
+**Fix:** `worker._backfill_gpu_embeddings_global` rewritten.
+
+- Row limit per call: 200 → 500 (more aggressive drain per cycle).
+- Builds **two queues** instead of one:
+  1. `bytes_queue`: ISRCs with `_get_cached_audio` hits — preferred path, no CDN round-trip.
+  2. `url_queue`: ISRCs without cached audio but with a non-empty `global_song_cache.preview_url` — uses `enrich_urls_concurrent` so the Modal / local GPU worker fetches the preview itself. iTunes URLs don't expire; Deezer URLs might 403 but the GPU worker logs the failure and skips that single row.
+- Both queues dispatched independently, each gated by `GPU_MIN_BATCH` (15). Shared `_apply_results` helper writes the `clap_embedding` / `mert_embedding` columns with the existing COALESCE-style merge (preserves whichever field was already populated).
+- One structured log line per dispatch shows `%d bytes, %d URL-fallback (of %d missing)` so it's visible in Railway logs why a cycle processed N of M.
+
+**Why this matters beyond the 143 backlog:**
+
+Going forward, every new global track (cobweb + discography-fetched) will benefit from the URL fallback too — if a track's cached audio expires before its first GPU pass, it still gets CLAP + MERT from its preview URL. No more "waits for audio cache" dependency.
+
+**Expected DB effect over the next 5–10 minutes:**
+- `audio_embeddings_global.mert_embedding`: 0 → 143+ (the pre-existing CLAP-only rows will MERT-backfill via URL path)
+- `audio_embeddings_global.clap_embedding`: 143 → climbing toward 1810 as the combined bytes+URL queues clear the long tail
+- GPU worker log shows larger batches (up to 25 per dispatch, two dispatches per cycle)
+
+No migration. No new env vars.
+
+---
+
 ## V 6.366 — 2026-04-17
 
 ### Fix: column-name typos in `_migrate_discography_to_global` INSERT
