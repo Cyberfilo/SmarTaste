@@ -7,6 +7,37 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.374 — 2026-04-17
+
+### Dashboard v3 hotfix #2 — layout shell had the same `flex-1` trap, and `hsl(var(--…))` is invalid on hex vars
+
+V 6.372 fixed the grid-level horizontal scroll but the root cause was actually one level *up*: the AppLayout's main content wrapper `<div className="flex flex-1 flex-col lg:pl-64">` (frontend/src/app/(app)/layout.tsx:168) has no `min-w-0`. When the dashboard's Recently Analyzed strip or a Recharts SVG is wider than the viewport minus the 256px sidebar, `flex-1` without `min-w-0` lets that main div grow to the content size, and the whole page overflows. Even my fixes inside the dashboard couldn't prevent it because the overflow was happening one flex level up.
+
+**Fix:** added `min-w-0 overflow-x-hidden` to that shell div. Now no matter what the dashboard (or any future app page) renders, it's clipped to `viewport - sidebar`.
+
+**Why the Sound Signature radar + heading text rendered pitch black on the dark card:**
+
+`globals.css` defines SmarTaste's palette as concrete hex / rgba values:
+```
+--muted-foreground: #9B8FBB;
+--card: #1A1530;
+--border: rgba(255, 255, 255, 0.08);
+--foreground: #FFF5EB;
+```
+
+My Recharts inline styles used `fill: "hsl(var(--muted-foreground))"` and `stroke: "hsl(var(--border))"`. That expands to `hsl(#9B8FBB)` — **invalid CSS** (the `hsl()` function expects three numeric arguments, not a hex string). Browsers fall back to the initial color, which is black. The earlier `--border: hsl(var(--border))` for CartesianGrid had the same issue.
+
+The surrounding SmarTaste Tailwind classes like `text-muted-foreground` work fine because Tailwind compiles them to `color: var(--color-muted-foreground)` — no `hsl()` wrapper.
+
+**Fix on `frontend/src/app/(app)/dashboard/page.tsx`:**
+- Sound Signature radar: `PolarGrid stroke`, `PolarAngleAxis tick fill`, and Tooltip `contentStyle` all replaced with concrete palette hexes (`#a855f733` for grid, `#FFF5EB` for tick fills, `#1A1530` for tooltip background, `#a855f755` for tooltip border, explicit `color: "#FFF5EB"` added to tooltip contentStyle so Recharts' inner text nodes render cream not black).
+- Hero paragraph "Your library sounds ..." : added explicit `text-[#FFF5EB]` to the `<p>`. Without an explicit color, the text inherited from the Card's `text-card-foreground` class which should resolve to `--card-foreground` (`#FFF5EB`), but Tailwind 4's `@theme inline` directive has been flaky for that specific token in some browsers — explicit hex is defensive.
+- Trait-label spans (Energy / Brightness / Beat / Tempo / etc.): added explicit `text-[#FFF5EB]` for the same reason.
+
+No backend changes. Foundation: when a value goes into an inline `style={}` or a Recharts prop, don't use `hsl(var(--…))`; either use `var(--…)` directly (when the CSS var contains a full color value) or use the concrete color hex. Tailwind utilities are the only place the `color: var(--…)` translation happens for you.
+
+---
+
 ## V 6.373 — 2026-04-17
 
 ### GPU backfill preserves existing embeddings — stop the CLAP overwrite

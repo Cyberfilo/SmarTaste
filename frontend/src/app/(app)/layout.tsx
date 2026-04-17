@@ -165,7 +165,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Main content area */}
-      <div className="flex flex-1 flex-col lg:pl-64">
+      <div className="flex min-w-0 flex-1 flex-col overflow-x-hidden lg:pl-64">
         {/* Mobile top bar */}
         <header className="flex h-14 items-center justify-between border-b border-border px-4 lg:hidden">
           <Link href="/dashboard" className="flex items-center gap-2">
