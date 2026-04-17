@@ -1,9 +1,9 @@
 """SmarTaste Admin Dashboard — standalone service.
 
 Lightweight FastAPI app that:
-1. Serves the admin dashboard HTML
-2. Proxies API requests to the main SmarTaste backend
-3. Uses cookie-based password auth (survives restarts)
+1. Serves the React admin dashboard (static bundle built from admin/ui/)
+2. Proxies /api/* to the main SmarTaste backend with x-admin-secret injected
+3. Gates both with a single-password HMAC cookie (survives restarts)
 
 Deployed on Railway at admin.music.menghi.dev.
 """
@@ -16,9 +16,9 @@ import os
 
 import httpx
 from fastapi import Cookie, FastAPI, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from starlette.responses import StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import StreamingResponse
 
 BACKEND_URL = os.environ.get(
     "BACKEND_URL", "https://musicmind-production.up.railway.app"
@@ -30,45 +30,55 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Derive a stable signing key from the password (survives restarts)
-_COOKIE_KEY = hashlib.sha256(
-    f"staste-admin-{ADMIN_PASSWORD}".encode()
-).hexdigest() if ADMIN_PASSWORD else ""
+_COOKIE_KEY = (
+    hashlib.sha256(f"staste-admin-{ADMIN_PASSWORD}".encode()).hexdigest()
+    if ADMIN_PASSWORD
+    else ""
+)
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+NEXT_ASSETS_DIR = os.path.join(STATIC_DIR, "_next")
+INDEX_HTML = os.path.join(STATIC_DIR, "index.html")
 
 app = FastAPI(title="SmarTaste Admin")
 
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+# Next.js hashed bundle — safe to serve unauthenticated (no data, shell only)
+if os.path.isdir(NEXT_ASSETS_DIR):
+    app.mount(
+        "/_next",
+        StaticFiles(directory=NEXT_ASSETS_DIR),
+        name="next-assets",
+    )
 
 
 def _sign_token(password: str) -> str:
-    """Create an HMAC signature of the password using the derived key."""
     return hmac.new(
         _COOKIE_KEY.encode(), password.encode(), hashlib.sha256,
     ).hexdigest()
 
 
 def _check_admin_session(admin_token: str | None) -> bool:
-    """Validate admin session — compare cookie against expected HMAC."""
     if not admin_token or not ADMIN_PASSWORD or not _COOKIE_KEY:
         return False
     expected = _sign_token(ADMIN_PASSWORD)
     return hmac.compare_digest(admin_token, expected)
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def index(admin_token: str | None = Cookie(default=None)):
     if not _check_admin_session(admin_token):
         return RedirectResponse(url="/login")
-    html_path = os.path.join(os.path.dirname(__file__), "templates", "dashboard.html")
-    with open(html_path) as f:
-        return HTMLResponse(content=f.read())
+    if not os.path.isfile(INDEX_HTML):
+        return HTMLResponse(
+            "<h1>Admin UI bundle missing</h1>"
+            "<p>static/index.html not found — the Node build stage may have failed.</p>",
+            status_code=500,
+        )
+    return FileResponse(INDEX_HTML)
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(admin_token: str | None = Cookie(default=None)):
-    # If already logged in, redirect to dashboard
     if _check_admin_session(admin_token):
         return RedirectResponse(url="/")
     html_path = os.path.join(os.path.dirname(__file__), "templates", "login.html")
@@ -78,7 +88,6 @@ async def login_page(admin_token: str | None = Cookie(default=None)):
 
 @app.post("/auth/login")
 async def login(request: Request):
-    """Authenticate with admin password."""
     body = await request.json()
     password = body.get("password", "")
 
@@ -107,12 +116,19 @@ async def logout():
     return response
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    p = os.path.join(STATIC_DIR, "favicon.ico")
+    if os.path.isfile(p):
+        return FileResponse(p)
+    return Response(status_code=204)
+
+
 @app.get("/api/admin/logs/stream")
 async def proxy_log_stream(
     request: Request,
     admin_token: str | None = Cookie(default=None),
 ):
-    """Proxy SSE log stream from backend. Requires admin session."""
     if not _check_admin_session(admin_token):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
@@ -146,7 +162,6 @@ async def proxy_api(
     path: str,
     admin_token: str | None = Cookie(default=None),
 ):
-    """Proxy /api/* to the main backend. Requires admin session."""
     if not _check_admin_session(admin_token):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 

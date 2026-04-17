@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.330-8b5cf6?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-6.340-8b5cf6?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Next.js-16-000000?style=for-the-badge&logo=nextdotjs&logoColor=white" alt="Next.js">
   <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL">
@@ -26,7 +26,7 @@
 | **Playlists** | Browse your real Apple Music / Spotify playlists with per-playlist recommendations |
 | **Listening Timeline** | Chronological song view with date labels |
 | **Multi-Service** | Connect Spotify and/or Apple Music — unified profiles with ISRC dedup and genre normalization |
-| **Admin Dashboard** | In-app + standalone: live SSE log stream, enrichment pipeline breakdown, worker status, DB capacity, per-user progress |
+| **Admin Dashboard** | Standalone React dashboard on its own Railway service (admin.music.menghi.dev): songs + artists drill-down tables, worker heartbeat, diagnostics, SSE log stream |
 | **Background Worker** | Artist cobweb discovery, global enrichment, ISRC backfill via free APIs (Deezer + MusicBrainz), preview audio caching |
 
 ## Architecture
@@ -143,7 +143,7 @@ Open **http://localhost:3000** — sign up, explore the dashboard. Music service
 | Frontend | **Vercel** | Import repo → auto-detects `rootDirectory: frontend` → set `NEXT_PUBLIC_API_URL` |
 | Backend | **Railway** | Add PostgreSQL service → add GitHub service (backend/) → set env vars |
 | Worker | **Railway** | Separate service from worker/ directory → same DATABASE_URL + FERNET_KEY |
-| Admin | **Railway** | Separate service from admin/ directory → set ADMIN_PASSWORD + ADMIN_SECRET + BACKEND_URL |
+| Admin | **Railway** | Separate service from admin/ directory (two-stage Dockerfile builds the Next.js dashboard then serves it from FastAPI) → set ADMIN_PASSWORD + ADMIN_SECRET + BACKEND_URL |
 | Logs DB | **Railway** | Second PostgreSQL instance → set MUSICMIND_LOGS_DATABASE_URL on backend + worker |
 | NocoDB | **Railway** | Docker image `nocodb/nocodb` → separate metadata PostgreSQL |
 | Migrations | Auto | Dockerfile runs `alembic upgrade head` on every deploy |
@@ -320,10 +320,16 @@ smartaste/
 │   │   ├── stores/                 # Zustand auth store
 │   │   └── lib/                    # API client, SSE parser, utils
 │   └── package.json
-├── admin/                          # Standalone admin dashboard (FastAPI + static HTML)
-│   ├── app.py                      # Password auth + API proxy + SSE streaming proxy
-│   ├── templates/                  # dashboard.html, login.html
-│   └── Dockerfile
+├── admin/                          # Standalone admin dashboard (FastAPI gate + React UI)
+│   ├── app.py                      # Password HMAC cookie + /api/* proxy + SSE streaming proxy
+│   ├── templates/login.html        # Jinja login page (only)
+│   ├── ui/                         # Next.js 16 static export (built at image time, served from /app/static)
+│   │   ├── app/                    #   page.tsx + layout + providers (TanStack Query)
+│   │   ├── components/admin/       #   songs-table, artists-table, status-dot
+│   │   ├── components/ui/          #   4 shadcn primitives (card/badge/button/skeleton)
+│   │   ├── hooks/use-admin-tables.ts
+│   │   └── lib/                    #   minimal api.ts (same-origin fetch) + cn helper
+│   └── Dockerfile                  # Two-stage: node build → python runtime
 ├── worker/                         # Standalone enrichment worker (Docker wrapper)
 │   ├── enrichment_worker.py
 │   └── Dockerfile

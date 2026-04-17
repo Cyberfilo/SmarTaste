@@ -1,0 +1,113 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-heading);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+  --color-violet-500: #7B5EA7;
+  --color-electric: #A855F7;
+  --color-magenta: #E040A0;
+  --color-coral: #FF6B6B;
+  --color-mint: #6EE7B7;
+  --color-peach: #FFAD8F;
+}
+
+:root {
+  --background: #0D0B1A;
+  --foreground: #FFF5EB;
+  --card: #1A1530;
+  --card-foreground: #FFF5EB;
+  --popover: #1A1530;
+  --popover-foreground: #FFF5EB;
+  --primary: #A855F7;
+  --primary-foreground: #FFF5EB;
+  --secondary: #231E38;
+  --secondary-foreground: #FFF5EB;
+  --muted: #231E38;
+  --muted-foreground: #9B8FBB;
+  --accent: #231E38;
+  --accent-foreground: #FFF5EB;
+  --destructive: #FF6B6B;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #7B5EA7;
+  --chart-1: #A855F7;
+  --chart-2: #E040A0;
+  --chart-3: #6EE7B7;
+  --chart-4: #FF6B6B;
+  --chart-5: #FFAD8F;
+  --radius: 0.625rem;
+  --font-heading: "Sora", var(--font-sans);
+}
+
+.dark {
+  --background: #0D0B1A;
+  --foreground: #FFF5EB;
+  --card: #1A1530;
+  --card-foreground: #FFF5EB;
+  --popover: #1A1530;
+  --popover-foreground: #FFF5EB;
+  --primary: #A855F7;
+  --primary-foreground: #FFF5EB;
+  --secondary: #231E38;
+  --secondary-foreground: #FFF5EB;
+  --muted: #231E38;
+  --muted-foreground: #9B8FBB;
+  --accent: #231E38;
+  --accent-foreground: #FFF5EB;
+  --destructive: #FF6B6B;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #7B5EA7;
+  --chart-1: #A855F7;
+  --chart-2: #E040A0;
+  --chart-3: #6EE7B7;
+  --chart-4: #FF6B6B;
+  --chart-5: #FFAD8F;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

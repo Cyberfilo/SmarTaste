@@ -10,11 +10,7 @@ export function StatusDot({
   className?: string;
 }) {
   const color =
-    ok === true
-      ? "bg-emerald-500"
-      : ok === false
-        ? "bg-red-500"
-        : "bg-muted";
+    ok === true ? "bg-emerald-500" : ok === false ? "bg-red-500" : "bg-muted";
   return (
     <span
       title={label}
