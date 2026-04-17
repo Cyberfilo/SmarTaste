@@ -104,24 +104,11 @@ async def lifespan(app: FastAPI):
             mert_device = "cpu"
     else:
         mert = mert.to(device)
-    # float16 on MPS halves RAM and speeds up matmul ~1.5x. Safe for
-    # audio embedding models; fall back to float32 on any issue.
+    # float16 disabled: the startup validation test was passing float32
+    # inputs to the half model (MPS auto-casted), but real inference fails
+    # with "Input type (MPSFloatType) and weight type (MPSHalfType) should
+    # be the same". Staying on float32 until the dtype pipeline is fixed.
     mert_dtype = torch.float32
-    if mert_device == "mps":
-        try:
-            mert_half = mert.half()
-            with torch.no_grad():
-                dummy = torch.randn(1, 24000).numpy()
-                inputs = _models["mert_processor"](
-                    dummy, sampling_rate=24000, return_tensors="pt",
-                )
-                inputs = {k: v.to("mps") for k, v in inputs.items()}
-                _ = mert_half(**inputs)
-            mert = mert_half
-            mert_dtype = torch.float16
-            logger.info("MERT running in float16 on MPS")
-        except Exception as e:
-            logger.warning("float16 failed (%s), staying on float32", e)
 
     _models["mert"] = mert
     _models["device"] = device
