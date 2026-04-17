@@ -7,10 +7,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import type {
-  TasteProfile,
-  TopGenresResponse,
-  TopArtistsResponse,
   AudioTraitsResponse,
+  RecentEnrichmentsResponse,
+  SonicNeighborsResponse,
+  TasteProfile,
+  TopArtistsResponse,
+  TopGenresResponse,
 } from "@/types/api";
 
 export function useTasteProfile() {
@@ -42,5 +44,27 @@ export function useAudioTraits() {
     queryKey: ["taste", "audio-traits"],
     queryFn: () => apiFetch<AudioTraitsResponse>("/api/taste/audio-traits"),
     staleTime: 30 * 60 * 1000,
+  });
+}
+
+export function useSonicNeighbors(limit = 8) {
+  return useQuery<SonicNeighborsResponse>({
+    queryKey: ["taste", "sonic-neighbors", limit],
+    queryFn: () =>
+      apiFetch<SonicNeighborsResponse>(
+        `/api/taste/sonic-neighbors?limit=${limit}`,
+      ),
+    staleTime: 30 * 60 * 1000,
+  });
+}
+
+export function useRecentEnrichments(limit = 12) {
+  return useQuery<RecentEnrichmentsResponse>({
+    queryKey: ["taste", "recent-enrichments", limit],
+    queryFn: () =>
+      apiFetch<RecentEnrichmentsResponse>(
+        `/api/taste/recent-enrichments?limit=${limit}`,
+      ),
+    staleTime: 5 * 60 * 1000, // shorter — this data is fresher-dependent
   });
 }

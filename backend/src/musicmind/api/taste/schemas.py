@@ -18,6 +18,14 @@ class ArtistEntry(BaseModel):
     name: str = Field(description="Artist name")
     score: float = Field(description="Affinity score normalized 0-1")
     song_count: int = Field(description="Number of songs by this artist in library")
+    sample_artwork_url: str | None = Field(
+        default=None,
+        description=(
+            "Pre-rendered artwork URL for a representative song by this artist "
+            "from the user's own library (Apple Music template resolved to a "
+            "small thumbnail); empty string when no artwork is available."
+        ),
+    )
 
 
 class TasteProfileResponse(BaseModel):
@@ -55,6 +63,13 @@ class TasteProfileResponse(BaseModel):
         default_factory=list,
         description="Services that contributed to this profile (empty for single-service)",
     )
+    breadth: BreadthMetrics | None = Field(
+        default=None,
+        description=(
+            "Library breadth aggregates (genre entropy, artist concentration, "
+            "composite sonic breadth). Null until the snapshot exists."
+        ),
+    )
 
 
 class TopGenresResponse(BaseModel):
@@ -86,3 +101,102 @@ class AudioTraitsResponse(BaseModel):
         default=None,
         description="Optional note, e.g. 'Audio traits not available for Spotify'",
     )
+
+
+class SonicNeighbor(BaseModel):
+    """A discovery artist whose sound matches the user's CLAP centroid."""
+
+    artist_name: str = Field(description="Artist name")
+    similarity: float = Field(
+        description="Cosine similarity to the user's CLAP centroid (0-1)"
+    )
+    sample_song_name: str = Field(
+        description="Representative song name used to match this artist"
+    )
+    sample_catalog_id: str = Field(
+        description="Catalog id of the representative song (for recommendation deep-link)"
+    )
+    sample_album_name: str = Field(
+        default="", description="Album name of the representative song"
+    )
+    artwork_url: str = Field(
+        default="",
+        description="Pre-formatted artwork URL from the global cache; empty when missing",
+    )
+    genre_names: list[str] = Field(
+        default_factory=list,
+        description="Genres attached to the representative song",
+    )
+
+
+class SonicNeighborsResponse(BaseModel):
+    """Artists whose embedded sound is closest to the user's library centroid."""
+
+    service: str = Field(description="Source service for the profile centroid")
+    neighbors: list[SonicNeighbor] = Field(
+        default_factory=list,
+        description="Ranked artists (highest similarity first)",
+    )
+    note: str | None = Field(
+        default=None,
+        description=(
+            "Optional note explaining degraded results "
+            "(e.g. 'CLAP centroid not yet available')"
+        ),
+    )
+
+
+class RecentEnrichment(BaseModel):
+    """A song recently analyzed by the enrichment pipeline for this user."""
+
+    catalog_id: str = Field(description="Apple Music / Spotify catalog id")
+    name: str = Field(description="Track name")
+    artist_name: str = Field(description="Track artist")
+    album_name: str = Field(default="", description="Album name")
+    artwork_url: str = Field(
+        default="",
+        description="Pre-formatted artwork URL; empty when no template available",
+    )
+    enriched_at: str | None = Field(
+        default=None,
+        description="ISO-8601 timestamp of enrichment (analyzed_at fallback)",
+    )
+    tempo: float | None = Field(default=None, description="Essentia tempo (BPM)")
+    energy: float | None = Field(
+        default=None, description="Essentia energy 0-1 scalar"
+    )
+    danceability: float | None = Field(
+        default=None, description="Essentia danceability 0-1 scalar"
+    )
+
+
+class RecentEnrichmentsResponse(BaseModel):
+    """Last N songs enriched for this user (freshest output of the pipeline)."""
+
+    items: list[RecentEnrichment] = Field(
+        default_factory=list,
+        description="Most recently enriched songs, newest first",
+    )
+    total: int = Field(default=0, description="Number returned")
+
+
+class BreadthMetrics(BaseModel):
+    """Library-breadth numbers derived client-side from the taste snapshot.
+
+    Returned by the /profile endpoint alongside existing fields so the frontend
+    doesn't need a second round-trip just to compute these simple aggregates.
+    """
+
+    genre_entropy: float = Field(
+        description="Shannon entropy of genre_vector, normalized to 0-1"
+    )
+    artist_concentration: float = Field(
+        description="Fraction of total artist score held by the top 5 artists"
+    )
+    sonic_breadth: float = Field(
+        description="Composite 0-1 breadth score (higher = more varied taste)"
+    )
+
+
+# Resolve forward reference to BreadthMetrics in TasteProfileResponse
+TasteProfileResponse.model_rebuild()

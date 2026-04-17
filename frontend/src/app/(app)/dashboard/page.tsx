@@ -10,9 +10,12 @@ import {
   Fingerprint,
   Music,
   Plug,
+  Radar as RadarIcon,
   Sparkles,
+  TrendingUp,
   Users,
   Waves,
+  Zap,
 } from "lucide-react";
 import {
   Area,
@@ -35,8 +38,16 @@ import {
   type CalibrationItem,
 } from "@/hooks/use-calibration";
 import { useServices } from "@/hooks/use-services";
-import { useTasteProfile } from "@/hooks/use-taste";
-import type { TasteProfile } from "@/types/api";
+import {
+  useRecentEnrichments,
+  useSonicNeighbors,
+  useTasteProfile,
+} from "@/hooks/use-taste";
+import type {
+  RecentEnrichment,
+  SonicNeighbor,
+  TasteProfile,
+} from "@/types/api";
 
 const tabs = [
   { href: "/dashboard/taste", label: "Taste Profile" },
@@ -145,7 +156,7 @@ function formatService(services: string[], fallback: string): string {
     .join(" + ");
 }
 
-function formatRelative(iso: string): string {
+function formatRelative(iso: string | null | undefined): string {
   if (!iso) return "—";
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) return "—";
@@ -158,6 +169,21 @@ function formatRelative(iso: string): string {
   const days = Math.round(hrs / 24);
   if (days < 30) return `${days}d ago`;
   return then.toLocaleDateString();
+}
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0][0]?.toUpperCase() ?? "?";
+  return (parts[0][0]! + parts[parts.length - 1][0]!).toUpperCase();
+}
+
+function breadthBand(score: number | undefined): string {
+  if (score === undefined || score <= 0) return "—";
+  if (score < 0.33) return "focused";
+  if (score < 0.55) return "balanced";
+  if (score < 0.75) return "broad";
+  return "eclectic";
 }
 
 // ── Skeletons ────────────────────────────────────────────────────────
@@ -201,16 +227,64 @@ function SkeletonBlock() {
 function SectionLabel({
   icon: Icon,
   children,
+  hint,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   children: React.ReactNode;
+  hint?: React.ReactNode;
 }) {
   return (
-    <div className="mb-3 flex items-center gap-2 text-muted-foreground">
-      <Icon className="h-4 w-4" />
-      <span className="text-xs font-medium uppercase tracking-wider">
-        {children}
-      </span>
+    <div className="mb-3 flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <Icon className="h-4 w-4" />
+        <span className="text-xs font-medium uppercase tracking-wider">
+          {children}
+        </span>
+      </div>
+      {hint ? (
+        <span className="text-[11px] text-muted-foreground">{hint}</span>
+      ) : null}
+    </div>
+  );
+}
+
+function Artwork({
+  url,
+  fallbackText,
+  size = "md",
+  rounded = "md",
+}: {
+  url: string | null | undefined;
+  fallbackText: string;
+  size?: "xs" | "sm" | "md" | "lg";
+  rounded?: "md" | "full";
+}) {
+  const sizeClass = {
+    xs: "h-8 w-8 text-[10px]",
+    sm: "h-10 w-10 text-[11px]",
+    md: "h-12 w-12 text-xs",
+    lg: "h-16 w-16 text-sm",
+  }[size];
+  const roundedClass = rounded === "full" ? "rounded-full" : "rounded-md";
+
+  if (url) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={url}
+        alt=""
+        aria-hidden="true"
+        loading="lazy"
+        className={`${sizeClass} ${roundedClass} shrink-0 object-cover ring-1 ring-border/40`}
+      />
+    );
+  }
+  return (
+    <div
+      aria-hidden="true"
+      className={`${sizeClass} ${roundedClass} flex shrink-0 items-center justify-center bg-gradient-to-br from-purple-700/40 to-purple-900/60 font-semibold text-purple-100 ring-1 ring-border/40`}
+    >
+      {initials(fallbackText)}
     </div>
   );
 }
@@ -349,6 +423,110 @@ function SoundSignature({ profile }: { profile: TasteProfile }) {
   );
 }
 
+function SonicNeighborsCard() {
+  const { data, isLoading } = useSonicNeighbors(8);
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <SectionLabel icon={RadarIcon}>Sonic Neighbors</SectionLabel>
+          <div className="grid animate-pulse grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div
+                key={i}
+                className="flex items-center gap-3 rounded-lg bg-muted/40 p-3"
+              >
+                <div className="h-12 w-12 shrink-0 rounded-md bg-muted" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="h-3 w-3/4 rounded bg-muted" />
+                  <div className="h-2 w-1/2 rounded bg-muted" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const neighbors = data?.neighbors ?? [];
+  const note = data?.note;
+
+  if (neighbors.length === 0) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <SectionLabel icon={RadarIcon}>Sonic Neighbors</SectionLabel>
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            {note ??
+              "No sonic neighbors to show yet — keep listening while the pipeline finishes."}
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <SectionLabel
+          icon={RadarIcon}
+          hint="CLAP-centroid match · discovery only"
+        >
+          Sonic Neighbors
+        </SectionLabel>
+        <p className="mb-3 text-xs text-muted-foreground">
+          Artists not in your library whose sound most closely matches your
+          CLAP centroid.
+        </p>
+        <ul className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+          {neighbors.map((n: SonicNeighbor) => {
+            const pct = Math.round(Math.max(0, n.similarity) * 100);
+            return (
+              <li key={n.artist_name}>
+                <div className="group flex items-center gap-3 rounded-lg border border-border/40 bg-muted/20 p-2.5 transition-colors hover:border-purple-500/40 hover:bg-purple-500/5">
+                  <Artwork
+                    url={n.artwork_url}
+                    fallbackText={n.artist_name}
+                    size="md"
+                    rounded="md"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className="truncate text-sm font-medium"
+                      title={n.artist_name}
+                    >
+                      {n.artist_name}
+                    </p>
+                    <p
+                      className="truncate text-[11px] text-muted-foreground"
+                      title={n.sample_song_name}
+                    >
+                      {n.sample_song_name || "—"}
+                    </p>
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted/60">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-purple-600 to-purple-400"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      <span className="text-[10px] font-semibold tabular-nums text-purple-300">
+                        {pct}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
 function GenreDNA({ genreVector }: { genreVector: Record<string, number> }) {
   const entries = Object.entries(genreVector)
     .sort(([, a], [, b]) => b - a)
@@ -431,14 +609,23 @@ function TopArtistsCard({
     <Card>
       <CardContent className="pt-4">
         <SectionLabel icon={Users}>Top Artists</SectionLabel>
-        <ul className="space-y-2.5">
+        <ul className="space-y-2">
           {top.map((artist, i) => {
             const pct = Math.round(artist.score * 100);
             return (
-              <li key={artist.name} className="flex items-center gap-3">
+              <li
+                key={artist.name}
+                className="flex items-center gap-3 rounded-md px-1 py-1 transition-colors hover:bg-muted/40"
+              >
                 <span className="w-4 text-right text-xs font-medium tabular-nums text-muted-foreground">
                   {i + 1}
                 </span>
+                <Artwork
+                  url={artist.sample_artwork_url}
+                  fallbackText={artist.name}
+                  size="sm"
+                  rounded="full"
+                />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">{artist.name}</p>
                   <p className="text-[11px] text-muted-foreground">
@@ -446,7 +633,7 @@ function TopArtistsCard({
                     {artist.song_count === 1 ? "" : "s"}
                   </p>
                 </div>
-                <div className="w-20 sm:w-28">
+                <div className="w-16 sm:w-24">
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                     <div
                       className="h-full rounded-full bg-gradient-to-r from-purple-600 to-purple-400 transition-all duration-500"
@@ -461,6 +648,103 @@ function TopArtistsCard({
             );
           })}
         </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RecentTrackTile({ item }: { item: RecentEnrichment }) {
+  const bpm = item.tempo ? Math.round(item.tempo) : null;
+  return (
+    <div className="w-36 shrink-0 space-y-1.5">
+      {item.artwork_url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={item.artwork_url}
+          alt=""
+          aria-hidden="true"
+          loading="lazy"
+          className="h-36 w-36 rounded-md object-cover ring-1 ring-border/40"
+        />
+      ) : (
+        <div
+          aria-hidden="true"
+          className="flex h-36 w-36 items-center justify-center rounded-md bg-gradient-to-br from-purple-700/40 to-purple-900/60 text-sm font-semibold text-purple-100 ring-1 ring-border/40"
+        >
+          {initials(item.artist_name || item.name)}
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="truncate text-xs font-semibold" title={item.name}>
+          {item.name || "—"}
+        </p>
+        <p
+          className="truncate text-[10px] text-muted-foreground"
+          title={item.artist_name}
+        >
+          {item.artist_name || "—"}
+        </p>
+        <p className="mt-0.5 text-[10px] text-purple-300">
+          {bpm ? `${bpm} BPM` : ""}
+          {bpm && item.enriched_at ? " · " : ""}
+          {formatRelative(item.enriched_at)}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function RecentlyAnalyzedStrip() {
+  const { data, isLoading } = useRecentEnrichments(12);
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <SectionLabel icon={Zap}>Recently Analyzed</SectionLabel>
+          <div className="flex animate-pulse gap-3 overflow-hidden">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="w-36 shrink-0 space-y-2">
+                <div className="h-36 w-36 rounded-md bg-muted" />
+                <div className="h-3 w-3/4 rounded bg-muted" />
+                <div className="h-2 w-1/2 rounded bg-muted" />
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const items = data?.items ?? [];
+  if (items.length === 0) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <SectionLabel icon={Zap}>Recently Analyzed</SectionLabel>
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            The worker hasn't analyzed any songs for you yet — this strip
+            fills in as the pipeline processes your library.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <SectionLabel
+          icon={Zap}
+          hint={`${items.length} most recent · freshest first`}
+        >
+          Recently Analyzed
+        </SectionLabel>
+        <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-2 [scrollbar-width:thin]">
+          {items.map((item: RecentEnrichment) => (
+            <RecentTrackTile key={item.catalog_id} item={item} />
+          ))}
+        </div>
       </CardContent>
     </Card>
   );
@@ -565,6 +849,14 @@ function LibrarySnapshot({ profile }: { profile: TasteProfile }) {
     profile.services_included ?? [],
     profile.service,
   );
+  const breadth = profile.breadth;
+  const sonicBreadthPct = breadth
+    ? Math.round(breadth.sonic_breadth * 100)
+    : null;
+  const breadthLabel = breadthBand(breadth?.sonic_breadth);
+  const concentrationPct = breadth
+    ? Math.round(breadth.artist_concentration * 100)
+    : null;
 
   const rows: { label: string; value: string; hint?: string }[] = [
     {
@@ -580,6 +872,29 @@ function LibrarySnapshot({ profile }: { profile: TasteProfile }) {
       label: "Ranked artists",
       value: distinctArtists.toLocaleString(),
     },
+    ...(sonicBreadthPct !== null
+      ? [
+          {
+            label: "Sonic breadth",
+            value: `${sonicBreadthPct}%`,
+            hint: breadthLabel,
+          },
+        ]
+      : []),
+    ...(concentrationPct !== null
+      ? [
+          {
+            label: "Top-5 concentration",
+            value: `${concentrationPct}%`,
+            hint:
+              concentrationPct > 70
+                ? "artist-focused"
+                : concentrationPct > 40
+                  ? "balanced"
+                  : "spread out",
+          },
+        ]
+      : []),
     { label: "Source", value: service },
     { label: "Last updated", value: formatRelative(profile.computed_at) },
   ];
@@ -587,12 +902,14 @@ function LibrarySnapshot({ profile }: { profile: TasteProfile }) {
   return (
     <Card>
       <CardContent className="pt-4">
-        <SectionLabel icon={Database}>Library Snapshot</SectionLabel>
+        <SectionLabel icon={Database} hint={<TrendingUp className="h-3 w-3" />}>
+          Library Snapshot
+        </SectionLabel>
         <dl className="divide-y divide-border/40">
           {rows.map((r) => (
             <div
               key={r.label}
-              className="flex items-baseline justify-between gap-4 py-2.5 first:pt-0 last:pb-0"
+              className="flex items-baseline justify-between gap-4 py-2 first:pt-0 last:pb-0"
             >
               <dt className="text-xs text-muted-foreground">{r.label}</dt>
               <dd className="text-right">
@@ -734,10 +1051,12 @@ export default function DashboardPage() {
       {isLoading ? (
         <>
           <SkeletonHero />
+          <SkeletonBlock />
           <div className="grid gap-4 md:grid-cols-2">
             <SkeletonBlock />
             <SkeletonBlock />
           </div>
+          <SkeletonBlock />
           <div className="grid gap-4 md:grid-cols-[3fr_2fr]">
             <SkeletonBlock />
             <SkeletonBlock />
@@ -765,10 +1084,14 @@ export default function DashboardPage() {
         <>
           <SoundSignature profile={profile} />
 
+          <SonicNeighborsCard />
+
           <div className="grid gap-4 md:grid-cols-2">
             <GenreDNA genreVector={profile.genre_vector} />
             <TopArtistsCard artists={profile.top_artists} />
           </div>
+
+          <RecentlyAnalyzedStrip />
 
           <div className="grid gap-4 md:grid-cols-[3fr_2fr]">
             <ReleaseEraCard yearDist={profile.release_year_distribution} />
