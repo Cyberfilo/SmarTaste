@@ -7,6 +7,45 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.365 — 2026-04-17
+
+### Preview-URL resolution: iTunes Search as the third fallback
+
+The V 6.364 diagnostic made the real problem visible: **0 out of 1296 rows in `global_song_cache` have a `preview_url`**, and the orchestrator was logging "Phase 1 done: 1/16 Essentia enriched (0 skipped, 15 failed)" on every cycle. Every failing track hit the `"no_preview_url"` terminal branch. `_apple_track_to_cache_dict` hard-codes `preview_url=""` for discography-fetched tracks (Apple's search/albums endpoints don't return previews on the anonymous path), Spotify's SimplifiedTrackObject usually has `null`, and Deezer's `search_preview_url` — while it handles ISRC lookups well — doesn't index Italian underground catalogues nearly as densely as Apple.
+
+**New fallback chain in `engine/enrichment/orchestrator._enrich_single_track`:**
+
+1. `track["preview_url"]` (from the fetch path)
+2. `song_metadata_cache.preview_url` (cached from a prior user-library entry)
+3. `deezer.search_preview_url(name, artist, isrc)` — ISRC-first, name+artist fallback
+4. **(new)** `itunes.search_preview_url(name, artist)` — Apple's unauthenticated Search API
+5. Give up → mark `"no_data_available" / "no_preview_url"`
+
+**New module: `backend/src/musicmind/engine/enrichment/itunes.py`.**
+
+- `GET https://itunes.apple.com/search?term={name artist}&entity=song&limit=5&media=music`
+- No auth, no key. Unofficial per-IP rate limit is ~20 rpm; we only fire when Deezer has already missed, so real call volume is a small fraction of total enrichment work.
+- Four-tier match scoring: exact (title, artist) → exact title → title-contains → first-non-empty `previewUrl`. Returns None on any HTTP / rate-limit / decode error — caller treats as "try again next cycle."
+- Returns the same 30-second MP3 format as Deezer previews, so Essentia consumes it with zero additional changes.
+
+**Caching helper refactor: `_cache_preview_url(engine, catalog_id, preview_url)`.**
+
+Replaced two inline `UPDATE song_metadata_cache … WHERE catalog_id = :cid` blocks (Deezer and iTunes) with a shared helper that writes to **both** `song_metadata_cache` and `global_song_cache`. Discography-fetched tracks live only in `global_song_cache`, so the original smc-only update was silently a no-op for them and the preview URL was never persisted — every cycle repeated the lookup. The new helper updates both tables; whichever owns the row gets the write, the other is a silent no-op.
+
+**Expected effect:**
+
+- Italian rap tracks with no ISRC and no Deezer match (the majority of the "15 failed" in recent logs) now get a preview URL via iTunes and flow through Essentia → EffNet → GPU CLAP/MERT normally.
+- `global_song_cache.preview_url` column starts populating (was 0/1296 → should climb as the worker cycles through the enrichment queue).
+- Retry amplification goes down: a catalog_id that needed iTunes once no longer re-queries iTunes on every subsequent cycle because the URL is now persisted.
+
+**Follow-ups tracked:**
+- `_apple_track_to_cache_dict` could itself attempt iTunes resolution inline when the discography track has no preview (would save a DB write round-trip), but keeping all preview-URL policy in the orchestrator simplifies the control flow.
+- Deezer URLs expire; iTunes URLs use permanent Apple CDN keys — no expiry handling needed for the iTunes path.
+
+No migration. No new env vars. No new dependencies.
+
+---
+
 ## V 6.364 — 2026-04-17
 
 ### Full discography fetch + compound-name credit + case dedup + ISRC backfill throughput
