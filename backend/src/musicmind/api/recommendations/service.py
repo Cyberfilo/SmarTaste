@@ -119,6 +119,7 @@ class RecommendationService:
         strategy: str = "all",
         mood: str | None = None,
         limit: int = 10,
+        mode: str = "all",
     ) -> dict[str, Any]:
         """Get personalized recommendations for a user.
 
@@ -172,6 +173,103 @@ class RecommendationService:
         candidates = await self._load_candidates_from_db(
             engine, user_id=user_id, strategy=strategy,
         )
+
+        # Step 4.5: Mode-specific filter + augment (V 6.378)
+        # mode = "your_artists" → tracks where ANY artist (primary or feat)
+        #        is a library artist. Augmented from global_song_cache with
+        #        unowned discography tracks for library primaries.
+        # mode = "discover"     → tracks where PRIMARY is NOT a library
+        #        artist. Feat-library candidates remain (the 0.3× feat
+        #        weight in V 6.377 scorer gives them their boost).
+        # mode = "all" (default) → no filtering.
+        if mode in ("your_artists", "discover"):
+            from musicmind.db.schema import song_metadata_cache as _smc
+            from musicmind.engine.profile import parse_artists as _parse
+
+            async with engine.begin() as _conn:
+                _res = await _conn.execute(
+                    sa.select(sa.distinct(_smc.c.artist_name)).where(
+                        sa.and_(
+                            _smc.c.user_id == user_id,
+                            sa.or_(
+                                _smc.c.library_id.isnot(None),
+                                _smc.c.date_added_to_library.isnot(None),
+                            ),
+                        )
+                    )
+                )
+                lib_names: set[str] = set()
+                for _row in _res:
+                    if _row[0]:
+                        for _n, _w in _parse(_row[0]):
+                            if _w >= 1.0:
+                                lib_names.add(_n.lower())
+
+            def _primary_lower(c: dict[str, Any]) -> str:
+                _p = _parse(c.get("artist_name", ""))
+                return _p[0][0].lower() if _p else ""
+
+            def _any_in_library(c: dict[str, Any]) -> bool:
+                for _n, _w in _parse(c.get("artist_name", "")):
+                    if _n.lower() in lib_names:
+                        return True
+                return False
+
+            if mode == "your_artists":
+                candidates = [c for c in candidates if _any_in_library(c)]
+                # Augment with library-primary unowned discography tracks
+                if lib_names:
+                    async with engine.begin() as _conn:
+                        _r = await _conn.execute(sa.text("""
+                            SELECT g.catalog_id, g.name, g.artist_name,
+                                   g.album_name, g.genre_names, g.isrc,
+                                   g.preview_url, g.artwork_url,
+                                   g.service_source, g.duration_ms,
+                                   g.release_date
+                            FROM global_song_cache g
+                            WHERE LOWER(g.artist_name) = ANY(:names)
+                              AND NOT EXISTS (
+                                SELECT 1 FROM song_metadata_cache smc
+                                WHERE smc.user_id = :uid
+                                  AND (smc.library_id IS NOT NULL
+                                       OR smc.date_added_to_library IS NOT NULL)
+                                  AND (smc.catalog_id = g.catalog_id
+                                       OR (smc.isrc IS NOT NULL
+                                           AND smc.isrc <> ''
+                                           AND smc.isrc = g.isrc))
+                              )
+                            LIMIT 300
+                        """), {"names": list(lib_names), "uid": user_id})
+                        _existing = {c.get("catalog_id") for c in candidates}
+                        for _row in _r:
+                            if _row.catalog_id in _existing:
+                                continue
+                            _gn = _row.genre_names
+                            if isinstance(_gn, str):
+                                try:
+                                    _gn = json.loads(_gn)
+                                except Exception:
+                                    _gn = []
+                            candidates.append({
+                                "catalog_id": _row.catalog_id,
+                                "name": _row.name or "",
+                                "artist_name": _row.artist_name or "",
+                                "album_name": _row.album_name or "",
+                                "genre_names": _gn or [],
+                                "isrc": _row.isrc,
+                                "preview_url": _row.preview_url or "",
+                                "artwork_url": _row.artwork_url or "",
+                                "service_source": _row.service_source or "",
+                                "duration_ms": _row.duration_ms,
+                                "release_date": _row.release_date,
+                                "_strategy_source": "your_artists",
+                                "_discovery_weight": 0.8,
+                            })
+            elif mode == "discover":
+                candidates = [
+                    c for c in candidates
+                    if _primary_lower(c) not in lib_names
+                ]
 
         # Hard-fail when there's nothing to recommend AND no creds to fall back
         # on (test contract: connecting a service is a precondition).

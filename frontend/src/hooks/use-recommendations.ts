@@ -65,11 +65,13 @@ export interface AudioFeaturesResponse {
 
 // ── Hooks ──────────────────────────────────────────────
 
-export function useRecommendations() {
-  const params = new URLSearchParams({ limit: "20" });
+export type RecommendationMode = "all" | "your_artists" | "discover";
+
+export function useRecommendations(mode: RecommendationMode = "all") {
+  const params = new URLSearchParams({ limit: "20", mode });
 
   return useQuery<RecommendationsResponse>({
-    queryKey: ["recommendations"],
+    queryKey: ["recommendations", mode],
     queryFn: () => apiFetch<RecommendationsResponse>(`/api/recommendations?${params}`),
   });
 }
