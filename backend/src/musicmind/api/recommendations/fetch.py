@@ -722,3 +722,140 @@ async def _fetch_artist_top_tracks(
         return [_apple_track_to_cache_dict(s) for s in songs[:limit]]
 
     return []
+
+
+async def _fetch_artist_full_discography(
+    client: httpx.AsyncClient,
+    service: str,
+    access_token: str,
+    artist_id: str,
+    *,
+    developer_token: str | None = None,
+    storefront: str = "us",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Paginate albums → tracks to build a deduped discography list.
+
+    The service top-tracks endpoints are hard-capped at ~10 items, so the
+    indexer's "100% discography for the top artist" guarantee used to be a
+    lie — the top artist got at most 10 tracks fetched. This walks the
+    artist's album list and aggregates every track, deduped by ISRC (or by
+    (title, album) pair when ISRC is absent on the short object).
+
+    Stops as soon as `limit` tracks are collected so the function is
+    bounded even for prolific artists. Apple returns ISRC inline; Spotify
+    returns SimplifiedTrackObject without ISRC — those rows rely on the
+    worker's _backfill_isrcs pass to resolve via Deezer/MusicBrainz later.
+    """
+    collected: list[dict[str, Any]] = []
+    seen_isrcs: set[str] = set()
+    seen_keys: set[tuple[str, str]] = set()
+
+    def _maybe_push(track: dict[str, Any]) -> bool:
+        """Add if not a duplicate. Returns True when we still need more."""
+        isrc = (track.get("isrc") or "").strip()
+        if isrc and isrc in seen_isrcs:
+            return len(collected) < limit
+        key = (
+            (track.get("name", "") or "").strip().lower(),
+            (track.get("album_name", "") or "").strip().lower(),
+        )
+        if not isrc and key in seen_keys:
+            return len(collected) < limit
+        if isrc:
+            seen_isrcs.add(isrc)
+        else:
+            seen_keys.add(key)
+        collected.append(track)
+        return len(collected) < limit
+
+    if service == "spotify":
+        offset = 0
+        page_size = 50
+        while len(collected) < limit:
+            try:
+                resp = await _request_with_retry(client, "GET",
+                    f"{SPOTIFY_API_BASE}/artists/{artist_id}/albums",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={
+                        "include_groups": "album,single,compilation",
+                        "limit": page_size, "offset": offset,
+                    },
+                )
+                resp.raise_for_status()
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                break
+            payload = resp.json()
+            albums = payload.get("items", [])
+            if not albums:
+                break
+            for album in albums:
+                album_id = album.get("id", "")
+                if not album_id:
+                    continue
+                try:
+                    tr_resp = await _request_with_retry(client, "GET",
+                        f"{SPOTIFY_API_BASE}/albums/{album_id}/tracks",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={"limit": 50},
+                    )
+                    tr_resp.raise_for_status()
+                except (httpx.HTTPStatusError, httpx.HTTPError):
+                    continue
+                for track in tr_resp.json().get("items", []):
+                    # /albums/{id}/tracks returns SimplifiedTrackObject — no
+                    # ISRC and no album embedded. Re-inject album so the
+                    # cache-dict converter can pick up artwork + release.
+                    track.setdefault("album", album)
+                    if not _maybe_push(_spotify_track_to_cache_dict(track)):
+                        return collected[:limit]
+            if not payload.get("next"):
+                break
+            offset += len(albums)
+        return collected[:limit]
+
+    if service == "apple_music":
+        headers = {"Authorization": f"Bearer {developer_token or access_token}"}
+        offset = 0
+        page_size = 100
+        while len(collected) < limit:
+            try:
+                resp = await _request_with_retry(client, "GET",
+                    f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/artists/{artist_id}/albums",
+                    headers=headers,
+                    params={"limit": page_size, "offset": offset},
+                )
+                resp.raise_for_status()
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                break
+            payload = resp.json()
+            albums = payload.get("data", [])
+            if not albums:
+                break
+            for album in albums:
+                album_id = album.get("id", "")
+                if not album_id:
+                    continue
+                try:
+                    tr_resp = await _request_with_retry(client, "GET",
+                        f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/albums/{album_id}",
+                        headers=headers,
+                    )
+                    tr_resp.raise_for_status()
+                except (httpx.HTTPStatusError, httpx.HTTPError):
+                    continue
+                album_data = tr_resp.json().get("data", [{}])[0]
+                tracks = (
+                    album_data.get("relationships", {})
+                    .get("tracks", {})
+                    .get("data", [])
+                )
+                for track in tracks:
+                    if not _maybe_push(_apple_track_to_cache_dict(track)):
+                        return collected[:limit]
+            if not payload.get("next"):
+                break
+            offset += len(albums)
+        return collected[:limit]
+
+    return []
