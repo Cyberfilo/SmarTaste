@@ -2289,7 +2289,17 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                 audio_embeddings_global.c.isrc,
             ).where(
                 sa.and_(
-                    audio_embeddings_global.c.clap_embedding.is_(None),
+                    # Pick up anything missing EITHER CLAP OR MERT. The old
+                    # WHERE was clap IS NULL only; once a row had CLAP
+                    # written (from an earlier pass when MERT wasn't
+                    # implemented yet) it was never revisited even though
+                    # its MERT column stayed NULL. That's why global had
+                    # 112 CLAP / 0 MERT. Per-row update uses COALESCE-style
+                    # merge so existing fields are preserved.
+                    sa.or_(
+                        audio_embeddings_global.c.clap_embedding.is_(None),
+                        audio_embeddings_global.c.mert_embedding.is_(None),
+                    ),
                     audio_embeddings_global.c.embedding.isnot(None),
                 )
             ).limit(200)

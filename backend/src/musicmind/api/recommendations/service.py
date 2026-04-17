@@ -178,36 +178,19 @@ class RecommendationService:
         if not candidates and not all_creds:
             raise ValueError("No connected service found")
 
-        # Cold-start fallback: no worker-populated candidates yet AND we have
-        # creds → run live discovery for THIS request and fire-and-forget a
-        # background populate so subsequent requests are instant.
+        # Cold-start: the cobweb is now the single source of recommendations
+        # (per V 6.351 "everything-through-cobweb" directive). Running the
+        # four live strategies here re-introduced editorial / chart / K-pop
+        # pollution into recommendation_candidates every time a new user
+        # opened the app before the worker cycled. Instead, kick off a
+        # background populate and return whatever the worker has already
+        # written — empty is fine, the UI handles a zero-candidate state.
         if not candidates and all_creds:
             logger.info(
-                "Recommendations cold-start for user %s — live discovery + bg populate",
+                "Recommendations cold-start for user %s — no cobweb candidates "
+                "yet, firing background populate and returning empty",
                 user_id[:8],
             )
-            discovery_tasks = []
-            for svc, access_token, developer_token, storefront in all_creds:
-                discovery_tasks.append(
-                    self._run_discovery(
-                        svc, access_token, seed_artist_names, top_genre_names,
-                        strategy=strategy,
-                        developer_token=developer_token,
-                        storefront=storefront,
-                        profile_genres=top_genre_names,
-                        seed_scored=seed_scored,
-                    )
-                )
-            discovery_results = await asyncio.gather(
-                *discovery_tasks, return_exceptions=True,
-            )
-            for result in discovery_results:
-                if isinstance(result, list):
-                    candidates.extend(result)
-                elif isinstance(result, Exception):
-                    logger.warning("Cold-start discovery failed: %s", result)
-
-            # Fire-and-forget: populate the candidates table for next time.
             asyncio.create_task(
                 self._populate_candidates_background(
                     engine, settings, user_id=user_id,

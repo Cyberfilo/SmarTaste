@@ -7,6 +7,46 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.363 — 2026-04-17
+
+### Recommendation pipeline: MERT global backfill + calibration-dominant ranking + cold-start cleanup
+
+Three independent fixes that together make the recommendation pipeline's outputs actually match the user's taste.
+
+**1. Global MERT backfill was skipping rows with CLAP populated.**
+
+`audio_embeddings_global` had 112 rows with CLAP and **zero** with MERT, while the per-user equivalent (`audio_embeddings`) had 932/940 CLAP and 892/940 MERT — 94% coverage. The per-user path and global path use the same GPU call (`enrich_bytes_concurrent`), so the GPU is producing MERT fine; the global backfill's `WHERE` clause was just excluding those rows from ever being revisited.
+
+Root cause: `_backfill_gpu_embeddings_global` selected rows where `clap_embedding IS NULL AND embedding IS NOT NULL`. The 112 rows had been processed in a pass when MERT wasn't wired up yet; once CLAP was written, the row was invisible to future cycles even though its MERT column stayed NULL.
+
+Fix (`backend/src/musicmind/worker.py`): `WHERE` clause now selects rows where `clap_embedding IS NULL OR mert_embedding IS NULL`. The per-row update logic already uses COALESCE-style field merging, so existing CLAP values are preserved.
+
+**2. Cold-start path was re-introducing the 4 legacy strategies.**
+
+V 6.351 unified worker-side discovery to the cobweb only, but `api/recommendations/service.py:get_recommendations` still had a cold-start fallback: when `recommendation_candidates` was empty and the user had creds, it ran `discover_similar_artists / _genre_adjacent / _editorial / _chart_filter` live and wrote their output back to `recommendation_candidates`. Every new session before the worker had cycled once wrote 108 polluted rows (similar_artist + chart) into the DB — exactly the kind of editorial/chart pollution V 6.351 was supposed to eliminate.
+
+Fix (`backend/src/musicmind/api/recommendations/service.py`): cold-start now kicks off the background populate task (cobweb-based) and returns the empty candidate set. The UI already handles a zero-candidate state (it's what every new user sees for the first minute anyway). The four `discover_*` imports stay for now because `_run_discovery` is still defined; full removal is tracked separately.
+
+**3. Calibration now dominates library frequency in artist ranking.**
+
+The user's wizard explicitly asks them to pick their top 3 artists (weight 5) and rank 5+ more (weights 1–3). For this user the top_artist picks are Nabi, Neima Ezza, Vale Pain — all with modest library counts (8, 9, 12 songs). The old ranking gave Capo Plaza (44 library songs, no calibration pick) the top slot anyway, because `_rank_artists_by_affinity` used `freq × (1 + 0.1 × cal_weight)` — calibration was at most a 50% multiplier on top of frequency.
+
+Fix (`backend/src/musicmind/indexer.py`):
+- `CAL_BOOST` raised from `0.1` (multiplicative) to `100.0` (additive). `score = freq + CAL_BOOST × cal_weight` — weight 5 adds +500, weight 1 adds +100, uncalibrated adds 0. Library frequency becomes a within-tier tiebreaker.
+- Test contract inverted: `test_frequency_dominates_calibration_when_mismatched` → `test_calibration_dominates_frequency_when_user_picked`. Two other tests rewritten (`test_frequency_breaks_ties_within_calibration_tier`, `test_uncalibrated_high_freq_still_surfaces`) to express the new semantics.
+- Expected effect on this user's indexing: top 3 slots now Nabi / Neima Ezza / Vale Pain (or whichever ties break them) at 100% discography depth, then the artist_rank picks (Philip, SEVEN 7oo, Sacky, Shiva…) at 70%+, with Capo Plaza and other non-calibrated library artists further down at ~25% depth.
+
+**Data surgery:** 108 legacy `similar_artist / chart` rows purged from `recommendation_candidates` on staging via psql so the candidate table now contains 242 cobweb-only rows.
+
+**Follow-ups tracked but not in this commit:**
+- Full-discography pagination (top-tracks API caps at 10; need to paginate `/artists/{id}/albums`).
+- Compound-name splitting for the 30 library artists with zero `global_song_cache` entries ("Kid Yugi, Tony Boy & Artie 5ive", etc.).
+- ISRC backfill lag (274 library rows with NULL ISRC).
+
+No migration. No new env vars.
+
+---
+
 ## V 6.362 — 2026-04-17
 
 ### Discovery: exclude tracks already in the user's library
