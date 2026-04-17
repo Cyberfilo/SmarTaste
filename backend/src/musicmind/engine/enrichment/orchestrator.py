@@ -617,11 +617,26 @@ def _merge_features(
 
 
 async def _cache_preview_url(engine: Any, catalog_id: str, preview_url: str) -> None:
-    """Persist a resolved preview URL to BOTH song_metadata_cache and
-    global_song_cache. A single catalog_id lives in exactly one of the two
-    for any given enrichment, so the updates with no matching row are
-    silent no-ops — cheaper than branching on which table owns the row.
+    """Persist a resolved preview URL AND immediately download+cache bytes.
+
+    The URL is an ephemeral resource — Deezer CDN keys expire ~24h, iTunes
+    links are more durable but not guaranteed. Bytes in preview_audio_cache
+    are durable until the 7d cleanup. Downloading on resolve means every
+    future enrichment pass reads from cache and never re-hits the CDN.
+
+    If the download itself fails (403/404/timeout), we skip the URL write
+    too — storing a dead URL would leak it into next cycle's queue.
     """
+    audio_bytes = await _download_preview(preview_url)
+    if not audio_bytes:
+        logger.debug(
+            "Preview URL resolved but download failed — skipping cache for %s",
+            catalog_id,
+        )
+        return
+
+    await _cache_preview_audio(engine, catalog_id, audio_bytes, preview_url)
+
     from musicmind.db.schema import global_song_cache, song_metadata_cache as smc
 
     async with engine.begin() as conn:
