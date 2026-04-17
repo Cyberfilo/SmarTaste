@@ -24,9 +24,11 @@ GPU_BATCH_SIZE = 25
 GPU_MAX_CONCURRENT = 3
 
 # If fewer than this are pending, defer to the next worker cycle where
-# more tracks will likely be available to batch with. Avoids wasteful
-# 1-item GPU round-trips.
-GPU_MIN_BATCH = 3
+# more tracks will likely be available to batch with. A100 cold-start + audio
+# decode dominate wall time for small batches; raising the floor from 3 → 15
+# amortises those fixed costs across meaningfully larger groups, at the cost
+# of higher latency for the last few straggler tracks in a run.
+GPU_MIN_BATCH = 15
 
 
 async def enrich_via_gpu(

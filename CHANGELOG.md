@@ -7,6 +7,20 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.361 — 2026-04-17
+
+### GPU min-batch raised 3 → 15
+
+Modal / local GPU worker logs were still dominated by 3-, 4-, 5-item batches (`Batch-bytes: 3 items processed (3 via batched CLAP)` over and over). Those tiny batches don't amortise the A100 cold-start or the audio-decode pipeline — each round-trip pays the same fixed cost for 3 items as for 25.
+
+**Change:** `backend/src/musicmind/engine/enrichment/gpu_client.py` — `GPU_MIN_BATCH = 3` → `GPU_MIN_BATCH = 15`. No other changes.
+
+The worker's min-batch deferral logic (in `_backfill_gpu_embeddings` / orchestrator Phase 2) already consults this constant; raising the floor means Phase 2 holds 1–14-item queues over to the next cycle until they accumulate to 15+, instead of firing a wasteful small batch. Cap stays at 25 (Modal's per-request limit). Straggler tracks at the tail of a big run will see slightly longer latency, which is acceptable for a background enrichment pipeline.
+
+No migration. No config changes. Effective on next Railway worker redeploy.
+
+---
+
 ## V 6.360 — 2026-04-17
 
 ### Dashboard v2 — centroids become neighbors, artwork everywhere, fresh-pipeline ticker
