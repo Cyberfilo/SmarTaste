@@ -354,69 +354,106 @@ class RecommendationService:
         user_id: str,
         catalog_id: str,
     ) -> dict[str, Any]:
-        """Get the 7-dimension scoring breakdown for a track.
+        """Score breakdown aligned with the 6-dimension embedding pipeline.
 
-        Re-scores the track against the user's latest taste profile and
-        returns overall score, per-dimension scores with weights, and
-        a natural-language explanation.
-
-        Args:
-            engine: SQLAlchemy async engine.
-            encryption: EncryptionService for token decryption.
-            settings: Application settings.
-            user_id: SmarTaste user ID.
-            catalog_id: Catalog ID of the track to score.
-
-        Returns:
-            Dict with catalog_id, overall_score, dimensions, explanation.
-
-        Raises:
-            ValueError: If track not in song_metadata_cache or no profile.
+        Reports the six weighted dimensions (CLAP/MERT/EffNet/genre/scalar/
+        artist) plus additive bonuses (discovery, cross-strategy, mood,
+        calibration) and penalties (diversity, staleness). Looks the song up
+        in song_metadata_cache first, falling back to global_song_cache so
+        discovery candidates also get breakdowns.
         """
+        from musicmind.db.schema import (
+            audio_embeddings,
+            audio_embeddings_global,
+            audio_features_cache,
+            audio_features_global,
+            global_song_cache,
+        )
+        from musicmind.engine.weights import compute_context_weights
+
+        # ── Load song metadata (per-user first, global fallback) ────────
         async with engine.begin() as conn:
-            # Get song metadata
-            song_result = await conn.execute(
-                sa.select(song_metadata_cache).where(
+            song_row = (await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.name,
+                    song_metadata_cache.c.artist_name,
+                    song_metadata_cache.c.genre_names,
+                    song_metadata_cache.c.release_date,
+                    song_metadata_cache.c.isrc,
+                ).where(
                     sa.and_(
                         song_metadata_cache.c.catalog_id == catalog_id,
                         song_metadata_cache.c.user_id == user_id,
                     )
                 )
-            )
-            song_row = song_result.first()
+            )).first()
+            source = "per_user"
+
+            if song_row is None:
+                song_row = (await conn.execute(
+                    sa.select(
+                        global_song_cache.c.catalog_id,
+                        global_song_cache.c.name,
+                        global_song_cache.c.artist_name,
+                        global_song_cache.c.genre_names,
+                        global_song_cache.c.release_date,
+                        global_song_cache.c.isrc,
+                    ).where(global_song_cache.c.catalog_id == catalog_id)
+                )).first()
+                source = "global"
 
             if song_row is None:
                 raise ValueError("Track not found in catalog")
 
-            # Get latest taste profile
-            profile_result = await conn.execute(
+            # ── Load latest taste profile ─────────────────────────────
+            profile_row = (await conn.execute(
                 sa.select(taste_profile_snapshots)
                 .where(taste_profile_snapshots.c.user_id == user_id)
                 .order_by(taste_profile_snapshots.c.computed_at.desc())
                 .limit(1)
-            )
-            profile_row = profile_result.first()
+            )).first()
 
             if profile_row is None:
                 raise ValueError("No taste profile available")
 
-        # Build song dict
-        genre_names = song_row.genre_names
-        if isinstance(genre_names, str):
-            try:
-                genre_names = json.loads(genre_names)
-            except (json.JSONDecodeError, TypeError):
-                genre_names = []
+            # ── Load embeddings + audio features for this track ───────
+            af_row = None
+            emb_row = None
+            if source == "per_user":
+                af_row = (await conn.execute(
+                    sa.select(audio_features_cache).where(
+                        sa.and_(
+                            audio_features_cache.c.catalog_id == catalog_id,
+                            audio_features_cache.c.user_id == user_id,
+                        )
+                    )
+                )).first()
+                emb_row = (await conn.execute(
+                    sa.select(audio_embeddings).where(
+                        sa.and_(
+                            audio_embeddings.c.catalog_id == catalog_id,
+                            audio_embeddings.c.user_id == user_id,
+                        )
+                    )
+                )).first()
 
-        song_dict: dict[str, Any] = {
-            "catalog_id": song_row.catalog_id,
-            "name": song_row.name,
-            "artist_name": song_row.artist_name,
-            "genre_names": genre_names,
-            "release_date": song_row.release_date,
-        }
+            # Fallback to global by ISRC
+            if (af_row is None or emb_row is None) and song_row.isrc:
+                if af_row is None:
+                    af_row = (await conn.execute(
+                        sa.select(audio_features_global).where(
+                            audio_features_global.c.isrc == song_row.isrc
+                        )
+                    )).first()
+                if emb_row is None:
+                    emb_row = (await conn.execute(
+                        sa.select(audio_embeddings_global).where(
+                            audio_embeddings_global.c.isrc == song_row.isrc
+                        )
+                    )).first()
 
-        # Build profile dict
+        # ── Parse JSON columns ──────────────────────────────────────
         def _parse_json(val: Any, default: Any) -> Any:
             if val is None:
                 return default
@@ -427,6 +464,19 @@ class RecommendationService:
                     return default
             return val
 
+        genre_names = _parse_json(song_row.genre_names, [])
+        if isinstance(genre_names, str):
+            genre_names = [genre_names]
+
+        song_dict: dict[str, Any] = {
+            "catalog_id": song_row.catalog_id,
+            "name": song_row.name,
+            "artist_name": song_row.artist_name,
+            "genre_names": genre_names,
+            "release_date": song_row.release_date,
+            "isrc": song_row.isrc,
+        }
+
         profile_dict: dict[str, Any] = {
             "genre_vector": _parse_json(profile_row.genre_vector, {}),
             "top_artists": _parse_json(profile_row.top_artists, []),
@@ -434,43 +484,114 @@ class RecommendationService:
                 profile_row.release_year_distribution, {},
             ),
             "familiarity_score": profile_row.familiarity_score or 0.0,
+            "audio_centroid": _parse_json(profile_row.audio_centroid, {}),
+            "embedding_centroid": _parse_json(profile_row.embedding_centroid, None),
+            "clap_centroid": _parse_json(profile_row.clap_centroid, None),
+            "mert_centroid": _parse_json(profile_row.mert_centroid, None),
         }
 
-        # Score the candidate
-        result = score_candidate(song_dict, profile_dict)
+        # Candidate embeddings + features
+        candidate_clap = None
+        candidate_mert = None
+        candidate_effnet = None
+        audio_features = None
+        if emb_row is not None:
+            candidate_clap = _parse_json(
+                getattr(emb_row, "clap_embedding", None), None,
+            )
+            candidate_mert = _parse_json(
+                getattr(emb_row, "mert_embedding", None), None,
+            )
+            candidate_effnet = _parse_json(
+                getattr(emb_row, "embedding", None), None,
+            )
+            if isinstance(candidate_effnet, list) and len(candidate_effnet) < 10:
+                candidate_effnet = None
+        if af_row is not None:
+            audio_features = {
+                "tempo": getattr(af_row, "tempo", None),
+                "energy": getattr(af_row, "energy", None),
+                "danceability": getattr(af_row, "danceability", None),
+                "brightness": getattr(af_row, "brightness", None),
+                "beat_strength": getattr(af_row, "beat_strength", None),
+                "valence_proxy": getattr(af_row, "valence_proxy", None),
+                "acousticness": getattr(af_row, "acousticness", None),
+            }
 
-        # Map breakdown keys to the 7 reportable dimensions
+        # Effective (context-adaptive) weights
+        weights = compute_context_weights(
+            profile_dict,
+            has_audio=bool(profile_dict.get("audio_centroid")),
+            has_calibration=False,
+            mood_active=False,
+        )
+
+        # Calibration for this user (may boost artist_match)
+        calibration_artists = await self._load_calibration_artists(
+            engine, user_id=user_id,
+        )
+
+        # ── Score ──────────────────────────────────────────────────
+        result = score_candidate(
+            song_dict, profile_dict,
+            weights=weights,
+            audio_features=audio_features,
+            user_audio_centroid=profile_dict.get("audio_centroid") or None,
+            candidate_embedding=candidate_effnet,
+            user_embedding_centroid=profile_dict.get("embedding_centroid"),
+            candidate_clap=candidate_clap,
+            user_clap_centroid=profile_dict.get("clap_centroid"),
+            candidate_mert=candidate_mert,
+            user_mert_centroid=profile_dict.get("mert_centroid"),
+            calibration_artists=calibration_artists,
+        )
+
         breakdown = result.get("_breakdown", {})
-        dimension_map: list[tuple[str, str, str]] = [
-            ("genre_match", "Genre Match", "genre"),
-            ("audio_similarity", "Audio Similarity", "audio"),
-            ("artist_match", "Artist Affinity", "artist"),
-            ("language_match", "Language/Region", "language"),
+
+        # ── Weighted dimensions (sum to ~1.0 if all present) ────────
+        weighted: list[dict[str, Any]] = [
+            {"name": "clap", "label": "CLAP (audio-semantic)",
+             "score": breakdown.get("clap_similarity", 0.0),
+             "weight": weights.get("clap", 0.0)},
+            {"name": "mert", "label": "MERT (musical structure)",
+             "score": breakdown.get("mert_similarity", 0.0),
+             "weight": weights.get("mert", 0.0)},
+            {"name": "effnet", "label": "EffNet (timbral fingerprint)",
+             "score": breakdown.get("effnet_similarity", 0.0),
+             "weight": weights.get("effnet", 0.0)},
+            {"name": "genre", "label": "Genre match",
+             "score": breakdown.get("genre_match", 0.0),
+             "weight": weights.get("genre", 0.0)},
+            {"name": "scalar", "label": "Scalar audio (tempo/energy)",
+             "score": breakdown.get("scalar_similarity", 0.0),
+             "weight": weights.get("scalar", 0.0)},
+            {"name": "artist", "label": "Artist affinity",
+             "score": breakdown.get("artist_match", 0.0),
+             "weight": weights.get("artist", 0.0)},
         ]
 
-        dimensions: list[dict[str, Any]] = []
-        for dim_name, dim_label, weight_key in dimension_map:
-            # Map breakdown keys to dimension names
-            if dim_name == "diversity":
-                score = round(1.0 - breakdown.get("diversity_penalty", 0.0), 3)
-            elif dim_name == "artist_affinity":
-                score = breakdown.get("artist_match", 0.0)
-            elif dim_name == "anti_staleness":
-                score = round(1.0 - breakdown.get("staleness", 0.0), 3)
-            else:
-                score = breakdown.get(dim_name, 0.0)
-
-            dimensions.append({
-                "name": dim_name,
-                "label": dim_label,
-                "score": score,
-                "weight": DEFAULT_WEIGHTS.get(weight_key, 0.0),
-            })
+        # ── Modifiers (additive bonuses + subtractive penalties) ────
+        # weight reflects the ABSOLUTE cap of each modifier; score is the
+        # realized value (positive = bonus, negative = penalty).
+        modifiers: list[dict[str, Any]] = [
+            {"name": "discovery_bonus", "label": "Discovery weight",
+             "score": breakdown.get("discovery_bonus", 0.0), "weight": 0.04},
+            {"name": "cross_strategy_bonus", "label": "Cross-strategy overlap",
+             "score": breakdown.get("cross_strategy_bonus", 0.0), "weight": 0.10},
+            {"name": "calibration_boost", "label": "Calibration boost",
+             "score": breakdown.get("calibration_boost", 0.0), "weight": 0.20},
+            {"name": "mood_boost", "label": "Mood match",
+             "score": breakdown.get("mood_boost", 0.0) * 0.1, "weight": 0.10},
+            {"name": "diversity_penalty", "label": "Diversity penalty",
+             "score": -breakdown.get("diversity_penalty", 0.0) * 0.05, "weight": 0.05},
+            {"name": "staleness", "label": "Staleness penalty",
+             "score": -breakdown.get("staleness", 0.0) * 0.03, "weight": 0.03},
+        ]
 
         return {
             "catalog_id": catalog_id,
             "overall_score": result.get("_score", 0.0),
-            "dimensions": dimensions,
+            "dimensions": weighted + modifiers,
             "explanation": result.get("_explanation", ""),
         }
 
@@ -797,6 +918,7 @@ class RecommendationService:
                 global_song_cache.c.duration_ms,
                 global_song_cache.c.release_date,
                 global_song_cache.c.preview_url,
+                global_song_cache.c.artwork_url,
             ).select_from(
                 rc.join(
                     global_song_cache,
@@ -837,7 +959,7 @@ class RecommendationService:
                     "release_date": row.release_date,
                     "preview_url": row.preview_url or "",
                     "service_source": row.service_source or "",
-                    "artwork_url_template": "",
+                    "artwork_url_template": row.artwork_url or "",
                 }
                 strategy_counts[cid] = set()
                 max_weights[cid] = (0.0, "")

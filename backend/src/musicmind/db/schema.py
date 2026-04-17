@@ -522,6 +522,7 @@ global_song_cache = sa.Table(
     sa.Column("duration_ms", sa.Integer, nullable=True),
     sa.Column("release_date", sa.Text, nullable=True),
     sa.Column("preview_url", sa.Text, server_default=""),
+    sa.Column("artwork_url", sa.Text, server_default=""),
     sa.Column("service_source", sa.Text, server_default=""),
     sa.Column(
         "fetched_at",

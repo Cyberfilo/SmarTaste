@@ -484,17 +484,21 @@ async def _migrate_discography_to_global(engine) -> int:
                 ON CONFLICT (isrc) DO NOTHING
             """))
 
-            # song_metadata_cache → global_song_cache (metadata)
+            # song_metadata_cache → global_song_cache (metadata + artwork)
             await conn.execute(sa.text("""
                 INSERT INTO global_song_cache
                   (catalog_id, name, artist_name, album_name, genre_names,
-                   isrc, duration_ms, release_date, preview_url, service_source)
+                   isrc, duration_ms, release_date, preview_url,
+                   artwork_url, service_source)
                 SELECT catalog_id, name, artist_name, album_name, genre_names,
-                       isrc, duration_ms, release_date, preview_url, service_source
+                       isrc, duration_ms, release_date, preview_url,
+                       artwork_url_template, service_source
                 FROM song_metadata_cache
                 WHERE library_id IS NULL
                   AND date_added_to_library IS NULL
-                ON CONFLICT (catalog_id) DO NOTHING
+                ON CONFLICT (catalog_id) DO UPDATE SET
+                  artwork_url = COALESCE(NULLIF(global_song_cache.artwork_url, ''),
+                                         EXCLUDED.artwork_url)
             """))
 
             # Step 2: delete per-user discography rows
@@ -858,9 +862,12 @@ async def _run_discovery_for_user(
         except (ValueError, TypeError):
             genre_vector_raw = {}
 
+    # Unified discoverer: favour breadth over narrow strategy gates.
+    # Use up to 15 seed artists and 10 top genres so the candidate pool
+    # reflects the full shape of the user's profile, not just the peaks.
     seed_scored: list[tuple[str, float]] = [
         (a["name"], float(a.get("score", 0.0)))
-        for a in (top_artists_raw or [])[:5]
+        for a in (top_artists_raw or [])[:15]
         if isinstance(a, dict) and a.get("name")
     ]
     if not seed_scored:
@@ -869,7 +876,7 @@ async def _run_discovery_for_user(
         g for g, _ in sorted(
             (genre_vector_raw or {}).items(),
             key=lambda x: -x[1],
-        )[:5]
+        )[:10]
     ]
 
     # ── Resolve credentials (reuses existing helper) ────────────────────
@@ -896,19 +903,22 @@ async def _run_discovery_for_user(
             discover_similar_artists(
                 service, access_token, seed_scored,
                 developer_token=dev_token, storefront=storefront,
-                total_budget=40,
+                total_budget=200,
             ),
             discover_genre_adjacent(
                 service, access_token, top_genre_names,
                 developer_token=dev_token, storefront=storefront,
+                limit=50,
             ),
             discover_editorial(
                 service, access_token, top_genre_names,
                 developer_token=dev_token, storefront=storefront,
+                limit=50,
             ),
             discover_chart_filter(
                 service, access_token, top_genre_names,
                 developer_token=dev_token, storefront=storefront,
+                limit=50,
             ),
             return_exceptions=True,
         )
@@ -945,10 +955,14 @@ async def _run_discovery_for_user(
                         "INSERT INTO global_song_cache"
                         " (catalog_id, name, artist_name, album_name,"
                         "  genre_names, isrc, duration_ms, release_date,"
-                        "  preview_url, service_source)"
+                        "  preview_url, artwork_url, service_source)"
                         " VALUES (:cid, :name, :artist, :album, :genres,"
-                        "  :isrc, :duration, :release, :preview, :svc)"
-                        " ON CONFLICT (catalog_id) DO NOTHING"
+                        "  :isrc, :duration, :release, :preview, :art, :svc)"
+                        " ON CONFLICT (catalog_id) DO UPDATE SET"
+                        "  artwork_url = COALESCE("
+                        "    NULLIF(global_song_cache.artwork_url, ''),"
+                        "    EXCLUDED.artwork_url"
+                        "  )"
                     ),
                     {
                         "cid": cid,
@@ -960,6 +974,7 @@ async def _run_discovery_for_user(
                         "duration": c.get("duration_ms"),
                         "release": c.get("release_date"),
                         "preview": c.get("preview_url", ""),
+                        "art": c.get("artwork_url_template", "") or c.get("artwork_url", ""),
                         "svc": c.get("service_source", ""),
                     },
                 )
@@ -1375,6 +1390,10 @@ async def _fetch_artist_songs_globally(
                     release_date=track.get("release_date"),
                     isrc=track.get("isrc"),
                     preview_url=track.get("preview_url", ""),
+                    artwork_url=(
+                        track.get("artwork_url_template", "")
+                        or track.get("artwork_url", "")
+                    ),
                     service_source=service,
                 )
             )

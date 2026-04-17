@@ -507,6 +507,10 @@ async def _fetch_and_enrich_discography(
                     release_date=track.get("release_date"),
                     isrc=track.get("isrc"),
                     preview_url=track.get("preview_url", ""),
+                    artwork_url=(
+                        track.get("artwork_url_template", "")
+                        or track.get("artwork_url", "")
+                    ),
                     service_source=creds["service"],
                 )
             )

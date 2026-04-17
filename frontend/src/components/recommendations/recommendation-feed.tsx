@@ -1,9 +1,6 @@
 "use client";
 
-import { useState } from "react";
 import { useRecommendations } from "@/hooks/use-recommendations";
-import { StrategySelector } from "./strategy-selector";
-import { MoodFilter } from "./mood-filter";
 import { RecommendationCard } from "./recommendation-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
@@ -12,10 +9,7 @@ import { Music } from "lucide-react";
 import { useEffect } from "react";
 
 export function RecommendationFeed() {
-  const [strategy, setStrategy] = useState("all");
-  const [mood, setMood] = useState<string | null>(null);
-
-  const { data, isLoading, isError, error } = useRecommendations(strategy, mood);
+  const { data, isLoading, isError, error } = useRecommendations();
 
   useEffect(() => {
     if (isError && error) {
@@ -25,12 +19,6 @@ export function RecommendationFeed() {
 
   return (
     <div className="space-y-6">
-      {/* Controls */}
-      <div className="space-y-4">
-        <StrategySelector value={strategy} onChange={setStrategy} />
-        <MoodFilter value={mood} onChange={setMood} />
-      </div>
-
       {/* Adapted weights indicator */}
       {data?.weights_adapted && (
         <p className="text-xs text-purple-400">
