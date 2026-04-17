@@ -449,13 +449,18 @@ async def _fetch_and_enrich_discography(
     artist_name: str,
     limit: int,
 ) -> int:
-    """Fetch an artist's top tracks and enrich them."""
+    """Fetch an artist's top tracks and store in global_song_cache.
+
+    Discography tracks are global (not per-user) — they're enriched by the
+    worker's _enrich_global_songs on the next cycle. This keeps per-user
+    tables (song_metadata_cache, audio_features_cache) clean: only songs
+    actually in the user's library live there.
+    """
     from musicmind.api.recommendations.fetch import (
         _fetch_artist_top_tracks,
         _search_artist_id,
     )
-    from musicmind.db.schema import song_metadata_cache
-    from musicmind.engine.enrichment.orchestrator import enrich_tracks
+    from musicmind.db.schema import global_song_cache
 
     artist_id = await _search_artist_id(
         creds["service"], creds["access_token"], artist_name,
@@ -476,26 +481,24 @@ async def _fetch_and_enrich_discography(
     if not tracks:
         return 0
 
-    # Cache new tracks (skip existing)
-    new_tracks: list[dict[str, Any]] = []
+    # Store in global_song_cache (skip existing). Enrichment happens via
+    # the worker's _enrich_global_songs on the next cycle.
+    new_count = 0
     async with engine.begin() as conn:
         for track in tracks:
             cid = track.get("catalog_id", "")
             if not cid:
                 continue
             exists = await conn.execute(
-                sa.select(song_metadata_cache.c.catalog_id).where(
-                    sa.and_(
-                        song_metadata_cache.c.catalog_id == cid,
-                        song_metadata_cache.c.user_id == user_id,
-                    )
+                sa.select(global_song_cache.c.catalog_id).where(
+                    global_song_cache.c.catalog_id == cid
                 )
             )
             if exists.first():
                 continue
             await conn.execute(
-                song_metadata_cache.insert().values(
-                    catalog_id=cid, user_id=user_id,
+                global_song_cache.insert().values(
+                    catalog_id=cid,
                     name=track.get("name", ""),
                     artist_name=track.get("artist_name", ""),
                     album_name=track.get("album_name", ""),
@@ -507,18 +510,9 @@ async def _fetch_and_enrich_discography(
                     service_source=creds["service"],
                 )
             )
-            new_tracks.append(track)
+            new_count += 1
 
-    if not new_tracks:
-        return 0
-
-    # Full pipeline: Essentia audio + GPU embeddings
-    await enrich_tracks(
-        engine, new_tracks, user_id=user_id,
-        modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
-    )
-
-    return len(new_tracks)
+    return new_count
 
 
 async def _suggest_and_enrich_artists(
