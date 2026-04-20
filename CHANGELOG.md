@@ -7,6 +7,18 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.390 — 2026-04-20
+
+### Fix: "Similar to X" cited library tracks the user didn't remember
+
+User reported the contextual explanation saying "Similar to *Fare chiasso* by Night Skinny" when they didn't think of that track as being in their library. DB check confirmed the track was in Apple Music's library scope (`library_id` set) but almost certainly auto-added — the user has 2 Night Skinny tracks total vs 31 Capo Plaza / 31 Shiva / 24 Artie 5ive / 19 Kero / 16 Vale Pain. Apple Music gives us no way to distinguish "explicitly added" from "added via album / pulled in via playlist sync", so the row passes the boolean library filter.
+
+`_load_user_library_claps` now takes an optional `known_artist_names` set and filters library tracks to ones whose primary artist is in the user's top-30 by affinity. On staging, that cuts the reference pool from 466 songs across 174 artists to 291 songs across 30 artists (62% of library retained — the actual core taste; 175 long-tail one-offs dropped). Night Skinny with 2 library songs falls out of top-30 → Fare chiasso can no longer be cited.
+
+Primary artist is extracted via the existing `parse_artists` helper so "Night Skinny feat. X, Y" matches correctly. No schema change; no perf impact (same query, filtered in Python before building the result dict).
+
+---
+
 ## V 6.389 — 2026-04-20
 
 ### Hybrid mood classifier — discrete tags + sparse score vector

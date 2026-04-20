@@ -377,9 +377,19 @@ class RecommendationService:
             engine, unique, user_id=user_id,
         )
 
-        # Load user library CLAP embeddings for contextual explanations
+        # Load user library CLAP embeddings for contextual explanations.
+        # V 6.390: restrict to top-30 artists by affinity so the "Similar
+        # to X" reference never cites a track the user doesn't actually
+        # listen to (e.g., auto-added album cuts they've forgotten about).
+        top_artist_names: set[str] = {
+            (a.get("name") or "").lower()
+            for a in (profile.get("top_artists") or [])[:30]
+            if isinstance(a, dict) and a.get("name")
+        }
         user_library_claps = await self._load_user_library_claps(
-            engine, user_id=user_id,
+            engine,
+            user_id=user_id,
+            known_artist_names=top_artist_names or None,
         )
 
         ranked = rank_candidates(
@@ -1479,13 +1489,22 @@ class RecommendationService:
         engine,
         *,
         user_id: str,
+        known_artist_names: set[str] | None = None,
     ) -> dict[str, dict[str, Any]] | None:
         """Load CLAP embeddings for user's library songs (contextual explanations).
 
         Returns {catalog_id: {"name": str, "artist_name": str, "clap": list[float]}}
         for songs that have CLAP embeddings, or None if empty.
+
+        V 6.390: when `known_artist_names` is provided (lowercased primary
+        artist names from the user's top-affinity set), the result is filtered
+        to tracks whose primary artist the user actively listens to. Fixes
+        the "Similar to <track user doesn't remember>" bug — Apple Music's
+        library includes tracks from albums the user added wholesale plus
+        other auto-added rows, which the user doesn't think of as their own.
         """
         from musicmind.db.schema import audio_embeddings
+        from musicmind.engine.profile import parse_artists
 
         async with engine.begin() as conn:
             result = await conn.execute(
@@ -1515,6 +1534,14 @@ class RecommendationService:
             )
             out: dict[str, dict[str, Any]] = {}
             for row in result:
+                # Affinity filter: primary artist must be in the user's
+                # known-artist set. Skip feat-only matches — the reference
+                # track should be one the user clearly owns by a known name.
+                if known_artist_names is not None:
+                    parsed = parse_artists(row.artist_name or "")
+                    primary = parsed[0][0].lower() if parsed else ""
+                    if primary not in known_artist_names:
+                        continue
                 clap = row.clap_embedding
                 if isinstance(clap, str):
                     try:
