@@ -281,6 +281,7 @@ def score_candidate(
     staleness_index: dict[str, dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
     nearest_tracks: list[dict[str, Any]] | None = None,
+    candidate_mood_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Score a single candidate song against a taste profile.
 
@@ -368,6 +369,18 @@ def score_candidate(
     )
     if has_scalar:
         scalar_score = scalar_audio_similarity(user_audio_centroid, audio_features)
+
+    # ── 3b. Mood match (V 6.388) ──────────────────────────
+    # Cosine similarity between the user's library-aggregated mood
+    # distribution and the candidate's OpenAI-classified mood tags.
+    # Closes the affect gap that CLAP/MERT/EffNet miss — two tracks with
+    # similar production but opposite emotion now score very differently.
+    mood_score = 0.0
+    user_mood_dist = profile.get("mood_distribution") or None
+    has_mood = bool(user_mood_dist and candidate_mood_tags)
+    if has_mood:
+        from musicmind.engine.mood_tagger import mood_similarity
+        mood_score = mood_similarity(user_mood_dist, candidate_mood_tags)
 
     # ── 4. Artist affinity — three-tier match, wrong-genre penalised ─────
     # Tier 1 (primary match): candidate's primary artist is in user's top —
@@ -485,6 +498,9 @@ def score_candidate(
     if has_scalar:
         dim_scores["scalar"] = scalar_score
         dim_weights["scalar"] = w.get("scalar", 0.10)
+    if has_mood:
+        dim_scores["mood_match"] = mood_score
+        dim_weights["mood_match"] = w.get("mood_match", 0.10)
 
     w_total = sum(dim_weights.values())
     if w_total > 0:
@@ -546,6 +562,7 @@ def score_candidate(
             "effnet_similarity": round(effnet_score, 3),
             "genre_match": round(genre_score, 3),
             "scalar_similarity": round(scalar_score, 3),
+            "mood_match": round(mood_score, 3),
             "artist_match": round(artist_match, 3),
             "calibration_boost": round(cal_boost, 3),
             "recency_boost": round(recency_boost, 3),
@@ -607,6 +624,7 @@ def rank_candidates(
     recent_recommendations: list[dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
     user_library_claps: dict[str, dict[str, Any]] | None = None,
+    mood_tags_map: dict[str, list[str]] | None = None,
     # Legacy params — accepted but ignored for backward compat
     user_tag_profile: dict[str, float] | None = None,
     collaborative_matches: set[str] | None = None,
@@ -632,6 +650,7 @@ def rank_candidates(
             c_clap, user_library_claps,
         ) if user_library_claps else None
 
+        c_moods = (mood_tags_map or {}).get(cid) or c.get("mood_tags")
         scored = score_candidate(
             c, profile, already_selected=None,
             weights=weights,
@@ -643,6 +662,7 @@ def rank_candidates(
             user_clap_centroid=user_clap_centroid,
             candidate_mert=(mert_map or {}).get(cid),
             user_mert_centroid=user_mert_centroid,
+            candidate_mood_tags=c_moods,
             staleness_index=staleness_idx,
             calibration_artists=calibration_artists,
             nearest_tracks=nearest,

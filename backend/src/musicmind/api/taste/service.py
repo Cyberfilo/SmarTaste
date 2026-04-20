@@ -463,6 +463,7 @@ class TasteService:
             "embedding_centroid": _pj(mapping.get("embedding_centroid"), None),
             "clap_centroid": _pj(mapping.get("clap_centroid"), None),
             "mert_centroid": _pj(mapping.get("mert_centroid"), None),
+            "mood_distribution": _pj(mapping.get("mood_distribution"), None),
         }
 
     async def _fetch_and_cache_data(
@@ -865,6 +866,54 @@ class TasteService:
             engine, user_id=user_id, songs=engaged_songs,
         )
 
+        # V 6.388: load mood_tags from global_song_cache (per catalog_id
+        # AND per ISRC for library songs that haven't been promoted).
+        mood_tags_map: dict[str, list[str]] = {}
+        try:
+            from musicmind.db.schema import global_song_cache
+            isrcs = [s.get("isrc") for s in songs if s.get("isrc")]
+            if catalog_ids or isrcs:
+                async with engine.begin() as conn:
+                    by_cid = await conn.execute(
+                        sa.select(
+                            global_song_cache.c.catalog_id,
+                            global_song_cache.c.isrc,
+                            global_song_cache.c.mood_tags,
+                        ).where(
+                            sa.or_(
+                                global_song_cache.c.catalog_id.in_(catalog_ids)
+                                if catalog_ids else sa.false(),
+                                global_song_cache.c.isrc.in_(isrcs)
+                                if isrcs else sa.false(),
+                            )
+                        )
+                    )
+                    by_isrc: dict[str, list[str]] = {}
+                    for row in by_cid:
+                        tags = row.mood_tags
+                        if isinstance(tags, str):
+                            try:
+                                tags = json.loads(tags)
+                            except (ValueError, TypeError):
+                                tags = []
+                        if not tags or not isinstance(tags, list):
+                            continue
+                        mood_tags_map[row.catalog_id] = tags
+                        if row.isrc:
+                            by_isrc[row.isrc] = tags
+                    # ISRC fallback for library rows not keyed by catalog_id
+                    for s in songs:
+                        cid = s.get("catalog_id", "")
+                        if cid in mood_tags_map:
+                            continue
+                        isrc = s.get("isrc")
+                        if isrc and isrc in by_isrc:
+                            mood_tags_map[cid] = by_isrc[isrc]
+        except Exception:
+            logger.warning(
+                "Failed to load mood_tags for profile, continuing without",
+            )
+
         profile = build_taste_profile(
             calibrated_songs, history,
             use_temporal_decay=True,
@@ -872,6 +921,7 @@ class TasteService:
             embedding_map=embedding_map or None,
             clap_map=clap_map or None,
             mert_map=mert_map or None,
+            mood_tags_map=mood_tags_map or None,
         )
 
         # total_songs_analyzed should reflect unique songs, not amplified duplicates
@@ -908,6 +958,9 @@ class TasteService:
                     mert_centroid=json.dumps(
                         profile.get("mert_centroid")
                     ) if profile.get("mert_centroid") else None,
+                    mood_distribution=json.dumps(
+                        profile.get("mood_distribution")
+                    ) if profile.get("mood_distribution") else None,
                 )
             )
 

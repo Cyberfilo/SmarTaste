@@ -201,6 +201,10 @@ taste_profile_snapshots = sa.Table(
     sa.Column("embedding_centroid", sa.JSON, nullable=True),
     sa.Column("clap_centroid", sa.JSON, nullable=True),
     sa.Column("mert_centroid", sa.JSON, nullable=True),
+    # V 6.388: normalized distribution over the mood taxonomy, summed
+    # across the user's library mood_tags. Used by the `mood_match`
+    # scorer dimension. Nullable while old snapshots age out.
+    sa.Column("mood_distribution", sa.JSON, nullable=True),
 )
 
 audio_features_cache = sa.Table(
@@ -530,6 +534,9 @@ global_song_cache = sa.Table(
         nullable=False,
         server_default=sa.func.now(),
     ),
+    # V 6.388: OpenAI-classified mood tags from fixed 12-entry taxonomy.
+    # Primary mood first; 1-3 tags per track; empty array when unclassified.
+    sa.Column("mood_tags", sa.JSON, nullable=False, server_default="[]"),
 )
 
 playlist_items = sa.Table(

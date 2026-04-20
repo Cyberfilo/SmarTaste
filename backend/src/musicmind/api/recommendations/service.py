@@ -412,6 +412,7 @@ class RecommendationService:
                     "_strategy_source", strategy,
                 ),
                 "genre_names": result.get("genre_names", []),
+                "mood_tags": result.get("mood_tags", []),
             })
 
         return {
@@ -595,6 +596,29 @@ class RecommendationService:
                 "acousticness": getattr(af_row, "acousticness", None),
             }
 
+        # ── Load mood_tags for this track (global_song_cache first) ──
+        candidate_mood_tags: list[str] = []
+        try:
+            async with engine.begin() as conn:
+                row = (await conn.execute(
+                    sa.select(global_song_cache.c.mood_tags).where(
+                        global_song_cache.c.catalog_id == catalog_id,
+                    )
+                )).first()
+            if row is not None:
+                tags = row.mood_tags
+                if isinstance(tags, str):
+                    try:
+                        tags = json.loads(tags)
+                    except (ValueError, TypeError):
+                        tags = []
+                if isinstance(tags, list):
+                    candidate_mood_tags = [t for t in tags if isinstance(t, str)]
+        except Exception:
+            logger.debug(
+                "Could not load mood_tags for breakdown", exc_info=True,
+            )
+
         # Effective (context-adaptive) weights
         weights = compute_context_weights(
             profile_dict,
@@ -621,6 +645,7 @@ class RecommendationService:
             candidate_mert=candidate_mert,
             user_mert_centroid=profile_dict.get("mert_centroid"),
             calibration_artists=calibration_artists,
+            candidate_mood_tags=candidate_mood_tags or None,
         )
 
         breakdown = result.get("_breakdown", {})
@@ -642,6 +667,9 @@ class RecommendationService:
             {"name": "scalar", "label": "Scalar audio (tempo/energy)",
              "score": breakdown.get("scalar_similarity", 0.0),
              "weight": weights.get("scalar", 0.0)},
+            {"name": "mood_match", "label": "Mood distribution match",
+             "score": breakdown.get("mood_match", 0.0),
+             "weight": weights.get("mood_match", 0.0)},
             {"name": "artist", "label": "Artist affinity",
              "score": breakdown.get("artist_match", 0.0),
              "weight": weights.get("artist", 0.0)},
@@ -998,6 +1026,7 @@ class RecommendationService:
                 global_song_cache.c.release_date,
                 global_song_cache.c.preview_url,
                 global_song_cache.c.artwork_url,
+                global_song_cache.c.mood_tags,
             ).select_from(
                 rc.join(
                     global_song_cache,
@@ -1027,6 +1056,14 @@ class RecommendationService:
                 except (ValueError, TypeError):
                     genres = []
             if cid not in by_cid:
+                mood_tags = row.mood_tags
+                if isinstance(mood_tags, str):
+                    try:
+                        mood_tags = json.loads(mood_tags)
+                    except (ValueError, TypeError):
+                        mood_tags = []
+                if not isinstance(mood_tags, list):
+                    mood_tags = []
                 by_cid[cid] = {
                     "catalog_id": cid,
                     "name": row.name or "",
@@ -1039,6 +1076,7 @@ class RecommendationService:
                     "preview_url": row.preview_url or "",
                     "service_source": row.service_source or "",
                     "artwork_url_template": row.artwork_url or "",
+                    "mood_tags": mood_tags,
                 }
                 strategy_counts[cid] = set()
                 max_weights[cid] = (0.0, "")

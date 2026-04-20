@@ -350,6 +350,19 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d global GPU backfill failed", cycle)
 
+        # ── Phase 5c: Mood backfill (V 6.388) ────────────────────────
+        # OpenAI classifies global tracks into the 12-mood taxonomy.
+        # Cheap (~$1 per full catalog pass), runs every cycle until
+        # every global row has mood_tags.
+        try:
+            mood_count = await _backfill_mood_tags_global(engine, settings)
+            if mood_count > 0:
+                logger.info(
+                    "Cycle %d: mood backfill tagged %d tracks", cycle, mood_count,
+                )
+        except Exception:
+            logger.exception("Cycle %d mood backfill failed", cycle)
+
         # ── Check if user-linked work is done ──────────────────────
         user_work_remaining = await _count_user_linked_gaps(engine)
 
@@ -1764,6 +1777,16 @@ async def _drain_discovered(
         totals["gpu"] += gpu
         progress += gpu
 
+        # V 6.388: backfill OpenAI mood tags as part of the startup drain
+        # so first-time deploys get mood signal without waiting for the
+        # main loop to cycle through.
+        try:
+            mood = await _backfill_mood_tags_global(engine, settings)
+            totals["mood"] = totals.get("mood", 0) + mood
+            progress += mood
+        except Exception:
+            logger.exception("Startup drain mood backfill failed")
+
         remaining = await _count_global_gaps(engine)
         logger.info(
             "Discovered drain pass %d: +%d isrc, +%d ess, +%d gpu  "
@@ -2435,6 +2458,123 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
             )
 
     return total_stored
+
+
+async def _backfill_mood_tags_global(
+    engine, settings, *, max_per_cycle: int = 900,
+) -> int:
+    """V 6.388 — OpenAI-backed mood classification for global_song_cache.
+
+    Picks rows with empty mood_tags that already have enrichment
+    (audio_features_global + embeddings) so scalar features can inform
+    the classifier. Batches 30 tracks per call, ~5 concurrent calls.
+    Costs ~$1-2 to tag the whole catalog via gpt-5.4.
+
+    Returns the number of tracks that got mood_tags written.
+    """
+    api_key = getattr(settings, "openai_api_key", None)
+    if not api_key:
+        logger.debug("Mood backfill skipped: MUSICMIND_OPENAI_API_KEY unset")
+        return 0
+
+    from musicmind.db.schema import (
+        audio_features_global,
+        global_song_cache,
+    )
+    from musicmind.engine.mood_tagger import BATCH_SIZE, classify_batch
+
+    # Pick candidates: no mood_tags yet, have basic metadata + a preview
+    # was at least attempted. We don't require audio_features — the
+    # classifier handles missing scalars gracefully — but tracks with
+    # features get better-quality tags.
+    async with engine.begin() as conn:
+        rows = (await conn.execute(sa.text("""
+            SELECT gsc.catalog_id, gsc.isrc, gsc.name, gsc.artist_name,
+                   gsc.genre_names,
+                   afg.tempo, afg.energy, afg.valence_proxy
+            FROM global_song_cache gsc
+            LEFT JOIN audio_features_global afg ON afg.isrc = gsc.isrc
+            WHERE (gsc.mood_tags IS NULL
+                   OR gsc.mood_tags::text = '[]'
+                   OR gsc.mood_tags::text = 'null')
+              AND gsc.name IS NOT NULL AND gsc.name != ''
+              AND gsc.artist_name IS NOT NULL AND gsc.artist_name != ''
+            ORDER BY (afg.tempo IS NOT NULL) DESC, gsc.fetched_at DESC
+            LIMIT :lim
+        """), {"lim": max_per_cycle})).fetchall()
+
+    if not rows:
+        return 0
+
+    logger.info(
+        "Mood backfill: classifying %d global tracks via gpt-5.4",
+        len(rows),
+    )
+
+    # Normalize into the batch-call shape.
+    tracks: list[dict] = []
+    for r in rows:
+        genres = r.genre_names
+        if isinstance(genres, str):
+            try:
+                genres = json.loads(genres)
+            except (ValueError, TypeError):
+                genres = []
+        if not isinstance(genres, list):
+            genres = []
+        tracks.append({
+            "catalog_id": r.catalog_id,
+            "name": r.name,
+            "artist": r.artist_name,
+            "genres": genres,
+            "tempo": float(r.tempo) if r.tempo is not None else None,
+            "energy": float(r.energy) if r.energy is not None else None,
+            "valence": float(r.valence_proxy) if r.valence_proxy is not None else None,
+        })
+
+    # Batch up and dispatch concurrently
+    batches = [tracks[i:i + BATCH_SIZE] for i in range(0, len(tracks), BATCH_SIZE)]
+    sem = asyncio.Semaphore(5)
+
+    async def _run_batch(batch: list[dict]) -> dict[str, list[str]]:
+        async with sem:
+            try:
+                return await classify_batch(batch, api_key=api_key)
+            except Exception:
+                logger.warning("Mood batch failed", exc_info=True)
+                return {}
+
+    batch_results = await asyncio.gather(
+        *[_run_batch(b) for b in batches],
+        return_exceptions=True,
+    )
+
+    all_tags: dict[str, list[str]] = {}
+    for r in batch_results:
+        if isinstance(r, dict):
+            all_tags.update(r)
+
+    if not all_tags:
+        return 0
+
+    # Single UPDATE per track — JSON column accepts list directly via sa.JSON.
+    written = 0
+    async with engine.begin() as conn:
+        for cid, tags in all_tags.items():
+            if not tags:
+                continue
+            await conn.execute(
+                global_song_cache.update()
+                .where(global_song_cache.c.catalog_id == cid)
+                .values(mood_tags=tags)
+            )
+            written += 1
+
+    logger.info(
+        "Mood backfill: wrote mood_tags for %d/%d tracks",
+        written, len(rows),
+    )
+    return written
 
 
 async def _backfill_gpu_embeddings_global(engine, settings) -> int:

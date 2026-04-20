@@ -15,11 +15,15 @@ from typing import Any
 import numpy as np
 
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "clap": 0.30,
-    "mert": 0.25,
-    "effnet": 0.15,
+    # V 6.388: mood_match added (0.10) as a dedicated affect/valence
+    # signal; CLAP and MERT each lose 0.05 to make room so production-
+    # style neighbors with opposite mood stop tying on similarity.
+    "clap": 0.25,
+    "mert": 0.22,
+    "effnet": 0.13,
     "genre": 0.15,
     "scalar": 0.10,
+    "mood_match": 0.10,
     "artist": 0.05,
 }
 
@@ -39,6 +43,7 @@ _BREAKDOWN_MAP: dict[str, str] = {
     "effnet": "effnet_similarity",
     "genre": "genre_match",
     "scalar": "scalar_similarity",
+    "mood_match": "mood_match",
     "artist": "artist_match",
     "diversity": "diversity_penalty",
     "staleness": "staleness",
@@ -66,11 +71,12 @@ def compute_context_weights(
     Returns normalized weights summing to 1.0.
     """
     # ── Base weights ──────────────────────────────────────
-    w_clap = 0.30
-    w_mert = 0.25
-    w_effnet = 0.15
+    w_clap = 0.25
+    w_mert = 0.22
+    w_effnet = 0.13
     w_genre = 0.15
     w_scalar = 0.10
+    w_mood = 0.10
     w_artist = 0.05
 
     # Check which embedding centroids are available in the profile
@@ -109,16 +115,26 @@ def compute_context_weights(
         w_genre -= 0.03
         w_scalar -= 0.02
 
-    # Mood active: CLAP (holistic vibe) + scalar become dominant
+    # V 6.388: no mood_match signal available → redistribute to genre + scalar.
+    has_mood = bool(profile.get("mood_distribution"))
+    if not has_mood:
+        redistribute = w_mood
+        w_mood = 0.0
+        w_genre += redistribute * 0.5
+        w_scalar += redistribute * 0.5
+
+    # Mood active (the separate mood filter, not mood_match dimension):
+    # CLAP holistic vibe + scalar become dominant
     if mood_active:
         w_clap = max(w_clap, 0.35)
         w_scalar = max(w_scalar, 0.20)
         remaining = 1.0 - w_clap - w_scalar
-        other = w_mert + w_effnet + w_genre + w_artist
+        other = w_mert + w_effnet + w_genre + w_mood + w_artist
         ratio = remaining / other if other > 0 else 1.0
         w_mert *= ratio
         w_effnet *= ratio
         w_genre *= ratio
+        w_mood *= ratio
         w_artist *= ratio
 
     return _normalize_weights({
@@ -127,6 +143,7 @@ def compute_context_weights(
         "effnet": w_effnet,
         "genre": w_genre,
         "scalar": w_scalar,
+        "mood_match": w_mood,
         "artist": w_artist,
     })
 
