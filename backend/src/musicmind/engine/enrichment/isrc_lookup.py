@@ -88,6 +88,30 @@ async def _deezer_lookup(name: str, artist_name: str) -> str | None:
     return None
 
 
+async def deezer_preview_by_isrc(isrc: str) -> str | None:
+    """Get a fresh Deezer 30s preview URL for a track by its ISRC.
+
+    Uses the direct /track/isrc:{ISRC} endpoint — no search needed.
+    Returns the preview MP3 URL or None if the track isn't on Deezer.
+    """
+    if not isrc:
+        return None
+    async with _deezer_sem:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{DEEZER_API}/track/isrc:{isrc}")
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("error"):
+                    return None
+                preview = data.get("preview")
+                if preview and len(preview) > 10:
+                    return preview
+        except httpx.HTTPError:
+            return None
+    return None
+
+
 async def _musicbrainz_lookup(name: str, artist_name: str) -> str | None:
     """Search MusicBrainz for a recording and return its ISRC.
 
