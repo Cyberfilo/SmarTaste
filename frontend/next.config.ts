@@ -1,6 +1,13 @@
 import type { NextConfig } from "next";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Production backend is hardcoded so Vercel builds proxy correctly even
+// if NEXT_PUBLIC_API_URL doesn't propagate. Env var still wins for local
+// dev (defaults to localhost:8000) and staging preview deploys.
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_API_URL ||
+  (process.env.VERCEL_ENV === "production"
+    ? "https://musicmind-production.up.railway.app"
+    : "http://localhost:8000");
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["live.menghi.dev", "music.menghi.dev"],
