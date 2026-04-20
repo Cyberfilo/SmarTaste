@@ -16,3 +16,8 @@ coverage/
 .claude/worktrees/
 .claude/cache/
 .staging-debug.md
+
+# Substrate / Claude context — kept local, not committed
+.context/
+CLAUDE.md
+agents.md
