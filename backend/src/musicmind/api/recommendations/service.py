@@ -362,31 +362,26 @@ class RecommendationService:
             total = sum(weights.values())
             weights = {k: round(v / total, 4) for k, v in weights.items()}
 
-        # ── Two-pass scoring ─────────────────────────────────
-        # Pass 1: Score on non-audio dimensions (instant)
-        pre_ranked = rank_candidates(
-            unique, profile, count=min(limit * 3, 30),
-            weights=weights,
-            calibration_artists=calibration_artists,
-            user_tag_profile=user_tag_profile,
-            collaborative_matches=collaborative_matches,
-        )
-
-        # Pass 2: Lazy-enrich top candidates, then re-score with audio
+        # ── Single-pass scoring (embeddings pre-loaded) ──────
+        # Load audio features + embeddings for ALL candidates upfront
         from musicmind.engine.enrichment.orchestrator import enrich_candidates
 
         audio_features_map = await enrich_candidates(
-            engine, pre_ranked, user_id=user_id,
-            max_to_enrich=min(limit * 2, 30),
+            engine, unique, user_id=user_id,
+            max_to_enrich=min(len(unique), 200),
         )
 
-        # Load CLAP/MERT/EffNet embedding maps for candidates
         clap_map, mert_map, embedding_map = await self._load_embeddings(
-            engine, pre_ranked, user_id=user_id,
+            engine, unique, user_id=user_id,
+        )
+
+        # Load user library CLAP embeddings for contextual explanations
+        user_library_claps = await self._load_user_library_claps(
+            engine, user_id=user_id,
         )
 
         ranked = rank_candidates(
-            pre_ranked, profile, count=limit, weights=weights,
+            unique, profile, count=limit, weights=weights,
             audio_features_map=audio_features_map,
             user_audio_centroid=user_audio_centroid,
             embedding_map=embedding_map or None,
@@ -396,14 +391,12 @@ class RecommendationService:
             mert_map=mert_map or None,
             user_mert_centroid=user_mert_centroid,
             calibration_artists=calibration_artists,
-            user_tag_profile=user_tag_profile,
-            collaborative_matches=collaborative_matches,
+            user_library_claps=user_library_claps or None,
         )
 
-        # Step 9: Build explanations
+        # Step 9: Build response
         items = []
         for result in ranked:
-            explanation = _build_explanation(result.get("_breakdown", {}))
             items.append({
                 "catalog_id": result.get("catalog_id", ""),
                 "name": result.get("name", ""),
@@ -412,12 +405,13 @@ class RecommendationService:
                 "artwork_url": result.get("artwork_url_template", ""),
                 "preview_url": result.get("preview_url", ""),
                 "score": result.get("_score", 0.0),
-                "explanation": explanation,
-                "strategy_source": result.get("_strategy_source", strategy),
+                "explanation": result.get("_explanation", ""),
+                "strategy_source": result.get(
+                    "_strategy_source", strategy,
+                ),
                 "genre_names": result.get("genre_names", []),
             })
 
-        # Step 10: Return
         return {
             "items": items,
             "strategy": strategy,
@@ -667,6 +661,8 @@ class RecommendationService:
              "score": -breakdown.get("diversity_penalty", 0.0) * 0.05, "weight": 0.05},
             {"name": "staleness", "label": "Staleness penalty",
              "score": -breakdown.get("staleness", 0.0) * 0.03, "weight": 0.03},
+            {"name": "recency_boost", "label": "Recency boost",
+             "score": breakdown.get("recency_boost", 0.0), "weight": 0.02},
         ]
 
         return {
@@ -1324,6 +1320,62 @@ class RecommendationService:
                 )
 
         return clap_map, mert_map, effnet_map
+
+    @staticmethod
+    async def _load_user_library_claps(
+        engine,
+        *,
+        user_id: str,
+    ) -> dict[str, dict[str, Any]] | None:
+        """Load CLAP embeddings for user's library songs (contextual explanations).
+
+        Returns {catalog_id: {"name": str, "artist_name": str, "clap": list[float]}}
+        for songs that have CLAP embeddings, or None if empty.
+        """
+        from musicmind.db.schema import audio_embeddings
+
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.name,
+                    song_metadata_cache.c.artist_name,
+                    audio_embeddings.c.clap_embedding,
+                ).select_from(
+                    song_metadata_cache.join(
+                        audio_embeddings,
+                        sa.and_(
+                            song_metadata_cache.c.catalog_id == audio_embeddings.c.catalog_id,
+                            song_metadata_cache.c.user_id == audio_embeddings.c.user_id,
+                        ),
+                    )
+                ).where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == user_id,
+                        audio_embeddings.c.clap_embedding.isnot(None),
+                        sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ),
+                    )
+                )
+            )
+            out: dict[str, dict[str, Any]] = {}
+            for row in result:
+                clap = row.clap_embedding
+                if isinstance(clap, str):
+                    try:
+                        clap = json.loads(clap)
+                    except (ValueError, TypeError):
+                        continue
+                if clap and isinstance(clap, list) and len(clap) > 10:
+                    out[row.catalog_id] = {
+                        "name": row.name or "",
+                        "artist_name": row.artist_name or "",
+                        "clap": clap,
+                    }
+
+        return out if out else None
 
     @staticmethod
     async def _load_adaptive_weights(

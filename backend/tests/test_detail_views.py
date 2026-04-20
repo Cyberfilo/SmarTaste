@@ -212,8 +212,8 @@ async def test_breakdown_returns_6_dimensions_plus_modifiers(
     assert 0.0 <= data["overall_score"] <= 1.0
 
     assert "dimensions" in data
-    # 6 weighted embedding dims + 6 modifiers (bonuses/penalties)
-    assert len(data["dimensions"]) == 12
+    # 6 weighted embedding dims + 7 modifiers (bonuses/penalties)
+    assert len(data["dimensions"]) == 13
 
     # Each dimension has required fields
     for dim in data["dimensions"]:
@@ -228,7 +228,7 @@ async def test_breakdown_returns_6_dimensions_plus_modifiers(
     weighted = {"clap", "mert", "effnet", "genre", "scalar", "artist"}
     modifiers = {
         "discovery_bonus", "cross_strategy_bonus", "calibration_boost",
-        "mood_boost", "diversity_penalty", "staleness",
+        "mood_boost", "diversity_penalty", "staleness", "recency_boost",
     }
     assert weighted.issubset(dim_names), f"Missing weighted dims: {weighted - dim_names}"
     assert modifiers.issubset(dim_names), f"Missing modifiers: {modifiers - dim_names}"

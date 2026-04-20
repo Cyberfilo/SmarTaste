@@ -7,6 +7,23 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.384 — 2026-04-20
+
+### Recommendation engine: multi-centroid profiling, contextual explanations, recency boost
+
+Six improvements to the scoring and recommendation pipeline:
+
+1. **Multi-centroid taste profiling** — k-means clustering (k=min(4, n/5)) on CLAP/MERT/EffNet embeddings captures diverse taste clusters instead of averaging everything into a single centroid. Scorer uses nearest-centroid similarity (max cosine across clusters).
+2. **Contextual explanations** — recommendations now say "Similar to X by Y" by finding the 2 nearest library tracks via CLAP cosine, replacing generic dimension-based descriptions.
+3. **Single-pass scoring** — loads embeddings for ALL candidates upfront instead of the previous 2-pass (metadata→narrow→audio) approach. Simpler and avoids discarding good candidates before embedding comparison.
+4. **Recency boost** — +0.02 for tracks released <30 days ago, +0.01 for <90 days. Surfaces fresh releases without dominating the score.
+5. **Feedback-adjusted centroids** — `build_taste_profile` accepts per-track weights (thumbs_up=2.0×, thumbs_down=0.2×) for centroid computation. Wiring ready for when feedback persistence is re-introduced.
+6. **User library CLAP loader** — new `_load_user_library_claps` method on `RecommendationService` joins `song_metadata_cache` with `audio_embeddings` to provide the nearest-track context for explanations.
+
+Multi-centroids are computed on fresh profile builds; cached snapshots gracefully fall back to single centroid (no migration needed yet).
+
+---
+
 ## V 6.383 — 2026-04-20
 
 ### Concurrent Deezer pre-resolution for global GPU backfill
