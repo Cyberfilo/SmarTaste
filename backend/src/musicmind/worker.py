@@ -2477,16 +2477,15 @@ async def _backfill_mood_tags_global(
         logger.debug("Mood backfill skipped: MUSICMIND_OPENAI_API_KEY unset")
         return 0
 
-    from musicmind.db.schema import (
-        audio_features_global,
-        global_song_cache,
-    )
+    from musicmind.db.schema import global_song_cache
     from musicmind.engine.mood_tagger import BATCH_SIZE, classify_batch
 
-    # Pick candidates: no mood_tags yet, have basic metadata + a preview
-    # was at least attempted. We don't require audio_features — the
-    # classifier handles missing scalars gracefully — but tracks with
-    # features get better-quality tags.
+    # Pick candidates: either never tagged OR tagged on V 6.388 (tags
+    # only, no scores — mood_scores is NULL). Re-classifying the V 6.388
+    # rows on the hybrid model gives them intensity scores and costs
+    # only one catalog pass. We don't require audio_features — the
+    # classifier handles missing scalars — but tracks with features
+    # get better-calibrated scores and sort first.
     async with engine.begin() as conn:
         rows = (await conn.execute(sa.text("""
             SELECT gsc.catalog_id, gsc.isrc, gsc.name, gsc.artist_name,
@@ -2494,12 +2493,18 @@ async def _backfill_mood_tags_global(
                    afg.tempo, afg.energy, afg.valence_proxy
             FROM global_song_cache gsc
             LEFT JOIN audio_features_global afg ON afg.isrc = gsc.isrc
-            WHERE (gsc.mood_tags IS NULL
-                   OR gsc.mood_tags::text = '[]'
-                   OR gsc.mood_tags::text = 'null')
+            WHERE (
+                    gsc.mood_tags IS NULL
+                    OR gsc.mood_tags::text = '[]'
+                    OR gsc.mood_tags::text = 'null'
+                    OR gsc.mood_scores IS NULL
+                  )
               AND gsc.name IS NOT NULL AND gsc.name != ''
               AND gsc.artist_name IS NOT NULL AND gsc.artist_name != ''
-            ORDER BY (afg.tempo IS NOT NULL) DESC, gsc.fetched_at DESC
+            ORDER BY
+              (gsc.mood_scores IS NULL AND gsc.mood_tags::text != '[]') ASC,
+              (afg.tempo IS NOT NULL) DESC,
+              gsc.fetched_at DESC
             LIMIT :lim
         """), {"lim": max_per_cycle})).fetchall()
 
@@ -2536,7 +2541,7 @@ async def _backfill_mood_tags_global(
     batches = [tracks[i:i + BATCH_SIZE] for i in range(0, len(tracks), BATCH_SIZE)]
     sem = asyncio.Semaphore(5)
 
-    async def _run_batch(batch: list[dict]) -> dict[str, list[str]]:
+    async def _run_batch(batch: list[dict]) -> dict[str, dict[str, object]]:
         async with sem:
             try:
                 return await classify_batch(batch, api_key=api_key)
@@ -2549,29 +2554,33 @@ async def _backfill_mood_tags_global(
         return_exceptions=True,
     )
 
-    all_tags: dict[str, list[str]] = {}
+    all_results: dict[str, dict[str, object]] = {}
     for r in batch_results:
         if isinstance(r, dict):
-            all_tags.update(r)
+            all_results.update(r)
 
-    if not all_tags:
+    if not all_results:
         return 0
 
-    # Single UPDATE per track — JSON column accepts list directly via sa.JSON.
+    # V 6.389 hybrid shape: {cid: {"tags": [...], "scores": {mood: score}}}.
+    # Writes BOTH columns so the scorer can prefer intensity-aware scores
+    # while the UI / backward-compat path uses the primary-first tag list.
     written = 0
     async with engine.begin() as conn:
-        for cid, tags in all_tags.items():
-            if not tags:
+        for cid, payload in all_results.items():
+            tags = payload.get("tags") or []
+            scores = payload.get("scores") or {}
+            if not tags and not scores:
                 continue
             await conn.execute(
                 global_song_cache.update()
                 .where(global_song_cache.c.catalog_id == cid)
-                .values(mood_tags=tags)
+                .values(mood_tags=tags, mood_scores=scores or None)
             )
             written += 1
 
     logger.info(
-        "Mood backfill: wrote mood_tags for %d/%d tracks",
+        "Mood backfill: wrote mood_tags+scores for %d/%d tracks",
         written, len(rows),
     )
     return written
