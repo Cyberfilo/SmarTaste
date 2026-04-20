@@ -7,6 +7,31 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.388 — 2026-04-20
+
+### Mood classifier + new `mood_match` scoring dimension (GPT-5.4)
+
+Closes the affect/valence gap: CLAP/MERT/EffNet capture timbre and production style well, but a reflective Italian rap track ("Estate in città" by Vale Pain) was being scored as a neighbor of a hype rap banger ("Shotta 2") because both share instrumentation, tempo, and vocal character. The scorer had no dedicated emotion signal with enough weight to separate them.
+
+**What shipped:**
+
+- **Fixed 12-mood taxonomy** in `engine/mood_tagger.py`:
+  `happy, sad, melancholic, reflective, chill, nostalgic, romantic, energetic, hype, anthemic, aggressive, dark`. Defined once in code; both the OpenAI system prompt AND the structured-output JSON schema enforce this as an enum.
+- **GPT-5.4 batch classifier** via structured outputs. `MUSICMIND_OPENAI_API_KEY` (internal, not BYOK). Batch size 30 tracks per call, 5 concurrent calls, strict JSON schema (`{results: [{catalog_id, moods: [tag,...]}]}`). Prompt is explicit about Italian rap: "distinguish hype (confident, flex, adrenaline) from reflective (introspective, narrative, low-valence) — do not default to hype just because it's a rap track." ~$1-2 to tag the full catalog.
+- **Migration 026**: adds `global_song_cache.mood_tags JSONB` and `taste_profile_snapshots.mood_distribution JSONB`.
+- **New worker phase** `_backfill_mood_tags_global`: drains untagged tracks with basic metadata, runs every cycle AND during the startup drain. Picks tracks with scalar features first so the classifier has tempo/energy/valence context.
+- **New scoring dimension** `mood_match` (weight 0.10): cosine similarity between the user's library-aggregated mood distribution and the candidate's mood tags, with positional weighting (primary 0.5, secondary 0.3, tertiary 0.2). CLAP drops 0.30→0.25, MERT 0.25→0.22, EffNet 0.15→0.13 to make room.
+- **Graceful degradation**: tracks without mood_tags don't penalize — `compute_context_weights` redistributes the 0.10 mood slot to genre+scalar.
+- **Explanations**: `mood_match` surfaces in the admin breakdown view alongside the other 6 weighted dims.
+
+Backfill order on next deploy:
+
+1. Startup drain includes the mood phase — any already-enriched tracks get classified immediately.
+2. Main loop keeps classifying as new tracks land in `global_song_cache`.
+3. V 6.387 auto-rebuild kicks in after the first batch: user's profile picks up `mood_distribution` on the next recommendations request.
+
+---
+
 ## V 6.387 — 2026-04-20
 
 ### Auto-rebuild taste profile when centroid inputs change

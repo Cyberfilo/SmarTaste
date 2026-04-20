@@ -508,6 +508,7 @@ def build_taste_profile(
     embedding_map: dict[str, list[float]] | None = None,
     clap_map: dict[str, list[float]] | None = None,
     mert_map: dict[str, list[float]] | None = None,
+    mood_tags_map: dict[str, list[str]] | None = None,
     feedback_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build a complete taste profile from cached data.
@@ -579,6 +580,15 @@ def build_taste_profile(
         if embedding_map else None
     )
 
+    # V 6.388: mood distribution aggregated from library's mood_tags.
+    mood_distribution: dict[str, float] = {}
+    if mood_tags_map:
+        from musicmind.engine.mood_tagger import aggregate_mood_distribution
+        tags_list = [
+            mood_tags_map.get(s.get("catalog_id", ""), []) for s in songs
+        ]
+        mood_distribution = aggregate_mood_distribution(tags_list)
+
     return {
         "genre_vector": genre_vector,
         "top_artists": top_artists,
@@ -594,4 +604,5 @@ def build_taste_profile(
         "clap_centroids": clap_centroids,
         "mert_centroids": mert_centroids,
         "effnet_centroids": effnet_centroids,
+        "mood_distribution": mood_distribution or None,
     }
