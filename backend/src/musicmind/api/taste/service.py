@@ -3,10 +3,18 @@
 Supports single-service profiles (spotify, apple_music) and unified profiles
 that merge data from both services with cross-service genre normalization
 and track deduplication.
+
+Auto-rebuild (V 6.387): after returning any cached snapshot, the service
+compares snapshot.computed_at against the max timestamp of centroid-
+affecting sources (audio_embeddings.analyzed_at, audio_features_cache,
+user_calibration). If any source is newer, a background rebuild is
+fired fire-and-forget — the user gets the cached snapshot immediately,
+and the next request sees the refreshed one.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -43,6 +51,26 @@ from musicmind.security.encryption import EncryptionService
 logger = logging.getLogger(__name__)
 
 STALENESS_HOURS = 24  # Per D-06
+
+# V 6.387 — auto-rebuild dedup. Module-level set tracks which
+# (user_id, service) pairs have an in-flight background rebuild so we don't
+# fan out duplicate work when multiple requests notice the same staleness.
+_IN_FLIGHT_REBUILDS: set[str] = set()
+_REBUILD_LOCK = asyncio.Lock()
+
+
+def _as_utc(dt: datetime | str | None) -> datetime | None:
+    """Normalize to tz-aware UTC datetime; return None on failure."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except (ValueError, TypeError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 
 class TasteService:
@@ -92,6 +120,15 @@ class TasteService:
                 engine, user_id=user_id, service_source=resolved_service
             )
             if snapshot is not None:
+                # Even if fresh, check if any centroid-affecting signal has
+                # changed since the snapshot was computed. If so, fire a
+                # background rebuild — user still gets the cached response.
+                await self._maybe_trigger_rebuild(
+                    engine, encryption, settings,
+                    user_id=user_id,
+                    service=resolved_service,
+                    snapshot_computed_at=snapshot.get("computed_at"),
+                )
                 return snapshot
 
             # Return ANY existing snapshot (even stale) — never block the user
@@ -102,6 +139,14 @@ class TasteService:
                 logger.info(
                     "Returning stale profile for user %s (will refresh in background)",
                     user_id,
+                )
+                # Stale by definition → always kick off a background refresh
+                await self._maybe_trigger_rebuild(
+                    engine, encryption, settings,
+                    user_id=user_id,
+                    service=resolved_service,
+                    snapshot_computed_at=stale.get("computed_at"),
+                    force=True,
                 )
                 return stale
 
@@ -225,6 +270,109 @@ class TasteService:
 
         profile["services_included"] = services_included
         return profile
+
+    @staticmethod
+    async def _profile_needs_rebuild(
+        engine,
+        *,
+        user_id: str,
+        snapshot_computed_at: datetime | str | None,
+    ) -> tuple[bool, str | None]:
+        """Return (needs_rebuild, reason) for auto-rebuild.
+
+        Compares `snapshot_computed_at` against the max timestamp of any
+        centroid-affecting source:
+        - `audio_embeddings.analyzed_at` — new CLAP/MERT/EffNet for this user
+        - `audio_features_cache.analyzed_at` — new scalar features
+        - `user_calibration.created_at` — onboarding calibration changes
+
+        All three are checked in a single query. Fast (<10ms). A ``None``
+        snapshot timestamp always triggers a rebuild.
+        """
+        snapshot_dt = _as_utc(snapshot_computed_at)
+        if snapshot_dt is None:
+            return True, "no snapshot timestamp"
+
+        async with engine.begin() as conn:
+            row = (await conn.execute(sa.text("""
+                SELECT
+                  (SELECT MAX(analyzed_at) FROM audio_embeddings
+                    WHERE user_id = :uid) AS emb_ts,
+                  (SELECT MAX(analyzed_at) FROM audio_features_cache
+                    WHERE user_id = :uid) AS feat_ts,
+                  (SELECT MAX(created_at) FROM user_calibration
+                    WHERE user_id = :uid) AS cal_ts
+            """), {"uid": user_id})).first()
+
+        if row is None:
+            return False, None
+
+        sources = [
+            ("embeddings", row.emb_ts),
+            ("features", row.feat_ts),
+            ("calibration", row.cal_ts),
+        ]
+        for label, ts in sources:
+            ts_utc = _as_utc(ts)
+            if ts_utc is not None and ts_utc > snapshot_dt:
+                return True, f"{label} changed at {ts_utc.isoformat()}"
+
+        return False, None
+
+    async def _maybe_trigger_rebuild(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+        snapshot_computed_at: datetime | str | None,
+        force: bool = False,
+    ) -> None:
+        """Fire background rebuild if sources changed (or always when force=True).
+
+        Idempotent: if a rebuild is already in flight for the same
+        (user_id, service) pair, this is a no-op. Never blocks the caller.
+        """
+        if not force:
+            needs_rebuild, reason = await self._profile_needs_rebuild(
+                engine, user_id=user_id,
+                snapshot_computed_at=snapshot_computed_at,
+            )
+            if not needs_rebuild:
+                return
+            logger.info(
+                "Auto-rebuild for user %s (%s): %s",
+                user_id[:8], service, reason,
+            )
+
+        key = f"{user_id}:{service}"
+        async with _REBUILD_LOCK:
+            if key in _IN_FLIGHT_REBUILDS:
+                return
+            _IN_FLIGHT_REBUILDS.add(key)
+
+        async def _do_rebuild() -> None:
+            try:
+                await self.get_profile(
+                    engine, encryption, settings,
+                    user_id=user_id, service=service, force_refresh=True,
+                )
+                logger.info(
+                    "Auto-rebuild complete for user %s (%s)",
+                    user_id[:8], service,
+                )
+            except Exception:
+                logger.exception(
+                    "Auto-rebuild failed for user %s (%s)",
+                    user_id[:8], service,
+                )
+            finally:
+                async with _REBUILD_LOCK:
+                    _IN_FLIGHT_REBUILDS.discard(key)
+
+        asyncio.create_task(_do_rebuild())
 
     async def _get_any_snapshot(
         self, engine, *, user_id: str, service_source: str

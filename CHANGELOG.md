@@ -7,6 +7,24 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.387 — 2026-04-20
+
+### Auto-rebuild taste profile when centroid inputs change
+
+Previously, `taste_profile_snapshots` had a 24h staleness window and only rebuilt on that timer (or on explicit `force_refresh`). If the worker enriched a library song with CLAP/MERT/EffNet mid-window, the centroids would NOT reflect the new embeddings until 24h passed. The existing stale-return path even logged "will refresh in background" without actually firing a background refresh — a latent bug.
+
+Now `TasteService.get_profile` compares the snapshot's `computed_at` against the max timestamp of every centroid-affecting signal:
+
+- `audio_embeddings.analyzed_at` — new CLAP / MERT / EffNet for the user's library
+- `audio_features_cache.analyzed_at` — new scalar features (tempo, energy, etc.)
+- `user_calibration.created_at` — onboarding calibration updates
+
+If any source is newer than the snapshot, a background rebuild is fired fire-and-forget; the user still gets the cached snapshot immediately. A module-level `_IN_FLIGHT_REBUILDS` set with an `asyncio.Lock` dedups concurrent triggers so two simultaneous requests don't double-build. The stale-return path now always fires a rebuild (closing the latent bug).
+
+Single cheap query checks all three sources; typical latency is sub-10ms. No DB schema change — reuses existing `analyzed_at` / `created_at` columns.
+
+---
+
 ## V 6.386 — 2026-04-20
 
 ### Re-ranker: DPP-style CLAP diversity + Steck genre calibration
