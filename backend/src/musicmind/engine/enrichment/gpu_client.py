@@ -112,6 +112,7 @@ async def enrich_batch_bytes_via_gpu(
     modal_endpoint_url: str,
     *,
     models: list[str] | None = None,
+    timeout: float = 600.0,
 ) -> list[dict[str, Any]]:
     """Batch GPU enrichment from base64-encoded audio bytes.
 
@@ -130,7 +131,7 @@ async def enrich_batch_bytes_via_gpu(
     if models:
         payload["models"] = list(models)
     try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -150,6 +151,7 @@ async def enrich_bytes_concurrent(
     batch_size: int = GPU_BATCH_SIZE,
     max_concurrent: int = GPU_MAX_CONCURRENT,
     models: list[str] | None = None,
+    timeout_per_item: float = 8.0,
 ) -> list[dict[str, Any]]:
     """Split base64 items into chunks and dispatch concurrently.
 
@@ -172,11 +174,12 @@ async def enrich_bytes_concurrent(
 
     async def _send(chunk: list[str]) -> list[dict[str, Any]]:
         async with semaphore:
+            chunk_timeout = max(120.0, len(chunk) * timeout_per_item)
             results = await enrich_batch_bytes_via_gpu(
-                chunk, modal_endpoint_url, models=models,
+                chunk, modal_endpoint_url,
+                models=models, timeout=chunk_timeout,
             )
             if not results:
-                # Pad with empty dicts so caller can still zip by position
                 return [{} for _ in chunk]
             return results
 

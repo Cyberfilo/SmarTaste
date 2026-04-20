@@ -7,6 +7,16 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.383 — 2026-04-20
+
+### Concurrent Deezer pre-resolution for global GPU backfill
+
+Global GPU backfill was stuck: out of ~1,425 rows needing CLAP/MERT, only 6 had cached audio and 82 had expired Deezer URLs. The sequential per-row resolution resolved ~10/cycle via iTunes, falling under `GPU_MIN_BATCH=15` and deferring every cycle (zero progress for hours).
+
+Rewrote the pipeline as two phases: (1) concurrent pre-resolution of ALL pending tracks — cached audio → stored URL download → fresh Deezer URL via ISRC endpoint (`/track/isrc:{ISRC}`) → iTunes last resort — resolves ~1,500 tracks in minutes instead of hours; (2) dispatch the full queue to GPU with timeout scaled per item (`8s × batch_size`). Removed the `LIMIT 300` row cap so the entire backlog drains in one cycle.
+
+---
+
 ## V 6.382 — 2026-04-17
 
 ### Fix MERT float16/float32 mismatch on MPS local GPU

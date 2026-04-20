@@ -2362,8 +2362,6 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
                 )
             continue
 
-        # Defer very small queues — next worker cycle will batch them
-        # with more tracks. Prevents 1-item GPU round-trips.
         if len(bytes_batch) < GPU_MIN_BATCH:
             logger.info(
                 "GPU backfill: only %d tracks for user %s, deferring to "
@@ -2442,9 +2440,13 @@ async def _backfill_gpu_embeddings(engine, settings) -> int:
 async def _backfill_gpu_embeddings_global(engine, settings) -> int:
     """GPU backfill for global songs (audio_embeddings_global).
 
-    Same as _backfill_gpu_embeddings but targets the shared ISRC-keyed
-    table. Cobweb + discovery tracks live here; they need CLAP/MERT for
-    scoring. Runs at startup as the first enrichment priority.
+    Phase 1 — Pre-resolve: fetch fresh Deezer preview URLs for all
+    tracks missing cached audio (concurrent, ~10 req/s). iTunes is
+    used only when Deezer has no result for an ISRC.
+
+    Phase 2 — GPU dispatch: send the full resolved queue to the GPU
+    in one shot (chunked internally by enrich_bytes_concurrent).
+    Timeout scales with batch size.
     """
     import base64
 
@@ -2453,6 +2455,7 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         GPU_MIN_BATCH,
         enrich_bytes_concurrent,
     )
+    from musicmind.engine.enrichment.isrc_lookup import deezer_preview_by_isrc
     from musicmind.engine.enrichment.orchestrator import (
         _cache_preview_audio,
         _download_preview,
@@ -2464,9 +2467,6 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         logger.debug("Global GPU backfill skipped: no modal_endpoint_url")
         return 0
 
-    # Two separate queries so the GPU call can skip CLAP inference for
-    # the MERT-only group — saves one forward pass per track in the
-    # 350-row backlog (per V 6.374 diagnostic).
     async with engine.begin() as conn:
         rows_both = (await conn.execute(
             sa.select(audio_embeddings_global.c.isrc).where(
@@ -2474,7 +2474,7 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                     audio_embeddings_global.c.clap_embedding.is_(None),
                     audio_embeddings_global.c.embedding.isnot(None),
                 )
-            ).limit(300)
+            )
         )).fetchall()
         rows_mert_only = (await conn.execute(
             sa.select(audio_embeddings_global.c.isrc).where(
@@ -2483,7 +2483,7 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                     audio_embeddings_global.c.mert_embedding.is_(None),
                     audio_embeddings_global.c.embedding.isnot(None),
                 )
-            ).limit(300)
+            )
         )).fetchall()
 
     if not rows_both and not rows_mert_only:
@@ -2494,13 +2494,10 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         len(rows_both), len(rows_mert_only),
     )
 
-    # Map ALL relevant ISRCs → (catalog_id, preview_url, name, artist) in one
-    # query. name + artist_name are needed for iTunes re-resolution when the
-    # stored preview_url is missing or expired.
     all_isrcs = [r.isrc for r in (rows_both + rows_mert_only) if r.isrc]
     isrc_to_cid: dict[str, str] = {}
     isrc_to_url: dict[str, str] = {}
-    isrc_to_meta: dict[str, tuple[str, str]] = {}  # isrc → (name, artist)
+    isrc_to_meta: dict[str, tuple[str, str]] = {}
     if all_isrcs:
         async with engine.begin() as conn:
             gsc = await conn.execute(
@@ -2520,117 +2517,110 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
                     if r.name and r.artist_name:
                         isrc_to_meta[r.isrc] = (r.name, r.artist_name)
 
+    # ── Phase 1: mass-resolve audio (cache → download → Deezer → iTunes) ──
+    resolve_sem = asyncio.Semaphore(10)
+    deezer_resolved = 0
     itunes_resolved = 0
-    itunes_attempts = 0
-    max_itunes_per_cycle = 50
+    cached_hits = 0
+    url_downloaded = 0
+    resolved_audio: dict[str, bytes] = {}
 
-    async def _itunes_resolve(isrc: str) -> bytes | None:
-        """Re-resolve preview URL via iTunes Search, download, and cache.
-
-        Capped at max_itunes_per_cycle attempts per worker cycle so the
-        main loop isn't blocked for 20+ minutes. Remaining rows get
-        picked up next cycle (URLs persist once resolved).
-        """
-        nonlocal itunes_resolved, itunes_attempts
-        if itunes_attempts >= max_itunes_per_cycle:
-            return None
-        from musicmind.engine.enrichment.itunes import (
-            search_preview_url as itunes_search_preview_url,
-        )
-        meta = isrc_to_meta.get(isrc)
-        if not meta:
-            return None
-        name, artist = meta
-        itunes_attempts += 1
-        # iTunes rate limit is ~20 req/min; space calls ~3.5s apart
-        await asyncio.sleep(3.5)
-        try:
-            url = await itunes_search_preview_url(name=name, artist_name=artist)
-        except Exception:
-            return None
-        if not url:
-            return None
-        audio = await _download_preview(url)
-        if not audio:
-            return None
-        cid = isrc_to_cid.get(isrc, "")
-        if cid:
-            await _cache_preview_audio(engine, cid, audio, url)
-            async with engine.begin() as conn:
-                await conn.execute(
-                    sa.update(global_song_cache)
-                    .where(global_song_cache.c.catalog_id == cid)
-                    .values(preview_url=url)
-                )
-        isrc_to_url[isrc] = url
-        itunes_resolved += 1
-        return audio
-
-    async def _resolve_bytes(isrc: str) -> bytes | None:
-        """Return audio bytes: cached → existing URL → iTunes re-resolve.
-
-        When the stored preview_url is missing or expired (Deezer 403),
-        falls back to iTunes Search API using track name + artist. Saves
-        the fresh URL to global_song_cache so subsequent cycles skip this.
-        """
+    async def _resolve_one(isrc: str) -> None:
+        nonlocal deezer_resolved, itunes_resolved, cached_hits, url_downloaded
         cid = isrc_to_cid.get(isrc, "")
         if not cid:
-            return None
+            return
+
+        # 1. Already cached
         cached = await _get_cached_audio(engine, cid)
         if cached:
-            return cached
+            resolved_audio[isrc] = cached
+            cached_hits += 1
+            return
+
+        # 2. Try stored URL (may be stale Deezer CDN)
         url = isrc_to_url.get(isrc, "")
         if url:
             audio = await _download_preview(url)
             if audio:
                 await _cache_preview_audio(engine, cid, audio, url)
-                return audio
-        # Stored URL missing or dead — try iTunes re-resolution
-        return await _itunes_resolve(isrc)
+                resolved_audio[isrc] = audio
+                url_downloaded += 1
+                return
 
-    async def _build_queue(rows) -> list[tuple[str, bytes]]:
-        q: list[tuple[str, bytes]] = []
-        for r in rows:
-            audio = await _resolve_bytes(r.isrc)
+        # 3. Fresh Deezer URL via ISRC (primary fallback)
+        async with resolve_sem:
+            fresh_url = await deezer_preview_by_isrc(isrc)
+        if fresh_url:
+            audio = await _download_preview(fresh_url)
             if audio:
-                q.append((r.isrc, audio))
-        return q
+                await _cache_preview_audio(engine, cid, audio, fresh_url)
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        sa.update(global_song_cache)
+                        .where(global_song_cache.c.catalog_id == cid)
+                        .values(preview_url=fresh_url)
+                    )
+                resolved_audio[isrc] = audio
+                deezer_resolved += 1
+                return
 
-    both_queue = await _build_queue(rows_both)
-    mert_queue = await _build_queue(rows_mert_only)
+        # 4. iTunes (last resort, only when Deezer has nothing)
+        meta = isrc_to_meta.get(isrc)
+        if not meta:
+            return
+        from musicmind.engine.enrichment.itunes import (
+            search_preview_url as itunes_search,
+        )
+        try:
+            itunes_url = await itunes_search(
+                name=meta[0], artist_name=meta[1],
+            )
+        except Exception:
+            return
+        if not itunes_url:
+            return
+        audio = await _download_preview(itunes_url)
+        if not audio:
+            return
+        await _cache_preview_audio(engine, cid, audio, itunes_url)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(global_song_cache)
+                .where(global_song_cache.c.catalog_id == cid)
+                .values(preview_url=itunes_url)
+            )
+        resolved_audio[isrc] = audio
+        itunes_resolved += 1
+
+    await asyncio.gather(*[_resolve_one(isrc) for isrc in all_isrcs])
 
     logger.info(
-        "Global GPU backfill queues: %d both (from %d rows), "
-        "%d mert-only (from %d rows) — %d URLs re-resolved via iTunes",
-        len(both_queue), len(rows_both),
-        len(mert_queue), len(rows_mert_only),
-        itunes_resolved,
+        "Global GPU pre-resolve: %d/%d resolved "
+        "(%d cached, %d url-ok, %d deezer, %d itunes)",
+        len(resolved_audio), len(all_isrcs),
+        cached_hits, url_downloaded, deezer_resolved, itunes_resolved,
     )
 
+    # ── Phase 2: build queues and dispatch to GPU ────────────────────────
+    both_set = {r.isrc for r in rows_both}
+    both_queue = [
+        (isrc, resolved_audio[isrc])
+        for isrc in all_isrcs if isrc in both_set and isrc in resolved_audio
+    ]
+    mert_queue = [
+        (isrc, resolved_audio[isrc])
+        for isrc in all_isrcs if isrc not in both_set and isrc in resolved_audio
+    ]
+
     async def _apply_results(queue_items, gpu_results) -> int:
-        """Write GPU results back. Rows were filtered for NULL columns in
-        the queue query, so direct assignment is safe — no COALESCE needed.
-        (COALESCE(json_col, varchar_literal) causes a type mismatch on
-        asyncpg; passing Python lists lets SQLAlchemy's JSON column handle
-        serialization correctly.)
-        """
         stored = 0
         clap_count = 0
         mert_count = 0
-        sample_logged = False
         async with engine.begin() as conn:
             for (isrc, _), res in zip(queue_items, gpu_results):
                 if not res:
                     continue
-                if not sample_logged:
-                    logger.info(
-                        "GPU result sample keys=%s, mert_768 type=%s, "
-                        "error=%s",
-                        list(res.keys()),
-                        type(res.get("mert_768")).__name__,
-                        res.get("error"),
-                    )
-                    sample_logged = True
                 clap = res.get("clap_512")
                 mert = res.get("mert_768")
                 if not (clap or mert):
@@ -2668,6 +2658,10 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
             )
             return
         b64_items = [base64.b64encode(a).decode("ascii") for _, a in queue]
+        logger.info(
+            "Global GPU dispatching %d items for %s",
+            len(b64_items), "/".join(models_wanted),
+        )
         try:
             results = await enrich_bytes_concurrent(
                 b64_items, modal_url, models=models_wanted,
