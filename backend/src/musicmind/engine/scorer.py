@@ -102,6 +102,17 @@ def _compute_staleness(
     return 0.0
 
 
+def _best_centroid_similarity(
+    candidate_emb: list[float] | None,
+    centroids: list[list[float]] | None,
+    sim_fn,
+) -> float:
+    """Return the highest cosine similarity across multiple taste centroids."""
+    if not candidate_emb or not centroids:
+        return 0.0
+    return max(sim_fn(c, candidate_emb) for c in centroids)
+
+
 def score_candidate(
     candidate: dict[str, Any],
     profile: dict[str, Any],
@@ -119,6 +130,7 @@ def score_candidate(
     recent_recommendations: list[dict[str, Any]] | None = None,
     staleness_index: dict[str, dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
+    nearest_tracks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Score a single candidate song against a taste profile.
 
@@ -130,7 +142,9 @@ def score_candidate(
     - Scalar audio (0.10) — normalized euclidean on tempo/energy/danceability
     - Artist affinity (0.05) — library presence + calibration
 
-    Missing dimensions redistribute weight proportionally to available ones.
+    Multi-centroid: when the profile contains clap_centroids / mert_centroids /
+    effnet_centroids (lists of cluster centroids), similarity is computed
+    against the *nearest* cluster. Falls back to the single centroid.
 
     Returns the candidate dict augmented with:
     - _score: overall score (0-1)
@@ -148,30 +162,48 @@ def score_candidate(
     genre_vector = profile.get("genre_vector", {})
     top_artists = profile.get("top_artists", [])
 
-    # ── 1. Embedding similarities (primary signals) ───────
+    # ── 1. Embedding similarities (multi-centroid aware) ──────
+    clap_centroids = profile.get("clap_centroids")
+    mert_centroids = profile.get("mert_centroids")
+    effnet_centroids = profile.get("effnet_centroids")
+
     clap_score = 0.0
-    has_clap = (
-        candidate_clap is not None
-        and user_clap_centroid is not None
+    has_clap = candidate_clap is not None and (
+        user_clap_centroid is not None or clap_centroids
     )
     if has_clap:
-        clap_score = clap_similarity(user_clap_centroid, candidate_clap)
+        if clap_centroids:
+            clap_score = _best_centroid_similarity(
+                candidate_clap, clap_centroids, clap_similarity,
+            )
+        else:
+            clap_score = clap_similarity(user_clap_centroid, candidate_clap)
 
     mert_score = 0.0
-    has_mert = (
-        candidate_mert is not None
-        and user_mert_centroid is not None
+    has_mert = candidate_mert is not None and (
+        user_mert_centroid is not None or mert_centroids
     )
     if has_mert:
-        mert_score = mert_similarity(user_mert_centroid, candidate_mert)
+        if mert_centroids:
+            mert_score = _best_centroid_similarity(
+                candidate_mert, mert_centroids, mert_similarity,
+            )
+        else:
+            mert_score = mert_similarity(user_mert_centroid, candidate_mert)
 
     effnet_score = 0.0
-    has_effnet = (
-        candidate_embedding is not None
-        and user_embedding_centroid is not None
+    has_effnet = candidate_embedding is not None and (
+        user_embedding_centroid is not None or effnet_centroids
     )
     if has_effnet:
-        effnet_score = effnet_similarity(user_embedding_centroid, candidate_embedding)
+        if effnet_centroids:
+            effnet_score = _best_centroid_similarity(
+                candidate_embedding, effnet_centroids, effnet_similarity,
+            )
+        else:
+            effnet_score = effnet_similarity(
+                user_embedding_centroid, candidate_embedding,
+            )
 
     # ── 2. Genre match (cosine similarity) ────────────────
     genre_score = _genre_cosine(
@@ -266,8 +298,22 @@ def score_candidate(
             if genre_score < 0.15:
                 cal_boost = 0.0
 
+    # ── 10. Recency boost ──────────────────────────────────
+    recency_boost = 0.0
+    release_date = candidate.get("release_date", "")
+    if release_date and len(release_date) >= 10:
+        try:
+            from datetime import UTC, datetime
+            rd = datetime.fromisoformat(release_date).replace(tzinfo=UTC)
+            age_days = (datetime.now(tz=UTC) - rd).days
+            if age_days < 30:
+                recency_boost = 0.02
+            elif age_days < 90:
+                recency_boost = 0.01
+        except (ValueError, TypeError):
+            pass
+
     # ── Weighted combination with graceful degradation ────
-    # Collect available dimensions and their weights
     dim_scores: dict[str, float] = {}
     dim_weights: dict[str, float] = {}
 
@@ -281,7 +327,6 @@ def score_candidate(
         dim_scores["effnet"] = effnet_score
         dim_weights["effnet"] = w.get("effnet", 0.15)
 
-    # Genre and artist are always available
     dim_scores["genre"] = genre_score
     dim_weights["genre"] = w.get("genre", 0.15)
     dim_scores["artist"] = artist_match
@@ -291,7 +336,6 @@ def score_candidate(
         dim_scores["scalar"] = scalar_score
         dim_weights["scalar"] = w.get("scalar", 0.10)
 
-    # Normalize weights to sum to 1.0 (redistributes missing dimensions)
     w_total = sum(dim_weights.values())
     if w_total > 0:
         dim_weights = {k: v / w_total for k, v in dim_weights.items()}
@@ -300,18 +344,24 @@ def score_candidate(
         dim_weights[k] * dim_scores[k] for k in dim_scores
     )
 
-    # Additive bonuses and penalties
     overall += cross_bonus
     overall += discovery_bonus
     overall += mood_boost * 0.1
     overall += cal_boost
+    overall += recency_boost
     overall -= 0.05 * diversity_penalty
     overall -= 0.03 * staleness
 
     overall = max(0.0, min(1.0, overall))
 
-    # ── Build explanation ─────────────────────────────────
+    # ── Build contextual explanation ─────────────────────
     parts = []
+    if nearest_tracks:
+        nt = nearest_tracks[0]
+        parts.append(
+            f"Similar to {nt.get('name', '?')} by "
+            f"{nt.get('artist_name', '?')}"
+        )
     if has_clap and clap_score > 0.7:
         parts.append("sounds like your taste")
     if has_mert and mert_score > 0.7:
@@ -324,16 +374,18 @@ def score_candidate(
     if artist_match > 0.5:
         if matched_as == "feat":
             parts.append(
-                f"features an artist you like ({candidate.get('artist_name', '')})"
+                f"features {candidate.get('artist_name', '')}"
             )
         else:
-            parts.append(f"you like {candidate.get('artist_name', 'this artist')}")
+            parts.append(
+                f"you like {candidate.get('artist_name', 'this artist')}"
+            )
     if cal_boost > 0.1:
         parts.append("top calibrated artist")
+    if recency_boost > 0:
+        parts.append("new release")
     if cross_bonus > 0:
         parts.append(f"found by {strategy_count} strategies")
-    if mood_boost > 0.2:
-        parts.append("strong mood match")
 
     return {
         **candidate,
@@ -346,6 +398,7 @@ def score_candidate(
             "scalar_similarity": round(scalar_score, 3),
             "artist_match": round(artist_match, 3),
             "calibration_boost": round(cal_boost, 3),
+            "recency_boost": round(recency_boost, 3),
             "diversity_penalty": round(diversity_penalty, 3),
             "staleness": round(staleness, 3),
             "cross_strategy_bonus": round(cross_bonus, 3),
@@ -354,6 +407,37 @@ def score_candidate(
         },
         "_explanation": "; ".join(parts) if parts else "moderate match",
     }
+
+
+def _find_nearest_tracks(
+    candidate_clap: list[float] | None,
+    user_library_claps: dict[str, dict[str, Any]] | None,
+    top_n: int = 2,
+) -> list[dict[str, Any]]:
+    """Find the user's library tracks most similar to the candidate."""
+    if not candidate_clap or not user_library_claps:
+        return []
+    import numpy as np
+    c_arr = np.array(candidate_clap)
+    c_norm = np.linalg.norm(c_arr)
+    if c_norm == 0:
+        return []
+    c_arr = c_arr / c_norm
+
+    scored = []
+    for cid, info in user_library_claps.items():
+        emb = info.get("clap")
+        if not emb:
+            continue
+        e_arr = np.array(emb)
+        e_norm = np.linalg.norm(e_arr)
+        if e_norm == 0:
+            continue
+        sim = float(np.dot(c_arr, e_arr / e_norm))
+        scored.append((sim, info))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s[1] for s in scored[:top_n]]
 
 
 def rank_candidates(
@@ -372,6 +456,7 @@ def rank_candidates(
     user_mert_centroid: list[float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
+    user_library_claps: dict[str, dict[str, Any]] | None = None,
     # Legacy params — accepted but ignored for backward compat
     user_tag_profile: dict[str, float] | None = None,
     collaborative_matches: set[str] | None = None,
@@ -388,10 +473,14 @@ def rank_candidates(
     emb_map = embedding_map or {}
     staleness_idx = _build_staleness_index(recent_recommendations or [])
 
-    # Step 1: Precompute base scores for all candidates (no diversity penalty)
     base_scored: list[dict[str, Any]] = []
     for c in candidates:
         cid = c.get("catalog_id", "")
+        c_clap = (clap_map or {}).get(cid)
+
+        nearest = _find_nearest_tracks(
+            c_clap, user_library_claps,
+        ) if user_library_claps else None
 
         scored = score_candidate(
             c, profile, already_selected=None,
@@ -400,12 +489,13 @@ def rank_candidates(
             user_audio_centroid=user_audio_centroid,
             candidate_embedding=emb_map.get(cid),
             user_embedding_centroid=user_embedding_centroid,
-            candidate_clap=(clap_map or {}).get(cid),
+            candidate_clap=c_clap,
             user_clap_centroid=user_clap_centroid,
             candidate_mert=(mert_map or {}).get(cid),
             user_mert_centroid=user_mert_centroid,
             staleness_index=staleness_idx,
             calibration_artists=calibration_artists,
+            nearest_tracks=nearest,
         )
         base_scored.append(scored)
 
