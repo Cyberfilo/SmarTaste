@@ -7,6 +7,34 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.386 — 2026-04-20
+
+### Re-ranker: DPP-style CLAP diversity + Steck genre calibration
+
+Two post-hoc re-ranking upgrades grounded in the 2024–2026 music-recs literature (see Wilhelm et al. 2018 on YouTube's DPP, Steck 2018 on Calibrated Recommendations). Both reuse existing enrichment outputs — no new signals required.
+
+**1. DPP-style quality-weighted diversity.** Replaces the raw-cosine MMR diversity penalty with a gaussian kernel on CLAP cosine distance, weighted by the quality scores of both candidate and already-selected tracks:
+
+```
+penalty = q_cand · q_sel · exp(−(1 − cos_sim)² / (2σ²))
+```
+
+With σ=0.5, near-duplicate pairs (cos≈0.9) produce a strong penalty (≈0.98×q_cand·q_sel), while moderately-similar pairs (cos≈0.5) penalize much more mildly (≈0.61×). Quality weighting prevents low-scoring candidates from "buying" diversity credit by being audio-weird. Falls back to the existing metadata-based `song_similarity` when CLAP isn't available.
+
+**2. Steck-style genre-distribution calibration.** New post-hoc penalty on the greedy re-rank: KL divergence between the running list's genre distribution and the user's target distribution (their `genre_vector`). Expanded-genre weighting matches the per-track scorer (1.0 for originals, 0.3 for parents) so the two signals are consistent. Smoothing prevents KL blowup on sparse distributions.
+
+```
+adjusted = base_score
+         − 0.10 · diversity_penalty (DPP or MMR fallback)
+         − 0.08 · KL(running∪cand ‖ target)
+```
+
+Adds a `calibration_kl` key to the score breakdown. Preserves the monotonically-decreasing score invariant and the <500ms/500-candidate performance budget.
+
+The research's top-priority changes (iALS collaborative retrieval, skip-signal rewards, contextual bandits) are deferred — they require user-behavior signals we don't yet persist, or a scale SmarTaste doesn't reach. The DPP + calibration layer is the highest-leverage improvement we can ship today using only the CLAP/genre data that already lives in the enrichment pipeline.
+
+---
+
 ## V 6.385 — 2026-04-20
 
 ### Fix 502 on /api/recommendations — stop running Essentia at request time

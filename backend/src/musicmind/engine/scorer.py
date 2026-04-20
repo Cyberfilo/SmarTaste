@@ -4,10 +4,17 @@ Uses 6 weighted dimensions: CLAP embedding cosine, MERT embedding cosine,
 EffNet embedding cosine, genre cosine, scalar audio similarity, and artist
 affinity. Plus additive bonuses (calibration, cross-strategy, mood) and
 penalties (diversity, staleness).
+
+Re-ranker (V 6.386): the greedy selection uses a DPP-inspired
+quality-weighted gaussian diversity kernel on CLAP embeddings plus a
+Steck-style genre-distribution calibration penalty. Both are post-hoc
+and degrade to legacy metadata MMR when embeddings are unavailable.
 """
 
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,6 +22,19 @@ import numpy as np
 
 from musicmind.engine.profile import expand_genres
 from musicmind.engine.weights import DEFAULT_WEIGHTS
+
+# ── Re-ranker constants (V 6.386) ────────────────────────────────────────────
+# DPP gaussian kernel bandwidth on CLAP cosine distance. σ=0.5 gives a sharp
+# penalty for near-duplicates (cos≈0.9 → ~0.98) while fading quickly for
+# moderately-similar pairs (cos≈0.5 → ~0.61).
+_DPP_SIGMA = 0.5
+# How strongly to pull list composition toward the user's genre distribution.
+# Applied as a subtractive penalty on the adjusted score during greedy
+# selection. 0.08 tuned to be noticeable without dominating quality signal.
+_CALIBRATION_WEIGHT = 0.08
+# Smoothing added to both distributions in KL(P||Q) so zero-probability
+# genres don't blow up. Small enough to preserve relative differences.
+_KL_SMOOTHING = 0.01
 
 
 def _genre_cosine(
@@ -100,6 +120,136 @@ def _compute_staleness(
     elif age_days < 30:
         return 0.4
     return 0.0
+
+
+def _build_user_genre_distribution(
+    genre_vector: dict[str, float] | None,
+) -> dict[str, float]:
+    """Normalize the user's genre_vector into a probability distribution.
+
+    The profile's genre_vector already carries relative weights; this just
+    L1-normalizes them so sum == 1.0. Empty input → empty dict (calibration
+    will noop).
+    """
+    if not genre_vector:
+        return {}
+    total = sum(float(v) for v in genre_vector.values() if v > 0)
+    if total <= 0:
+        return {}
+    return {g: float(v) / total for g, v in genre_vector.items() if v > 0}
+
+
+def _genres_with_parents(genre_names: list[str]) -> dict[str, float]:
+    """Return weighted genre counts: 1.0 for originals, 0.3 for expanded parents.
+
+    Mirrors the weighting used in `_genre_cosine` so calibration tracks the
+    same signal the per-track scorer uses.
+    """
+    if not genre_names:
+        return {}
+    originals = set(genre_names)
+    out: dict[str, float] = {}
+    for g in expand_genres(genre_names):
+        out[g] = out.get(g, 0.0) + (1.0 if g in originals else 0.3)
+    return out
+
+
+def _kl_divergence(
+    p: dict[str, float],
+    q: dict[str, float],
+    smoothing: float = _KL_SMOOTHING,
+) -> float:
+    """KL(P || Q) with additive smoothing on both distributions.
+
+    Used by the Steck-style calibration re-ranker. Low values = P aligned
+    with Q. Smoothing prevents ∞ from zero-probability genres; it also
+    makes the metric less twitchy on small lists.
+    """
+    if not p or not q:
+        return 0.0
+    keys = set(p.keys()) | set(q.keys())
+    kl = 0.0
+    for k in keys:
+        pk = p.get(k, 0.0) + smoothing
+        qk = q.get(k, 0.0) + smoothing
+        if pk > 0 and qk > 0:
+            kl += pk * math.log(pk / qk)
+    return max(0.0, kl)
+
+
+def _calibration_penalty(
+    candidate_genres: list[str],
+    running_genre_counts: dict[str, float],
+    target_dist: dict[str, float],
+) -> float:
+    """Return KL divergence of the list-including-candidate vs user target.
+
+    Smaller = better. Caller subtracts `weight × this` from the adjusted
+    score. `running_genre_counts` is a running sum (weighted by parent-of
+    expansion rules) across the already-selected tracks; this function
+    virtually adds the candidate without mutating it.
+    """
+    if not target_dist:
+        return 0.0
+    cand = _genres_with_parents(candidate_genres)
+    if not cand and not running_genre_counts:
+        return 0.0
+    merged = defaultdict(float, running_genre_counts)
+    for g, w in cand.items():
+        merged[g] += w
+    total = sum(merged.values())
+    if total <= 0:
+        return 0.0
+    running_dist = {g: w / total for g, w in merged.items()}
+    return _kl_divergence(running_dist, target_dist)
+
+
+def _dpp_diversity_penalty(
+    candidate_clap: list[float] | None,
+    candidate_score: float,
+    selected: list[dict[str, Any]],
+    clap_map: dict[str, list[float]] | None,
+    *,
+    sigma: float = _DPP_SIGMA,
+) -> float | None:
+    """Quality-weighted gaussian diversity kernel on CLAP embeddings.
+
+    Returns the max penalty across already-selected tracks, or None when
+    the candidate lacks CLAP (caller should fall back to metadata MMR).
+
+    Kernel: `q_cand × q_sel × exp(−(1−cos_sim)² / (2·σ²))`
+      - high-similarity pairs produce strong penalty (kernel ≈ 1)
+      - quality weighting ensures low-quality candidates can't "buy"
+        diversity credit by being far from everyone
+    """
+    if not candidate_clap or not selected or not clap_map:
+        return None
+    cand_vec = np.asarray(candidate_clap, dtype=np.float32)
+    cand_norm = float(np.linalg.norm(cand_vec))
+    if cand_norm == 0:
+        return None
+
+    max_penalty = 0.0
+    any_clap = False
+    for s in selected:
+        s_clap = clap_map.get(s.get("catalog_id", ""))
+        if not s_clap:
+            continue
+        any_clap = True
+        s_vec = np.asarray(s_clap, dtype=np.float32)
+        s_norm = float(np.linalg.norm(s_vec))
+        if s_norm == 0:
+            continue
+        sim = float(np.dot(cand_vec, s_vec) / (cand_norm * s_norm))
+        sim = max(-1.0, min(1.0, sim))
+        dist = 1.0 - sim
+        kernel = math.exp(-(dist * dist) / (2.0 * sigma * sigma))
+        q_sel = float(s.get("_score", 0.5))
+        penalty = candidate_score * q_sel * kernel
+        if penalty > max_penalty:
+            max_penalty = penalty
+
+    return max_penalty if any_clap else None
 
 
 def _best_centroid_similarity(
@@ -499,45 +649,76 @@ def rank_candidates(
         )
         base_scored.append(scored)
 
-    # Step 2: Greedy MMR selection — only recompute diversity penalty per iteration
+    # Step 2: Greedy re-rank — DPP-style diversity + Steck calibration (V 6.386)
+    # Falls back to legacy metadata MMR for candidates without CLAP.
     from musicmind.engine.similarity import song_similarity
 
     w = weights or DEFAULT_WEIGHTS
     diversity_weight = w.get("diversity", 0.10)
+    target_genre_dist = _build_user_genre_distribution(
+        profile.get("genre_vector"),
+    )
     selected: list[dict[str, Any]] = []
     remaining = list(base_scored)
+    running_genre_counts: dict[str, float] = defaultdict(float)
+
+    cmap = clap_map or {}
 
     for _ in range(min(count, len(base_scored))):
         best_idx = -1
         best_score = -1.0
+        best_div_penalty = 0.0
+        best_cal_penalty = 0.0
 
         for i, c in enumerate(remaining):
             base_score = c["_score"]
-            # Recompute only the diversity component
-            if selected:
+            cid = c.get("catalog_id", "")
+            c_clap = cmap.get(cid)
+
+            # DPP-style quality-weighted gaussian diversity penalty on CLAP.
+            # Returns None when CLAP data is unavailable for either the
+            # candidate or all of the already-selected tracks.
+            dpp_penalty = _dpp_diversity_penalty(
+                c_clap, base_score, selected, cmap,
+            ) if selected else None
+
+            if dpp_penalty is not None:
+                diversity_penalty = dpp_penalty
+            elif selected:
+                # Fallback: legacy metadata-based MMR.
                 max_sim = max(song_similarity(c, s) for s in selected)
                 diversity_penalty = max_sim * 0.3
             else:
                 diversity_penalty = 0.0
 
-            # Base score was computed with already_selected=None (diversity=0).
-            # Simply subtract the diversity penalty from the base score.
-            adjusted = base_score - diversity_weight * diversity_penalty
+            # Steck calibration — KL(running∪cand || user target dist).
+            cal_penalty = _calibration_penalty(
+                c.get("genre_names", []),
+                running_genre_counts,
+                target_genre_dist,
+            )
+
+            adjusted = (
+                base_score
+                - diversity_weight * diversity_penalty
+                - _CALIBRATION_WEIGHT * cal_penalty
+            )
             adjusted = max(0.0, min(1.0, adjusted))
 
             if adjusted > best_score:
                 best_score = adjusted
                 best_idx = i
+                best_div_penalty = diversity_penalty
+                best_cal_penalty = cal_penalty
 
         best = remaining.pop(best_idx)
-        # Update the score and breakdown with final diversity penalty
-        if selected:
-            max_sim = max(song_similarity(best, s) for s in selected)
-            final_penalty = max_sim * 0.3
-        else:
-            final_penalty = 0.0
         best["_score"] = round(best_score, 3)
-        best["_breakdown"]["diversity_penalty"] = round(final_penalty, 3)
+        best["_breakdown"]["diversity_penalty"] = round(best_div_penalty, 3)
+        best["_breakdown"]["calibration_kl"] = round(best_cal_penalty, 4)
         selected.append(best)
+
+        # Update running genre distribution with the chosen track.
+        for g, wt in _genres_with_parents(best.get("genre_names", [])).items():
+            running_genre_counts[g] += wt
 
     return selected
