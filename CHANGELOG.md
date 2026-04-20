@@ -7,6 +7,16 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.385 — 2026-04-20
+
+### Fix 502 on /api/recommendations — stop running Essentia at request time
+
+V 6.384 bumped `max_to_enrich` to 200 in the single-pass scoring path, so `enrich_candidates` was attempting synchronous Essentia EffNet extraction for up to 200 candidates per recommendation request. Each call is ~1-2s CPU-bound and blocks the asyncio event loop; 200 of them kept the backend unresponsive for minutes and Railway's load balancer returned 502.
+
+Replaced the call with a new pure-loader `_load_audio_features` that reads from `audio_features_cache` (per-user) then falls back to `audio_features_global` via ISRC. No Essentia at recommendation time — enrichment stays on the worker. Candidates missing features degrade gracefully via `compute_context_weights` weight redistribution, which is exactly the design intent.
+
+---
+
 ## V 6.384 — 2026-04-20
 
 ### Recommendation engine: multi-centroid profiling, contextual explanations, recency boost

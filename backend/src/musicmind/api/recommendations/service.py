@@ -363,12 +363,14 @@ class RecommendationService:
             weights = {k: round(v / total, 4) for k, v in weights.items()}
 
         # ── Single-pass scoring (embeddings pre-loaded) ──────
-        # Load audio features + embeddings for ALL candidates upfront
-        from musicmind.engine.enrichment.orchestrator import enrich_candidates
-
-        audio_features_map = await enrich_candidates(
+        # Load audio features from cache only — NEVER run Essentia at
+        # recommendation time. Essentia is ~1-2s CPU-bound per track and
+        # blocks the event loop (V 6.384 regression: max_to_enrich=200 →
+        # 5-minute stalls → Railway 502). Enrichment is the worker's job;
+        # if a candidate is missing features, scoring degrades gracefully
+        # via compute_context_weights.
+        audio_features_map = await self._load_audio_features(
             engine, unique, user_id=user_id,
-            max_to_enrich=min(len(unique), 200),
         )
 
         clap_map, mert_map, embedding_map = await self._load_embeddings(
@@ -1320,6 +1322,93 @@ class RecommendationService:
                 )
 
         return clap_map, mert_map, effnet_map
+
+    @staticmethod
+    async def _load_audio_features(
+        engine,
+        candidates: list[dict[str, Any]],
+        *,
+        user_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Load cached audio features (scalar tempo/energy/etc) — read-only.
+
+        Per-user ``audio_features_cache`` first, then ``audio_features_global``
+        via ISRC for candidates not found in the user table. Does NOT run
+        Essentia extraction; missing candidates simply don't get features
+        and the scorer degrades gracefully.
+        """
+        from musicmind.db.schema import (
+            audio_features_cache,
+            audio_features_global,
+        )
+
+        af_map: dict[str, dict[str, Any]] = {}
+        catalog_ids = [
+            c.get("catalog_id", "") for c in candidates if c.get("catalog_id")
+        ]
+        if not catalog_ids:
+            return af_map
+
+        fields = (
+            "tempo", "energy", "brightness", "danceability",
+            "acousticness", "valence_proxy", "beat_strength",
+            "key", "scale", "instrumentalness", "loudness",
+        )
+
+        for i in range(0, len(catalog_ids), 500):
+            chunk = catalog_ids[i:i + 500]
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(audio_features_cache).where(
+                            sa.and_(
+                                audio_features_cache.c.user_id == user_id,
+                                audio_features_cache.c.catalog_id.in_(chunk),
+                            )
+                        )
+                    )
+                    for row in result:
+                        row_features = {
+                            f: getattr(row, f, None) for f in fields
+                            if getattr(row, f, None) is not None
+                        }
+                        if row_features:
+                            af_map[row.catalog_id] = row_features
+            except Exception:
+                logger.debug(
+                    "Failed to load per-user audio features", exc_info=True,
+                )
+
+        missing = [
+            c for c in candidates
+            if c.get("catalog_id", "") not in af_map and c.get("isrc")
+        ]
+        if missing:
+            isrcs = [c["isrc"] for c in missing]
+            isrc_to_cid = {c["isrc"]: c["catalog_id"] for c in missing}
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(audio_features_global).where(
+                            audio_features_global.c.isrc.in_(isrcs)
+                        )
+                    )
+                    for row in result:
+                        cid = isrc_to_cid.get(row.isrc, "")
+                        if not cid or cid in af_map:
+                            continue
+                        row_features = {
+                            f: getattr(row, f, None) for f in fields
+                            if getattr(row, f, None) is not None
+                        }
+                        if row_features:
+                            af_map[cid] = row_features
+            except Exception:
+                logger.debug(
+                    "Failed to load global audio features", exc_info=True,
+                )
+
+        return af_map
 
     @staticmethod
     async def _load_user_library_claps(
