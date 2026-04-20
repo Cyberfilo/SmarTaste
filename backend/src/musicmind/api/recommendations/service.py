@@ -596,12 +596,16 @@ class RecommendationService:
                 "acousticness": getattr(af_row, "acousticness", None),
             }
 
-        # ── Load mood_tags for this track (global_song_cache first) ──
+        # ── Load mood signal for this track (global_song_cache) ──────
         candidate_mood_tags: list[str] = []
+        candidate_mood_scores: dict[str, float] | None = None
         try:
             async with engine.begin() as conn:
                 row = (await conn.execute(
-                    sa.select(global_song_cache.c.mood_tags).where(
+                    sa.select(
+                        global_song_cache.c.mood_tags,
+                        global_song_cache.c.mood_scores,
+                    ).where(
                         global_song_cache.c.catalog_id == catalog_id,
                     )
                 )).first()
@@ -614,9 +618,20 @@ class RecommendationService:
                         tags = []
                 if isinstance(tags, list):
                     candidate_mood_tags = [t for t in tags if isinstance(t, str)]
+                scores = row.mood_scores
+                if isinstance(scores, str):
+                    try:
+                        scores = json.loads(scores)
+                    except (ValueError, TypeError):
+                        scores = None
+                if isinstance(scores, dict):
+                    candidate_mood_scores = {
+                        k: float(v) for k, v in scores.items()
+                        if isinstance(k, str) and isinstance(v, (int, float))
+                    }
         except Exception:
             logger.debug(
-                "Could not load mood_tags for breakdown", exc_info=True,
+                "Could not load mood signal for breakdown", exc_info=True,
             )
 
         # Effective (context-adaptive) weights
@@ -646,6 +661,7 @@ class RecommendationService:
             user_mert_centroid=profile_dict.get("mert_centroid"),
             calibration_artists=calibration_artists,
             candidate_mood_tags=candidate_mood_tags or None,
+            candidate_mood_scores=candidate_mood_scores,
         )
 
         breakdown = result.get("_breakdown", {})
@@ -1027,6 +1043,7 @@ class RecommendationService:
                 global_song_cache.c.preview_url,
                 global_song_cache.c.artwork_url,
                 global_song_cache.c.mood_tags,
+                global_song_cache.c.mood_scores,
             ).select_from(
                 rc.join(
                     global_song_cache,
@@ -1064,6 +1081,14 @@ class RecommendationService:
                         mood_tags = []
                 if not isinstance(mood_tags, list):
                     mood_tags = []
+                mood_scores = row.mood_scores
+                if isinstance(mood_scores, str):
+                    try:
+                        mood_scores = json.loads(mood_scores)
+                    except (ValueError, TypeError):
+                        mood_scores = None
+                if not isinstance(mood_scores, dict):
+                    mood_scores = None
                 by_cid[cid] = {
                     "catalog_id": cid,
                     "name": row.name or "",
@@ -1077,6 +1102,7 @@ class RecommendationService:
                     "service_source": row.service_source or "",
                     "artwork_url_template": row.artwork_url or "",
                     "mood_tags": mood_tags,
+                    "mood_scores": mood_scores,
                 }
                 strategy_counts[cid] = set()
                 max_weights[cid] = (0.0, "")

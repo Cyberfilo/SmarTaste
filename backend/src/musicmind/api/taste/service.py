@@ -866,9 +866,12 @@ class TasteService:
             engine, user_id=user_id, songs=engaged_songs,
         )
 
-        # V 6.388: load mood_tags from global_song_cache (per catalog_id
-        # AND per ISRC for library songs that haven't been promoted).
+        # V 6.388/V 6.389: load mood signal from global_song_cache.
+        # Prefer `mood_scores` (sparse intensity vector) with `mood_tags`
+        # as fallback. Joined per catalog_id AND per ISRC for library
+        # rows that haven't been promoted to global yet.
         mood_tags_map: dict[str, list[str]] = {}
+        mood_scores_map: dict[str, dict[str, float]] = {}
         try:
             from musicmind.db.schema import global_song_cache
             isrcs = [s.get("isrc") for s in songs if s.get("isrc")]
@@ -879,6 +882,7 @@ class TasteService:
                             global_song_cache.c.catalog_id,
                             global_song_cache.c.isrc,
                             global_song_cache.c.mood_tags,
+                            global_song_cache.c.mood_scores,
                         ).where(
                             sa.or_(
                                 global_song_cache.c.catalog_id.in_(catalog_ids)
@@ -888,7 +892,8 @@ class TasteService:
                             )
                         )
                     )
-                    by_isrc: dict[str, list[str]] = {}
+                    tags_by_isrc: dict[str, list[str]] = {}
+                    scores_by_isrc: dict[str, dict[str, float]] = {}
                     for row in by_cid:
                         tags = row.mood_tags
                         if isinstance(tags, str):
@@ -896,22 +901,31 @@ class TasteService:
                                 tags = json.loads(tags)
                             except (ValueError, TypeError):
                                 tags = []
-                        if not tags or not isinstance(tags, list):
-                            continue
-                        mood_tags_map[row.catalog_id] = tags
-                        if row.isrc:
-                            by_isrc[row.isrc] = tags
-                    # ISRC fallback for library rows not keyed by catalog_id
+                        scores = row.mood_scores
+                        if isinstance(scores, str):
+                            try:
+                                scores = json.loads(scores)
+                            except (ValueError, TypeError):
+                                scores = None
+                        if tags and isinstance(tags, list):
+                            mood_tags_map[row.catalog_id] = tags
+                            if row.isrc:
+                                tags_by_isrc[row.isrc] = tags
+                        if scores and isinstance(scores, dict):
+                            mood_scores_map[row.catalog_id] = scores
+                            if row.isrc:
+                                scores_by_isrc[row.isrc] = scores
+                    # ISRC fallback
                     for s in songs:
                         cid = s.get("catalog_id", "")
-                        if cid in mood_tags_map:
-                            continue
                         isrc = s.get("isrc")
-                        if isrc and isrc in by_isrc:
-                            mood_tags_map[cid] = by_isrc[isrc]
+                        if cid not in mood_tags_map and isrc and isrc in tags_by_isrc:
+                            mood_tags_map[cid] = tags_by_isrc[isrc]
+                        if cid not in mood_scores_map and isrc and isrc in scores_by_isrc:
+                            mood_scores_map[cid] = scores_by_isrc[isrc]
         except Exception:
             logger.warning(
-                "Failed to load mood_tags for profile, continuing without",
+                "Failed to load mood_tags/scores for profile, continuing without",
             )
 
         profile = build_taste_profile(
@@ -922,6 +936,7 @@ class TasteService:
             clap_map=clap_map or None,
             mert_map=mert_map or None,
             mood_tags_map=mood_tags_map or None,
+            mood_scores_map=mood_scores_map or None,
         )
 
         # total_songs_analyzed should reflect unique songs, not amplified duplicates

@@ -7,6 +7,34 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.389 — 2026-04-20
+
+### Hybrid mood classifier — discrete tags + sparse score vector
+
+V 6.388 shipped the right V1: 1-3 discrete mood tags per track with positional weights (0.5 / 0.3 / 0.2) driving the `mood_match` cosine. But tag quantization throws away intensity — a song the model "felt" as `{reflective: 0.85, melancholic: 0.55}` and one it felt as `{reflective: 0.35, melancholic: 0.25}` both get collapsed to `["reflective", "melancholic"]` and score identically. That's exactly the precision gap for the Vale Pain example: two tracks with the same primary tag but very different intensity profiles.
+
+**Upgrade to hybrid output** — one GPT-5.4 call returns both:
+
+- `primary` — single enum tag (for UI display, admin debugging, backward compat)
+- `moods` — complete 12-key score object, `0.0-1.0` per mood (drives the cosine)
+
+JSON schema is strict: all 12 keys required, primary must match the highest score. System prompt includes a calibration guide ("0.2-0.3 = faint undertone, 0.7-0.8 = strong supporting mood, 0.9-1.0 = defining") and two concrete few-shot examples — a hype trap banger and a reflective rap track — so the model anchors to consistent cross-track calibration instead of binarizing.
+
+**Schema changes** (migration 027):
+
+- New column `global_song_cache.mood_scores JSONB` (sparse dict, only non-zero moods stored).
+- `mood_tags` kept unchanged for UI / backward compat.
+
+**Scoring upgrade:**
+
+- `mood_similarity` now prefers `candidate_scores` (richer cosine) with `candidate_tags` as fallback for V 6.388-tagged rows not yet re-classified.
+- `aggregate_mood_distribution` sums per-song score vectors for the user's library centroid when scores are available, positional tag weights otherwise.
+- User's profile `mood_distribution` is now a true mood centroid in the 12-dim taxonomy space.
+
+**Backfill:** worker re-classifies V 6.388 rows (`mood_scores IS NULL`) on the main cycle + startup drain, prioritising them ahead of never-tagged rows. One more pass over the catalog (~$1-2 at GPT-5.4 pricing).
+
+---
+
 ## V 6.388 — 2026-04-20
 
 ### Mood classifier + new `mood_match` scoring dimension (GPT-5.4)

@@ -282,6 +282,7 @@ def score_candidate(
     calibration_artists: dict[str, float] | None = None,
     nearest_tracks: list[dict[str, Any]] | None = None,
     candidate_mood_tags: list[str] | None = None,
+    candidate_mood_scores: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Score a single candidate song against a taste profile.
 
@@ -370,17 +371,24 @@ def score_candidate(
     if has_scalar:
         scalar_score = scalar_audio_similarity(user_audio_centroid, audio_features)
 
-    # ── 3b. Mood match (V 6.388) ──────────────────────────
+    # ── 3b. Mood match (V 6.388 → V 6.389 hybrid) ─────────
     # Cosine similarity between the user's library-aggregated mood
-    # distribution and the candidate's OpenAI-classified mood tags.
-    # Closes the affect gap that CLAP/MERT/EffNet miss — two tracks with
-    # similar production but opposite emotion now score very differently.
+    # distribution and the candidate's mood signal. Prefers the V 6.389
+    # sparse score vector (carries intensity — "strongly reflective" vs
+    # "faintly reflective"); falls back to the V 6.388 tag list with
+    # positional weights for tracks classified before the upgrade.
     mood_score = 0.0
     user_mood_dist = profile.get("mood_distribution") or None
-    has_mood = bool(user_mood_dist and candidate_mood_tags)
+    has_mood = bool(
+        user_mood_dist and (candidate_mood_scores or candidate_mood_tags)
+    )
     if has_mood:
         from musicmind.engine.mood_tagger import mood_similarity
-        mood_score = mood_similarity(user_mood_dist, candidate_mood_tags)
+        mood_score = mood_similarity(
+            user_mood_dist,
+            candidate_scores=candidate_mood_scores,
+            candidate_tags=candidate_mood_tags,
+        )
 
     # ── 4. Artist affinity — three-tier match, wrong-genre penalised ─────
     # Tier 1 (primary match): candidate's primary artist is in user's top —
@@ -625,6 +633,7 @@ def rank_candidates(
     calibration_artists: dict[str, float] | None = None,
     user_library_claps: dict[str, dict[str, Any]] | None = None,
     mood_tags_map: dict[str, list[str]] | None = None,
+    mood_scores_map: dict[str, dict[str, float]] | None = None,
     # Legacy params — accepted but ignored for backward compat
     user_tag_profile: dict[str, float] | None = None,
     collaborative_matches: set[str] | None = None,
@@ -651,6 +660,7 @@ def rank_candidates(
         ) if user_library_claps else None
 
         c_moods = (mood_tags_map or {}).get(cid) or c.get("mood_tags")
+        c_scores = (mood_scores_map or {}).get(cid) or c.get("mood_scores")
         scored = score_candidate(
             c, profile, already_selected=None,
             weights=weights,
@@ -663,6 +673,7 @@ def rank_candidates(
             candidate_mert=(mert_map or {}).get(cid),
             user_mert_centroid=user_mert_centroid,
             candidate_mood_tags=c_moods,
+            candidate_mood_scores=c_scores,
             staleness_index=staleness_idx,
             calibration_artists=calibration_artists,
             nearest_tracks=nearest,

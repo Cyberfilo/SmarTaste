@@ -537,6 +537,12 @@ global_song_cache = sa.Table(
     # V 6.388: OpenAI-classified mood tags from fixed 12-entry taxonomy.
     # Primary mood first; 1-3 tags per track; empty array when unclassified.
     sa.Column("mood_tags", sa.JSON, nullable=False, server_default="[]"),
+    # V 6.389: sparse score vector from the hybrid classifier —
+    # {mood: score_0_to_1} for non-zero moods only. Nullable while
+    # older mood_tags-only rows are migrated lazily. Drives the
+    # `mood_match` cosine in the scorer (fallback: positional weights
+    # from mood_tags when None).
+    sa.Column("mood_scores", sa.JSON, nullable=True),
 )
 
 playlist_items = sa.Table(
