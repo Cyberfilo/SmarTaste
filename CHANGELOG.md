@@ -7,6 +7,38 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.396 — 2026-04-21
+
+### Artist discography deepening — 100% library-artist catalog coverage via Deezer
+
+Previously the worker fetched only the top ~50 tracks per library artist (bounded by Apple's top-songs 10-cap and the cobweb's `MAX_COBWEB_SONGS=50` budget). With 174 library artists that means at most 8,700 globally-cached tracks — but most Italian hip-hop artists have 80-150+ released tracks each, so the recommender was working with a partial catalog.
+
+**New worker phase `artist_deepening`** runs after cobweb expansion (Phase 3, gated on `_count_global_gaps <= 50` so primary enrichment drains first). For up to 5 library artists per cycle:
+1. Pick artists from `song_metadata_cache` whose normalized name isn't yet in `artist_discography_state`.
+2. Call the new `fetch_artist_full_discography(artist_name, limit=500)` in `engine/enrichment/deezer.py` — walks `/search/artist` → `/artist/{id}/albums` → `/album/{id}/tracks` with no discography cap. Unauthenticated (Deezer-only), so it works globally regardless of user token state.
+3. Upsert tracks into `global_song_cache` via `ON CONFLICT (catalog_id) DO UPDATE` — existing richer metadata is preserved, only NULL/empty columns get filled.
+4. Record outcome in `artist_discography_state (artist_name_norm, artist_name, service_source='deezer', tracks_found, deepened_at, last_error)`. Errors mark the row "attempted" so we don't hot-loop retry.
+
+Schema: new `artist_discography_state` table (migration 029). Fallback-primary choice: Deezer was picked over Apple's album-walk because (a) no auth state to manage, (b) no per-artist cap (Apple's album endpoint paginates but regional content can still be incomplete), (c) independent catalog means additional coverage vs Apple for the same artists.
+
+**Overview query** (run any time to see progress):
+```sql
+SELECT
+  ads.artist_name,
+  ads.tracks_found AS found_by_deezer,
+  ads.deepened_at,
+  (SELECT count(*) FROM global_song_cache gsc
+     WHERE LOWER(TRIM(gsc.artist_name)) = ads.artist_name_norm) AS in_global,
+  (SELECT count(DISTINCT catalog_id) FROM song_metadata_cache smc
+     WHERE LOWER(TRIM(smc.artist_name)) = ads.artist_name_norm) AS in_library
+FROM artist_discography_state ads
+ORDER BY ads.tracks_found DESC;
+```
+
+No breaking changes. New phase starts draining on the next worker cycle after migration 029 applies.
+
+---
+
 ## V 6.395 — 2026-04-21
 
 ### Fix: GPU backfill was stalling indefinitely on orphan AEG rows + stalled cobweb gate

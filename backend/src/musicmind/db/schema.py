@@ -618,6 +618,28 @@ artwork_cache = sa.Table(
     ),
 )
 
+# ── Artist Discography State ────────────────────────────────────────────────
+# V 6.396: tracks which artists have had their full catalog walked by the
+# worker's artist_deepening phase, so we don't refetch every cycle. Keyed
+# by normalized artist name (lowercase + trimmed) for cross-service match.
+
+artist_discography_state = sa.Table(
+    "artist_discography_state",
+    metadata,
+    sa.Column("artist_name_norm", sa.Text, primary_key=True),
+    sa.Column("artist_name", sa.Text, nullable=False),
+    sa.Column("service_source", sa.Text, nullable=False),
+    sa.Column("tracks_found", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("deepened_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("last_error", sa.Text, nullable=True),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 # Per-user discovery candidate pool — populated by the worker, consumed by
 # the recommendations API. The four discover_* strategies (similar_artist,
 # genre_adjacent, editorial, chart) used to run live on every recommendation

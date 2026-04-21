@@ -434,6 +434,38 @@ async def main() -> None:
 
         try:
             stats = await _run_cobweb_cycle(engine, settings, log_writer=log_writer)
+
+            # ── Phase 3: Deepen library-artist discographies (V 6.396) ──
+            # After the per-user enrichment AND the cobweb expansion
+            # have both drained, walk each library artist's full catalog
+            # (Apple/Spotify via album-iteration → Deezer fallback) and
+            # populate GSC. Bounded to 5 artists/cycle to keep API load
+            # light; skips already-deepened ones via
+            # artist_discography_state. Runs only when global gaps are
+            # down to permanent-failure residue (threshold 50) so we
+            # don't starve primary enrichment.
+            try:
+                global_gaps_now = await _count_global_gaps(engine)
+                if global_gaps_now <= 50:
+                    deepened = await _deepen_library_artists(
+                        engine, settings, limit=5,
+                    )
+                    if deepened > 0:
+                        logger.info(
+                            "Cycle %d: deepened %d library artists "
+                            "(discography fetched)", cycle, deepened,
+                        )
+                else:
+                    logger.debug(
+                        "Cycle %d: %d global gaps remain, "
+                        "deferring artist-deepening",
+                        cycle, global_gaps_now,
+                    )
+            except Exception:
+                logger.exception(
+                    "Cycle %d artist deepening failed", cycle,
+                )
+
             duration = round(time.monotonic() - start, 1)
             logger.info(
                 "Cycle %d complete in %.1fs: %d cobweb artists, %d songs cached, "
@@ -2345,6 +2377,200 @@ async def _fill_library_gaps(engine, settings) -> int:
             )
 
     return total_enriched
+
+
+# ── Artist Discography Deepening (V 6.396) ──────────────────────────────
+# Walks every library artist's full catalog so global_song_cache eventually
+# contains 100% of each artist's discography, not just the top-N cobweb
+# slice. Gated on `_count_global_gaps <= 50` so primary enrichment drains
+# first. Bounded to `limit` artists per cycle to keep API load light.
+#
+# Strategy per artist:
+#   1. Query Deezer's `/search/artist` → `/artist/{id}/albums` →
+#      `/album/{id}/tracks`. Unauth'd, no discography cap.
+#   2. Upsert returned tracks into global_song_cache (dedup by isrc /
+#      (title, album) pair).
+#   3. Record in artist_discography_state with deepened_at timestamp.
+#
+# Future: add Apple/Spotify via `_fetch_artist_full_discography` when a
+# user's access token is fresh — gives us multi-service coverage for edge
+# cases where Deezer's catalog is missing regional content.
+
+
+async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
+    """Deep-fetch discographies for library artists not yet deepened.
+
+    Picks `limit` artists from song_metadata_cache whose normalized name
+    doesn't appear in artist_discography_state. For each, calls Deezer's
+    full-discography fetcher and upserts results into global_song_cache.
+    Returns the count of artists processed (not tracks found) — the
+    per-artist track count is logged + stored in artist_discography_state.
+    """
+    from musicmind.db.schema import (
+        artist_discography_state as ads,
+        global_song_cache,
+        song_metadata_cache,
+    )
+    from musicmind.engine.enrichment.deezer import (
+        fetch_artist_full_discography,
+    )
+    from datetime import UTC, datetime
+
+    async with engine.begin() as conn:
+        # Distinct library artists NOT yet deepened. Normalize to
+        # lower+trim for cross-service matching and consistent keys.
+        deepened_keys = sa.select(ads.c.artist_name_norm).correlate(None)
+        result = await conn.execute(
+            sa.text("""
+                SELECT DISTINCT
+                  LOWER(TRIM(artist_name)) AS artist_name_norm,
+                  artist_name
+                FROM song_metadata_cache
+                WHERE artist_name IS NOT NULL
+                  AND LENGTH(TRIM(artist_name)) > 0
+                  AND LOWER(TRIM(artist_name)) NOT IN (
+                    SELECT artist_name_norm FROM artist_discography_state
+                  )
+                ORDER BY LOWER(TRIM(artist_name))
+                LIMIT :lim
+            """),
+            {"lim": limit},
+        )
+        candidates = [(r.artist_name_norm, r.artist_name) for r in result]
+
+    if not candidates:
+        return 0
+
+    logger.info(
+        "Artist deepening: processing %d library artists this cycle",
+        len(candidates),
+    )
+
+    import httpx
+
+    deepened_count = 0
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for norm, artist_name in candidates:
+            try:
+                tracks = await fetch_artist_full_discography(
+                    artist_name, limit=500, client=client,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Deezer deepen failed for '%s': %s", artist_name, exc,
+                )
+                # Mark as attempted (with error) so we don't retry every
+                # cycle — we'll retry on the next deploy / manual clear.
+                async with engine.begin() as conn:
+                    await conn.execute(sa.text("""
+                        INSERT INTO artist_discography_state
+                          (artist_name_norm, artist_name, service_source,
+                           tracks_found, last_error, updated_at)
+                        VALUES (:n, :a, 'deezer', 0, :err, now())
+                        ON CONFLICT (artist_name_norm) DO UPDATE SET
+                          last_error = EXCLUDED.last_error,
+                          updated_at = EXCLUDED.updated_at
+                    """), {"n": norm, "a": artist_name, "err": str(exc)[:400]})
+                continue
+
+            if not tracks:
+                logger.info(
+                    "Artist deepening: Deezer returned 0 tracks for '%s'",
+                    artist_name,
+                )
+                async with engine.begin() as conn:
+                    await conn.execute(sa.text("""
+                        INSERT INTO artist_discography_state
+                          (artist_name_norm, artist_name, service_source,
+                           tracks_found, deepened_at, updated_at)
+                        VALUES (:n, :a, 'deezer', 0, now(), now())
+                        ON CONFLICT (artist_name_norm) DO UPDATE SET
+                          tracks_found = EXCLUDED.tracks_found,
+                          deepened_at = EXCLUDED.deepened_at,
+                          updated_at = EXCLUDED.updated_at
+                    """), {"n": norm, "a": artist_name})
+                continue
+
+            # Upsert into global_song_cache. ON CONFLICT by catalog_id
+            # (primary key) preserves richer existing metadata — we only
+            # fill NULL/empty columns. ISRC-keyed matching happens via
+            # downstream audio_embeddings_global join.
+            inserted = 0
+            async with engine.begin() as conn:
+                for t in tracks:
+                    cid = t.get("catalog_id") or ""
+                    if not cid:
+                        continue
+                    try:
+                        await conn.execute(sa.text("""
+                            INSERT INTO global_song_cache
+                              (catalog_id, name, artist_name, album_name,
+                               genre_names, isrc, duration_ms, release_date,
+                               preview_url, artwork_url, service_source,
+                               fetched_at)
+                            VALUES
+                              (:cid, :name, :artist, :album,
+                               '[]'::json, :isrc, :dur, :rel,
+                               :prev, :art, :src, now())
+                            ON CONFLICT (catalog_id) DO UPDATE SET
+                              isrc = COALESCE(
+                                NULLIF(global_song_cache.isrc, ''),
+                                EXCLUDED.isrc
+                              ),
+                              preview_url = COALESCE(
+                                NULLIF(global_song_cache.preview_url, ''),
+                                EXCLUDED.preview_url
+                              ),
+                              artwork_url = COALESCE(
+                                NULLIF(global_song_cache.artwork_url, ''),
+                                EXCLUDED.artwork_url
+                              ),
+                              duration_ms = COALESCE(
+                                global_song_cache.duration_ms,
+                                EXCLUDED.duration_ms
+                              ),
+                              release_date = COALESCE(
+                                global_song_cache.release_date,
+                                EXCLUDED.release_date
+                              )
+                        """), {
+                            "cid": cid,
+                            "name": t.get("name") or "",
+                            "artist": t.get("artist_name") or artist_name,
+                            "album": t.get("album_name") or "",
+                            "isrc": (t.get("isrc") or "").strip() or None,
+                            "dur": t.get("duration_ms") or None,
+                            "rel": t.get("release_date") or None,
+                            "prev": t.get("preview_url") or "",
+                            "art": t.get("artwork_url") or "",
+                            "src": t.get("service_source") or "deezer",
+                        })
+                        inserted += 1
+                    except Exception:
+                        logger.debug(
+                            "GSC upsert failed for track %s (%s)",
+                            cid, t.get("name"),
+                        )
+
+                await conn.execute(sa.text("""
+                    INSERT INTO artist_discography_state
+                      (artist_name_norm, artist_name, service_source,
+                       tracks_found, deepened_at, last_error, updated_at)
+                    VALUES (:n, :a, 'deezer', :tf, now(), NULL, now())
+                    ON CONFLICT (artist_name_norm) DO UPDATE SET
+                      tracks_found = EXCLUDED.tracks_found,
+                      deepened_at = EXCLUDED.deepened_at,
+                      last_error = NULL,
+                      updated_at = EXCLUDED.updated_at
+                """), {"n": norm, "a": artist_name, "tf": inserted})
+
+            logger.info(
+                "Artist deepening: '%s' → %d tracks (of %d returned)",
+                artist_name, inserted, len(tracks),
+            )
+            deepened_count += 1
+
+    return deepened_count
 
 
 # ── Global Enrichment ────────────────────────────────────────────────────
