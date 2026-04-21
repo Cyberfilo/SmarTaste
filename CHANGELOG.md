@@ -7,6 +7,29 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.401 — 2026-04-21
+
+### Fix: tx-abort cascade in deepening upserts + 1-song library pollution + retry partial fetches
+
+Three compounding issues surfaced when the user noticed:
+1. Vale Pain got 11 tracks on prod vs 97 tracks in local probe (same code, same Deezer).
+2. Artists like 2 Chainz / 6ix9ine / ANNA / 2nd Roof got deepened — but they're just feature cameos on 1 library song each.
+3. Nothing retries an artist whose first deepen was incomplete.
+
+**Transaction-abort cascade (the real Vale Pain culprit)**: the prior upsert loop ran all INSERTs inside a single `async with engine.begin() as conn:` block with a per-statement `try/except`. When one INSERT raised, Postgres aborted the entire transaction — but the Python-side `except` swallowed the error, so subsequent INSERTs silently failed with `current transaction is aborted, commands ignored` for the rest of the loop. Result: 11 successful inserts, then 86 silent failures on remaining Vale Pain tracks. Fixed with `conn.begin_nested()` (SAVEPOINT/RELEASE/ROLLBACK TO) around each individual upsert — one bad row rolls back ONLY its savepoint, outer transaction stays alive. Failed rows are now logged at `warning` level with the first error message for debugability (was `debug`-silent before).
+
+**1-song library pollution**: 48 of 87 library artists have only 1 song attributed to them — mostly Apple-Music-attribution quirks from feature cameos (e.g., "Good Drank (feat. Gucci Mane & Quavo)" registers "2 Chainz" as a library artist). Those don't represent real user taste. Deepening query now requires `HAVING count(*) >= 2 OR cal_weight > 0` — must have either multiple library songs OR a wizard-ranked calibration entry.
+
+**Retry partial fetches**: new WHERE clause picks up artists where `tracks_found < 20 AND deepened_at < now() - 6h AND last_error IS NULL` — handles any future rate-limit-induced or otherwise partial fetches without requiring manual intervention.
+
+**Also**: per-cycle budget dropped 3 → 2 (defense-in-depth against Deezer burst limits, alongside the already-250ms inter-artist throttle).
+
+**One-shot prod cleanup**: cleared all state rows with `tracks_found < 20` so they're re-processed immediately under the new savepoint-protected code (no 6h wait). Vale Pain / Nabi / Neima Ezza expected to recover to 97/50/62 respectively on next cycle.
+
+**Parked**: ifpi.org ISRC search as a long-tail data source — confirmed it's a Nuxt.js SPA whose real API lives in minified JS. Worth revisiting as V 6.402 if Deezer coverage alone still feels thin after V 6.401.
+
+---
+
 ## V 6.400 — 2026-04-21
 
 ### Fix: artist-deepening gate was blocked by permanent-failure residue

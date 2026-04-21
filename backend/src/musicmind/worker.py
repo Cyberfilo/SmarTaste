@@ -478,8 +478,14 @@ async def main() -> None:
             try:
                 global_gaps_now = await _count_global_gaps(engine)
                 if global_gaps_now <= 200:
+                    # V 6.401: budget 3 → 2 per cycle. Lower concurrency
+                    # reduces the chance that a parallel Deezer burst
+                    # trips rate limiting mid-fetch (the root cause we
+                    # suspected behind some earlier partial-fetches,
+                    # now confirmed to be tx-abort cascade — but the
+                    # safer burst rate is worth keeping as defense).
                     deepened = await _deepen_library_artists(
-                        engine, settings, limit=3,
+                        engine, settings, limit=2,
                     )
                     if deepened > 0:
                         logger.info(
@@ -2448,22 +2454,26 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
     from datetime import UTC, datetime
 
     async with engine.begin() as conn:
-        # Distinct library artists NOT yet deepened.
-        # V 6.397: order by MAX calibration weight DESC. V 6.399: SKIP
-        # multi-artist groupings ("Artist A, Artist B & C", "X feat. Y",
-        # "X ft Y") — Deezer's artist search doesn't index those as an
-        # entity, and the primary-artist parsing is already handled by
-        # the cobweb for feat-discovery. Matching each segment-joiner
-        # keeps us focused on solo-billed catalog entries.
+        # V 6.401: two gating improvements over V 6.399:
+        # (a) HAVING count(*) >= 2 OR cal_weight > 0 — excludes the
+        #     ~48 "1-song library artists" that are actually feature
+        #     cameos (Apple Music creates a secondary artist entry
+        #     for tracks like "X (feat. Y)"). Those deepens were
+        #     spending budget on 2 Chainz / 6ix9ine / ANNA — artists
+        #     with essentially zero real presence in the user library.
+        # (b) retry-low-fetch rule: re-pick artists whose previous
+        #     deepen returned fewer than 20 tracks AND is older than
+        #     6h AND didn't error. Catches rate-limit-induced partial
+        #     fetches (see V 6.401 changelog — Vale Pain got 11 tracks
+        #     instead of 97 due to a Postgres tx-abort cascade, and
+        #     similar partials).
         result = await conn.execute(
             sa.text(r"""
-                SELECT
-                  smc_norm AS artist_name_norm,
-                  artist_name
-                FROM (
+                WITH lib AS (
                   SELECT
                     LOWER(TRIM(smc.artist_name)) AS smc_norm,
                     MIN(smc.artist_name) AS artist_name,
+                    count(*) AS library_songs,
                     COALESCE(MAX(uc.weight), 0.0) AS cal_weight
                   FROM song_metadata_cache smc
                   LEFT JOIN user_calibration uc
@@ -2471,13 +2481,20 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
                     AND uc.calibration_type IN ('top_artist', 'artist_rank')
                   WHERE smc.artist_name IS NOT NULL
                     AND LENGTH(TRIM(smc.artist_name)) > 0
-                    AND LOWER(TRIM(smc.artist_name)) NOT IN (
-                      SELECT artist_name_norm FROM artist_discography_state
-                    )
                     AND smc.artist_name !~* '(,| & | x | feat\.?| ft\.?| featuring| presents| pres\.)'
                   GROUP BY LOWER(TRIM(smc.artist_name))
-                ) ranked
-                ORDER BY cal_weight DESC, artist_name_norm
+                  HAVING count(*) >= 2 OR MAX(uc.weight) > 0
+                )
+                SELECT lib.smc_norm AS artist_name_norm, lib.artist_name
+                FROM lib
+                LEFT JOIN artist_discography_state ads
+                  ON ads.artist_name_norm = lib.smc_norm
+                WHERE
+                  ads.artist_name_norm IS NULL
+                  OR (ads.tracks_found < 20
+                      AND ads.deepened_at < now() - interval '6 hours'
+                      AND ads.last_error IS NULL)
+                ORDER BY lib.cal_weight DESC, lib.library_songs DESC, lib.smc_norm
                 LIMIT :lim
             """),
             {"lim": limit},
@@ -2542,16 +2559,18 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
                     """), {"n": norm, "a": artist_name})
                 continue
 
-            # Upsert into global_song_cache. ON CONFLICT by catalog_id
-            # (primary key) preserves richer existing metadata — we only
-            # fill NULL/empty columns. ISRC-keyed matching happens via
-            # downstream audio_embeddings_global join.
+            # V 6.401: savepoint per-row so a single bad row doesn't
+            # abort the entire transaction. Prior version lost 86 of
+            # 97 Vale Pain tracks this way — first bad row cascaded,
+            # leaving only the 11 pre-abort inserts committed.
             inserted = 0
+            failures: list[tuple[str, str]] = []
             async with engine.begin() as conn:
                 for t in tracks:
                     cid = t.get("catalog_id") or ""
                     if not cid:
                         continue
+                    sp = await conn.begin_nested()
                     try:
                         await conn.execute(sa.text("""
                             INSERT INTO global_song_cache
@@ -2596,12 +2615,19 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
                             "art": t.get("artwork_url") or "",
                             "src": t.get("service_source") or "deezer",
                         })
+                        await sp.commit()
                         inserted += 1
-                    except Exception:
-                        logger.debug(
-                            "GSC upsert failed for track %s (%s)",
-                            cid, t.get("name"),
-                        )
+                    except Exception as exc:
+                        await sp.rollback()
+                        failures.append((cid, str(exc)[:120]))
+
+                if failures:
+                    logger.warning(
+                        "GSC upsert dropped %d/%d tracks for '%s' — "
+                        "first error: %s",
+                        len(failures), len(tracks), artist_name,
+                        failures[0][1],
+                    )
 
                 await conn.execute(sa.text("""
                     INSERT INTO artist_discography_state
