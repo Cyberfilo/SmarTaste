@@ -100,6 +100,25 @@ async def init_logs_schema(engine: AsyncEngine) -> None:
     logger.info("Logging database schema initialized")
 
 
+async def reset_logs_tables(engine: AsyncEngine) -> None:
+    """Truncate all log tables on startup — keeps only current deploy's logs.
+
+    Each Railway deploy gets a fresh log slate: prior deploy's requests,
+    enrichment traces, and errors are wiped the instant a new container
+    boots. RESTART IDENTITY resets the BigInt PK sequences too, so ids
+    start at 1 for the current deploy. Tolerant of missing tables.
+    """
+    for table in ("request_logs", "enrichment_logs", "error_logs"):
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    sa.text(f"TRUNCATE TABLE {table} RESTART IDENTITY")
+                )
+        except Exception:
+            logger.debug("TRUNCATE %s failed (may not exist yet)", table)
+    logger.info("Logging database tables reset for new deploy")
+
+
 # ── Batched Log Writer ────────────────────────────────────────────────────────
 
 

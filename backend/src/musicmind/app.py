@@ -190,10 +190,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 LogWriter,
                 create_logs_engine,
                 init_logs_schema,
+                reset_logs_tables,
             )
 
             logs_engine = create_logs_engine(_settings.logs_database_url)
             await init_logs_schema(logs_engine)
+            # V 6.392: clear prior deploy's logs — keep only current deploy.
+            await reset_logs_tables(logs_engine)
             log_writer = LogWriter(logs_engine)
             log_writer.start()
             app.state.log_writer = log_writer

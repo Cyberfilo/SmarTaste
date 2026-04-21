@@ -78,10 +78,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 method, path, status_code, duration_ms, user_id or "-",
             )
 
-        self._write_to_db(
-            request, method=method, path=path, status_code=status_code,
-            duration_ms=duration_ms, user_id=user_id, ip=ip, ua=ua,
-        )
+        # V 6.392: skip 200 OK writes — the boring success path is pure
+        # noise in the DB. Everything else (201/204/3xx/4xx/5xx) gets
+        # persisted, and the 500 path above already writes unconditionally.
+        if status_code != 200:
+            self._write_to_db(
+                request, method=method, path=path, status_code=status_code,
+                duration_ms=duration_ms, user_id=user_id, ip=ip, ua=ua,
+            )
 
         return response
 

@@ -7,6 +7,20 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.392 — 2026-04-21
+
+### Logs DB: reset on deploy + skip 200 OK noise
+
+Two changes to the separate PostgreSQL logging instance (`request_logs` / `enrichment_logs` / `error_logs`).
+
+**Reset on every deploy** — `reset_logs_tables` in `db/logs.py` runs `TRUNCATE ... RESTART IDENTITY` on all three log tables right after schema init, before the batched writer starts. Every Railway container boot wipes prior deploy traces and restarts BigInt PK sequences at 1. Tolerant of missing tables (first deploy, partial schema). The main DB is untouched — only the logs DB resets. This replaces the never-realized intention of main-DB reset-on-startup, which the prior 400+ commits never actually executed on staging and which we're intentionally leaving off.
+
+**Skip 200 OK request writes** — `RequestLoggingMiddleware._write_to_db` now gates on `status_code != 200`. Unchanged: 500s from unhandled exceptions still write (separate code path before the gate), 3xx redirects, 4xx client errors, 5xx server errors, 201/204 state-change successes all persist. Typical usage was producing ~40 200s per user per 5 min — now those rows stay out of the DB, making 4xx/5xx grep actually useful.
+
+No schema change. No breaking change. Python-logging `DatabaseLogHandler` still gates at WARNING+ (unchanged).
+
+---
+
 ## V 6.391 — 2026-04-21
 
 ### Proactive dead-link check + artwork backfill + global preview cache
