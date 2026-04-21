@@ -471,28 +471,44 @@ async def main() -> None:
         try:
             stats = await _run_cobweb_cycle(engine, settings, log_writer=log_writer)
 
-            # ── Phase 3: Deepen library-artist discographies (V 6.396) ──
-            # After the per-user enrichment AND the cobweb expansion
-            # have both drained, walk each library artist's full
-            # catalog via Deezer track-search + /top endpoints and
-            # populate GSC. Self-bounded to 3 artists/cycle and
-            # rate-limit-safe (V 6.399); skips already-deepened ones
-            # via artist_discography_state.
+            # ── Phase 3: Deepen library-artist discographies ──────────
+            # V 6.404: gate tightened to check ACTIVE pipeline stages
+            # (Essentia + GPU) instead of the total gap count. The
+            # prior `total gaps <= 200` gate let deepening fire whenever
+            # the total happened to dip, but each deepening cycle adds
+            # 30-100 new tracks that INCREASE the gap count — so the
+            # gate would flicker open, add work, close again while
+            # pipelines scrambled to drain. Net effect: the deepened
+            # tracks were never fully enriched before more arrived.
             #
-            # V 6.400: threshold 50 → 200. The original 50 assumed
-            # ess_gap would drain to near-zero, but ~46 permanently-
-            # failed tracks (unreachable Deezer URLs) kept total at 51,
-            # blocking deepening indefinitely. 200 allows normal
-            # permanent-failure residue while still gating on
-            # legitimate pipeline congestion. Deferral logged at info
-            # so the gate is visible, not debug.
+            # New rule: deepening only fires when `needs_essentia <= 20
+            # AND needs_gpu_clap <= 10` — i.e. the real processing
+            # phases are at or near their permanent-failure floor. Any
+            # legitimate pipeline backlog blocks new deepening work
+            # until drained. `needs_isrc` is excluded from the gate
+            # because the ISRC backfill phase handles it independently
+            # and it's cheap (Deezer / MusicBrainz lookup).
             try:
-                global_gaps_now = await _count_global_gaps(engine)
-                if global_gaps_now <= 200:
+                async with engine.begin() as conn:
+                    needs_essentia = (await conn.execute(sa.text("""
+                        SELECT count(*) FROM global_song_cache g
+                        WHERE g.isrc IS NOT NULL AND g.isrc <> ''
+                          AND g.isrc <> '__NO_ISRC__'
+                          AND NOT EXISTS (
+                            SELECT 1 FROM audio_features_global afg
+                            WHERE afg.isrc = g.isrc AND afg.energy IS NOT NULL
+                          )
+                    """))).scalar() or 0
+                    needs_gpu_clap = (await conn.execute(sa.text("""
+                        SELECT count(*) FROM audio_embeddings_global
+                        WHERE embedding IS NOT NULL
+                          AND clap_embedding IS NULL
+                    """))).scalar() or 0
+
+                if needs_essentia <= 20 and needs_gpu_clap <= 10:
                     # V 6.403: budget 2 → 1 per cycle. Album-walk costs
                     # ~30 requests per artist (vs /top's ~4), so a
-                    # single artist consumes most of a cycle's budget
-                    # before the cobweb/essentia/gpu phases need it.
+                    # single artist consumes most of a cycle's budget.
                     deepened = await _deepen_library_artists(
                         engine, settings, limit=1,
                     )
@@ -503,9 +519,10 @@ async def main() -> None:
                         )
                 else:
                     logger.info(
-                        "Cycle %d: %d global gaps remain (threshold "
-                        "200) — deferring artist-deepening",
-                        cycle, global_gaps_now,
+                        "Cycle %d: pipeline busy "
+                        "(essentia_gap=%d, gpu_clap_gap=%d) "
+                        "— deferring artist-deepening",
+                        cycle, needs_essentia, needs_gpu_clap,
                     )
             except Exception:
                 logger.exception(

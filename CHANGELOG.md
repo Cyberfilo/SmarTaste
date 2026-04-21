@@ -7,6 +7,22 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.404 — 2026-04-21
+
+### Fix: artist-deepening gate now waits for pipeline drain, not just total-gap sum
+
+User noticed enrichment was chasing its tail: deepening would fire when `total_gaps <= 200`, add 30-100 new tracks, drive the gap total back above 200, leaving ~500 tracks in mid-pipeline with fresh work stacked behind. The 200-gap threshold was set in V 6.400 to accommodate permanent-failure residue, but conflated "permanent failure" with "pipeline backlog".
+
+New gate checks ACTIVE processing stages directly:
+- `needs_essentia <= 20` (CPU audio-feature pipeline near floor)
+- `needs_gpu_clap <= 10` (GPU pipeline near floor)
+
+`needs_isrc` is excluded from the gate because the ISRC backfill phase handles it independently (cheap Deezer/MusicBrainz lookup) and newly-added Deezer tracks may legitimately arrive without inline ISRCs. Gate log unchanged (info-level when deferring).
+
+Effect: when there's real work to do — tracks waiting for Essentia feature extraction or GPU embedding — deepening pauses until those catch up. Deepening only adds more tracks when the pipeline is actually idle. Natural backpressure; user-intended ordering ("deepen only once all existing tracks are properly backfilled") now enforced.
+
+---
+
 ## V 6.403 — 2026-04-21
 
 ### Fix: Deezer `/top` was geo-biased + download-retry-forever eliminated
