@@ -1,8 +1,7 @@
-"""Deezer API client for BPM + preview URL enrichment.
+"""Deezer preview URL fallback — search by name when Apple Music lacks a preview.
 
 Free API, no auth required. Rate limit ~10 req/s with exponential backoff.
-Uses search-by-name (ISRC lookup is broken/deprecated).
-Returns BPM and 30s preview MP3 URL.
+Only used as a FALLBACK for preview URLs, not for audio features.
 """
 
 from __future__ import annotations
@@ -20,24 +19,18 @@ MAX_RETRIES = 3
 BACKOFF_BASE = 0.5
 
 
-async def fetch_deezer_features(
+async def search_preview_url(
     *,
     name: str,
     artist_name: str,
     isrc: str | None = None,
-) -> dict[str, Any] | None:
-    """Fetch BPM and preview URL from Deezer.
+) -> str | None:
+    """Search Deezer for a 30s preview URL.
 
     Strategy: try ISRC lookup first (exact match), fall back to name search.
-    Returns BPM (if available), 30s preview MP3 URL, and ISRC.
-
-    Args:
-        name: Track title.
-        artist_name: Primary artist name.
-        isrc: ISRC for direct lookup (preferred, exact match).
 
     Returns:
-        Dict with tempo (BPM), preview_url, deezer_id, isrc. None on miss.
+        Preview MP3 URL string, or None if not found.
     """
     if not name and not artist_name and not isrc:
         return None
@@ -45,9 +38,7 @@ async def fetch_deezer_features(
     for attempt in range(MAX_RETRIES):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                full = None
-
-                # Strategy 1: ISRC direct lookup (exact match, faster)
+                # Strategy 1: ISRC direct lookup (exact match)
                 if isrc:
                     try:
                         resp = await client.get(
@@ -55,13 +46,13 @@ async def fetch_deezer_features(
                         )
                         if resp.is_success:
                             data = resp.json()
-                            if "error" not in data and data.get("id"):
-                                full = data
+                            if "error" not in data and data.get("preview"):
+                                return data["preview"]
                     except Exception:
-                        pass  # Fall through to name search
+                        pass
 
                 # Strategy 2: Name + artist search (fallback)
-                if not full and name and artist_name:
+                if name and artist_name:
                     query = f"{name} {artist_name}"
                     resp = await client.get(
                         f"{DEEZER_API}/search",
@@ -69,49 +60,21 @@ async def fetch_deezer_features(
                     )
                     resp.raise_for_status()
                     items = resp.json().get("data", [])
-                    if not items:
-                        return None
+                    if items:
+                        preview = items[0].get("preview")
+                        if preview:
+                            return preview
 
-                    deezer_id = items[0].get("id")
-                    if not deezer_id:
-                        return None
-
-                    resp2 = await client.get(f"{DEEZER_API}/track/{deezer_id}")
-                    resp2.raise_for_status()
-                    full = resp2.json()
-
-                if not full:
-                    return None
-
-                if "error" in full:
-                    return None
-
-                result: dict[str, Any] = {"deezer_id": str(deezer_id)}
-
-                bpm = full.get("bpm")
-                if bpm and bpm > 0:
-                    result["tempo"] = float(bpm)
-
-                preview = full.get("preview")
-                if preview:
-                    result["preview_url"] = preview
-
-                deezer_isrc = full.get("isrc")
-                if deezer_isrc:
-                    result["isrc"] = deezer_isrc
-
-                return result if len(result) > 1 else None
+                return None
 
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
                 wait = BACKOFF_BASE * (2**attempt)
-                logger.warning("Deezer rate limited, waiting %.1fs", wait)
+                logger.debug("Deezer rate limited, waiting %.1fs", wait)
                 await asyncio.sleep(wait)
                 continue
-            logger.warning("Deezer HTTP error: %s", exc)
             return None
         except httpx.HTTPError:
-            logger.warning("Deezer connection error for '%s'", query[:50])
             return None
 
     return None

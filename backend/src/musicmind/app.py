@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import sqlalchemy as sa
 from fastapi import FastAPI
+
+# Uvicorn configures its own loggers but leaves `musicmind.*` at the Python
+# default WARNING — which silently swallows orchestration + worker logs on
+# Railway. Force INFO on the root musicmind namespace so those lines show up.
+_mm_logger = logging.getLogger("musicmind")
+_mm_logger.setLevel(logging.INFO)
+if not _mm_logger.handlers:
+    _h = logging.StreamHandler(sys.stderr)
+    _h.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    _mm_logger.addHandler(_h)
+_mm_logger.propagate = False
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -23,6 +39,109 @@ from musicmind.security.encryption import EncryptionService
 _settings = Settings()
 
 
+async def _dispatch_startup_work(engine, settings) -> None:
+    """Inspect DB state on boot and dispatch worker tasks as background work.
+
+    Backend is the coordinator; worker is the executor. This runs during
+    the FastAPI lifespan AFTER the app is ready to serve requests — it
+    uses asyncio.create_task so boot never blocks on enrichment.
+
+    Order of operations:
+    1. Library enrichment gaps → fire worker's _fill_library_gaps
+    2. ISRC backfill gaps → fire _backfill_isrcs
+    3. GPU (CLAP/MERT) gaps → fire _backfill_gpu_embeddings + _global
+    4. Cobweb + discovery → fire _run_cobweb_cycle
+    """
+    import asyncio
+    import logging
+
+    log = logging.getLogger("musicmind.startup")
+
+    # Count each kind of gap so we log a useful summary.
+    async with engine.begin() as conn:
+        try:
+            lib_gaps = (await conn.execute(sa.text("""
+                SELECT count(*) FROM song_metadata_cache s
+                WHERE (s.library_id IS NOT NULL OR s.date_added_to_library IS NOT NULL)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM audio_features_cache af
+                    WHERE af.catalog_id = s.catalog_id AND af.user_id = s.user_id
+                      AND af.energy IS NOT NULL
+                  )
+            """))).scalar() or 0
+        except Exception:
+            lib_gaps = -1
+
+        try:
+            isrc_gaps = (await conn.execute(sa.text("""
+                SELECT count(*) FROM song_metadata_cache
+                WHERE (isrc IS NULL OR isrc = '') AND isrc IS DISTINCT FROM '__NO_ISRC__'
+            """))).scalar() or 0
+        except Exception:
+            isrc_gaps = -1
+
+        try:
+            gpu_gaps = (await conn.execute(sa.text("""
+                SELECT count(*) FROM audio_embeddings_global
+                WHERE clap_embedding IS NULL AND embedding IS NOT NULL
+            """))).scalar() or 0
+        except Exception:
+            gpu_gaps = -1
+
+    # Build a natural-language plan and print what the backend is asking
+    # the worker to do. Railway log viewer shows these as readable narration.
+    plan: list[str] = []
+    if lib_gaps > 0:
+        plan.append(f"enrich {lib_gaps} library songs missing audio features")
+    if isrc_gaps > 0:
+        plan.append(f"look up {isrc_gaps} missing ISRCs via Deezer + MusicBrainz")
+    if gpu_gaps > 0:
+        plan.append(f"fill {gpu_gaps} global CLAP/MERT embeddings on the GPU")
+    plan.append("run a cobweb + discovery cycle to grow the candidate pool")
+
+    log.info("── Backend booted. Plan for the worker: ──")
+    for i, step in enumerate(plan, 1):
+        log.info("  %d. %s", i, step)
+
+    # V 6.370: backend no longer dispatches enrichment work. It inspects
+    # the DB and logs the natural-language plan above; the worker is the
+    # single executor. Removes the backend/worker race where both
+    # processes ran the same backfill functions in parallel on boot,
+    # doubling API quota / GPU spend and occasionally stepping on each
+    # other's Postgres transactions.
+    #
+    # The worker reads the DB itself on startup and runs two strict
+    # drains (USER-LINKED → DISCOVERED) before entering the main cycle.
+    # We persist the plan to worker_status.detail as a JSON blob so the
+    # admin dashboard can show expected work even before the worker has
+    # updated its own phase on the same row.
+    try:
+        import json as _json
+
+        plan_payload = {
+            "lib_gaps": lib_gaps,
+            "isrc_gaps": isrc_gaps,
+            "gpu_gaps": gpu_gaps,
+            "plan": plan,
+        }
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("""
+                INSERT INTO worker_status (id, phase, detail, updated_at)
+                VALUES (1, 'startup_plan_ready', :detail, now())
+                ON CONFLICT (id) DO UPDATE SET
+                  phase = 'startup_plan_ready',
+                  detail = EXCLUDED.detail,
+                  updated_at = now()
+            """), {"detail": _json.dumps(plan_payload)[:1000]})
+    except Exception:
+        log.debug("Could not write startup plan to worker_status", exc_info=True)
+
+    log.info(
+        "── Worker will execute the plan (USER-LINKED drain → "
+        "DISCOVERED drain → main cycle). Backend is inspector-only. ──"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and tear down application resources."""
@@ -34,7 +153,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.encryption = encryption
 
     # Staging mode: auto-reset DB on startup for clean testing
-    if _settings.staging:
+    # Safety: require BOTH staging flag AND explicit confirmation env var
+    if _settings.staging and os.environ.get("MUSICMIND_CONFIRM_RESET", "") == "yes":
         import logging as _log
         _log.getLogger(__name__).warning("STAGING MODE: resetting database...")
         try:
@@ -94,6 +214,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _logging.getLogger(__name__).warning(
                 "Failed to connect logging database, continuing without", exc_info=True,
             )
+
+    # ── Backend orchestration: verify state + trigger worker if gaps exist ──
+    # Backend is the coordinator; worker is the executor. On boot, we inspect
+    # what needs to happen and dispatch worker functions as background tasks.
+    # Worker process continues polling in parallel — both share the DB, so
+    # duplicate work is serialized by Postgres. Fire-and-forget: boot should
+    # not block on enrichment.
+    try:
+        await _dispatch_startup_work(engine, _settings)
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).exception(
+            "Backend startup orchestration failed (non-fatal)"
+        )
 
     yield
 

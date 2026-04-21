@@ -32,7 +32,6 @@ from musicmind.api.services.service import (
 )
 from musicmind.api.taste.service import TasteService
 from musicmind.db.schema import (
-    recommendation_feedback,
     service_connections,
     song_metadata_cache,
     taste_profile_snapshots,
@@ -43,8 +42,6 @@ from musicmind.engine.mood import MOOD_PROFILES, filter_candidates_by_mood
 from musicmind.engine.scorer import rank_candidates, score_candidate
 from musicmind.engine.weights import (
     DEFAULT_WEIGHTS,
-    MIN_FEEDBACK_FOR_OPTIMIZATION,
-    optimize_weights,
 )
 from musicmind.security.encryption import EncryptionService
 
@@ -122,6 +119,7 @@ class RecommendationService:
         strategy: str = "all",
         mood: str | None = None,
         limit: int = 10,
+        mode: str = "all",
     ) -> dict[str, Any]:
         """Get personalized recommendations for a user.
 
@@ -146,44 +144,156 @@ class RecommendationService:
             engine, encryption, settings, user_id=user_id,
         )
 
-        # Step 2: Resolve service + credentials
-        all_creds = await self._resolve_all_credentials(
-            engine, encryption, settings, user_id=user_id,
-        )
+        # Step 2: Resolve service + credentials (only used for cold-start fallback)
+        all_creds: list[tuple[str, str, str | None, str]] = []
+        try:
+            all_creds = await self._resolve_all_credentials(
+                engine, encryption, settings, user_id=user_id,
+            )
+        except ValueError:
+            # No connected service — DB candidates may still exist from a
+            # previously connected service; let the read attempt below decide.
+            pass
 
-        # Step 3: Extract seed data from profile
+        # Step 3: Extract seed data from profile (still needed for weights/mood)
         top_artists_raw = profile.get("top_artists", [])
-        seed_artist_names = [
-            a["name"] for a in top_artists_raw[:5] if isinstance(a, dict)
+        seed_scored: list[tuple[str, float]] = [
+            (a["name"], float(a.get("score", 0.0)))
+            for a in top_artists_raw[:5]
+            if isinstance(a, dict) and a.get("name")
         ]
+        seed_artist_names = [n for n, _ in seed_scored]
         genre_vector = profile.get("genre_vector", {})
         top_genres = sorted(
             genre_vector.items(), key=lambda x: x[1], reverse=True,
         )[:5]
         top_genre_names = [g[0] for g in top_genres]
 
-        # Step 4: Run discovery strategies (against all connected services)
-        candidates: list[dict[str, Any]] = []
-        discovery_tasks = []
-        for svc, access_token, developer_token, storefront in all_creds:
-            discovery_tasks.append(
-                self._run_discovery(
-                    svc, access_token, seed_artist_names, top_genre_names,
-                    strategy=strategy,
-                    developer_token=developer_token,
-                    storefront=storefront,
-                    profile_genres=top_genre_names,
+        # Step 4: Read candidates from DB (worker-populated)
+        candidates = await self._load_candidates_from_db(
+            engine, user_id=user_id, strategy=strategy,
+        )
+
+        # Step 4.5: Mode-specific filter + augment (V 6.378)
+        # mode = "your_artists" → tracks where ANY artist (primary or feat)
+        #        is a library artist. Augmented from global_song_cache with
+        #        unowned discography tracks for library primaries.
+        # mode = "discover"     → tracks where PRIMARY is NOT a library
+        #        artist. Feat-library candidates remain (the 0.3× feat
+        #        weight in V 6.377 scorer gives them their boost).
+        # mode = "all" (default) → no filtering.
+        if mode in ("your_artists", "discover"):
+            from musicmind.db.schema import song_metadata_cache as _smc
+            from musicmind.engine.profile import parse_artists as _parse
+
+            async with engine.begin() as _conn:
+                _res = await _conn.execute(
+                    sa.select(sa.distinct(_smc.c.artist_name)).where(
+                        sa.and_(
+                            _smc.c.user_id == user_id,
+                            sa.or_(
+                                _smc.c.library_id.isnot(None),
+                                _smc.c.date_added_to_library.isnot(None),
+                            ),
+                        )
+                    )
+                )
+                lib_names: set[str] = set()
+                for _row in _res:
+                    if _row[0]:
+                        for _n, _w in _parse(_row[0]):
+                            if _w >= 1.0:
+                                lib_names.add(_n.lower())
+
+            def _primary_lower(c: dict[str, Any]) -> str:
+                _p = _parse(c.get("artist_name", ""))
+                return _p[0][0].lower() if _p else ""
+
+            def _any_in_library(c: dict[str, Any]) -> bool:
+                for _n, _w in _parse(c.get("artist_name", "")):
+                    if _n.lower() in lib_names:
+                        return True
+                return False
+
+            if mode == "your_artists":
+                candidates = [c for c in candidates if _any_in_library(c)]
+                # Augment with library-primary unowned discography tracks
+                if lib_names:
+                    async with engine.begin() as _conn:
+                        _r = await _conn.execute(sa.text("""
+                            SELECT g.catalog_id, g.name, g.artist_name,
+                                   g.album_name, g.genre_names, g.isrc,
+                                   g.preview_url, g.artwork_url,
+                                   g.service_source, g.duration_ms,
+                                   g.release_date
+                            FROM global_song_cache g
+                            WHERE LOWER(g.artist_name) = ANY(:names)
+                              AND NOT EXISTS (
+                                SELECT 1 FROM song_metadata_cache smc
+                                WHERE smc.user_id = :uid
+                                  AND (smc.library_id IS NOT NULL
+                                       OR smc.date_added_to_library IS NOT NULL)
+                                  AND (smc.catalog_id = g.catalog_id
+                                       OR (smc.isrc IS NOT NULL
+                                           AND smc.isrc <> ''
+                                           AND smc.isrc = g.isrc))
+                              )
+                            LIMIT 300
+                        """), {"names": list(lib_names), "uid": user_id})
+                        _existing = {c.get("catalog_id") for c in candidates}
+                        for _row in _r:
+                            if _row.catalog_id in _existing:
+                                continue
+                            _gn = _row.genre_names
+                            if isinstance(_gn, str):
+                                try:
+                                    _gn = json.loads(_gn)
+                                except Exception:
+                                    _gn = []
+                            candidates.append({
+                                "catalog_id": _row.catalog_id,
+                                "name": _row.name or "",
+                                "artist_name": _row.artist_name or "",
+                                "album_name": _row.album_name or "",
+                                "genre_names": _gn or [],
+                                "isrc": _row.isrc,
+                                "preview_url": _row.preview_url or "",
+                                "artwork_url": _row.artwork_url or "",
+                                "service_source": _row.service_source or "",
+                                "duration_ms": _row.duration_ms,
+                                "release_date": _row.release_date,
+                                "_strategy_source": "your_artists",
+                                "_discovery_weight": 0.8,
+                            })
+            elif mode == "discover":
+                candidates = [
+                    c for c in candidates
+                    if _primary_lower(c) not in lib_names
+                ]
+
+        # Hard-fail when there's nothing to recommend AND no creds to fall back
+        # on (test contract: connecting a service is a precondition).
+        if not candidates and not all_creds:
+            raise ValueError("No connected service found")
+
+        # Cold-start: the cobweb is now the single source of recommendations
+        # (per V 6.351 "everything-through-cobweb" directive). Running the
+        # four live strategies here re-introduced editorial / chart / K-pop
+        # pollution into recommendation_candidates every time a new user
+        # opened the app before the worker cycled. Instead, kick off a
+        # background populate and return whatever the worker has already
+        # written — empty is fine, the UI handles a zero-candidate state.
+        if not candidates and all_creds:
+            logger.info(
+                "Recommendations cold-start for user %s — no cobweb candidates "
+                "yet, firing background populate and returning empty",
+                user_id[:8],
+            )
+            asyncio.create_task(
+                self._populate_candidates_background(
+                    engine, settings, user_id=user_id,
                 )
             )
-
-        discovery_results = await asyncio.gather(
-            *discovery_tasks, return_exceptions=True,
-        )
-        for result in discovery_results:
-            if isinstance(result, list):
-                candidates.extend(result)
-            elif isinstance(result, Exception):
-                logger.warning("Cross-service discovery failed: %s", result)
 
         # Step 5: Deduplicate candidates across services and strategies
         unique = self._deduplicate_candidates(candidates)
@@ -209,6 +319,9 @@ class RecommendationService:
         )
 
         user_audio_centroid = profile.get("audio_centroid") or None
+        user_clap_centroid = profile.get("clap_centroid") or None
+        user_mert_centroid = profile.get("mert_centroid") or None
+        user_embedding_centroid = profile.get("embedding_centroid") or None
 
         # Step 6b: Load Last.fm tag profile + collaborative matches
         user_tag_profile, collaborative_matches = await self._load_lastfm_data(
@@ -249,37 +362,53 @@ class RecommendationService:
             total = sum(weights.values())
             weights = {k: round(v / total, 4) for k, v in weights.items()}
 
-        # ── Two-pass scoring ─────────────────────────────────
-        # Pass 1: Score on non-audio dimensions (instant)
-        pre_ranked = rank_candidates(
-            unique, profile, count=min(limit * 3, 30),
-            weights=weights,
-            calibration_artists=calibration_artists,
-            user_tag_profile=user_tag_profile,
-            collaborative_matches=collaborative_matches,
+        # ── Single-pass scoring (embeddings pre-loaded) ──────
+        # Load audio features from cache only — NEVER run Essentia at
+        # recommendation time. Essentia is ~1-2s CPU-bound per track and
+        # blocks the event loop (V 6.384 regression: max_to_enrich=200 →
+        # 5-minute stalls → Railway 502). Enrichment is the worker's job;
+        # if a candidate is missing features, scoring degrades gracefully
+        # via compute_context_weights.
+        audio_features_map = await self._load_audio_features(
+            engine, unique, user_id=user_id,
         )
 
-        # Pass 2: Lazy-enrich top candidates, then re-score with audio
-        from musicmind.engine.enrichment.orchestrator import enrich_candidates
+        clap_map, mert_map, embedding_map = await self._load_embeddings(
+            engine, unique, user_id=user_id,
+        )
 
-        audio_features_map = await enrich_candidates(
-            engine, pre_ranked, user_id=user_id,
-            max_to_enrich=min(limit * 2, 30),
+        # Load user library CLAP embeddings for contextual explanations.
+        # V 6.390: restrict to top-30 artists by affinity so the "Similar
+        # to X" reference never cites a track the user doesn't actually
+        # listen to (e.g., auto-added album cuts they've forgotten about).
+        top_artist_names: set[str] = {
+            (a.get("name") or "").lower()
+            for a in (profile.get("top_artists") or [])[:30]
+            if isinstance(a, dict) and a.get("name")
+        }
+        user_library_claps = await self._load_user_library_claps(
+            engine,
+            user_id=user_id,
+            known_artist_names=top_artist_names or None,
         )
 
         ranked = rank_candidates(
-            pre_ranked, profile, count=limit, weights=weights,
+            unique, profile, count=limit, weights=weights,
             audio_features_map=audio_features_map,
             user_audio_centroid=user_audio_centroid,
+            embedding_map=embedding_map or None,
+            user_embedding_centroid=user_embedding_centroid,
+            clap_map=clap_map or None,
+            user_clap_centroid=user_clap_centroid,
+            mert_map=mert_map or None,
+            user_mert_centroid=user_mert_centroid,
             calibration_artists=calibration_artists,
-            user_tag_profile=user_tag_profile,
-            collaborative_matches=collaborative_matches,
+            user_library_claps=user_library_claps or None,
         )
 
-        # Step 9: Build explanations
+        # Step 9: Build response
         items = []
         for result in ranked:
-            explanation = _build_explanation(result.get("_breakdown", {}))
             items.append({
                 "catalog_id": result.get("catalog_id", ""),
                 "name": result.get("name", ""),
@@ -288,12 +417,14 @@ class RecommendationService:
                 "artwork_url": result.get("artwork_url_template", ""),
                 "preview_url": result.get("preview_url", ""),
                 "score": result.get("_score", 0.0),
-                "explanation": explanation,
-                "strategy_source": result.get("_strategy_source", strategy),
+                "explanation": result.get("_explanation", ""),
+                "strategy_source": result.get(
+                    "_strategy_source", strategy,
+                ),
                 "genre_names": result.get("genre_names", []),
+                "mood_tags": result.get("mood_tags", []),
             })
 
-        # Step 10: Return
         return {
             "items": items,
             "strategy": strategy,
@@ -311,69 +442,106 @@ class RecommendationService:
         user_id: str,
         catalog_id: str,
     ) -> dict[str, Any]:
-        """Get the 7-dimension scoring breakdown for a track.
+        """Score breakdown aligned with the 6-dimension embedding pipeline.
 
-        Re-scores the track against the user's latest taste profile and
-        returns overall score, per-dimension scores with weights, and
-        a natural-language explanation.
-
-        Args:
-            engine: SQLAlchemy async engine.
-            encryption: EncryptionService for token decryption.
-            settings: Application settings.
-            user_id: SmarTaste user ID.
-            catalog_id: Catalog ID of the track to score.
-
-        Returns:
-            Dict with catalog_id, overall_score, dimensions, explanation.
-
-        Raises:
-            ValueError: If track not in song_metadata_cache or no profile.
+        Reports the six weighted dimensions (CLAP/MERT/EffNet/genre/scalar/
+        artist) plus additive bonuses (discovery, cross-strategy, mood,
+        calibration) and penalties (diversity, staleness). Looks the song up
+        in song_metadata_cache first, falling back to global_song_cache so
+        discovery candidates also get breakdowns.
         """
+        from musicmind.db.schema import (
+            audio_embeddings,
+            audio_embeddings_global,
+            audio_features_cache,
+            audio_features_global,
+            global_song_cache,
+        )
+        from musicmind.engine.weights import compute_context_weights
+
+        # ── Load song metadata (per-user first, global fallback) ────────
         async with engine.begin() as conn:
-            # Get song metadata
-            song_result = await conn.execute(
-                sa.select(song_metadata_cache).where(
+            song_row = (await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.name,
+                    song_metadata_cache.c.artist_name,
+                    song_metadata_cache.c.genre_names,
+                    song_metadata_cache.c.release_date,
+                    song_metadata_cache.c.isrc,
+                ).where(
                     sa.and_(
                         song_metadata_cache.c.catalog_id == catalog_id,
                         song_metadata_cache.c.user_id == user_id,
                     )
                 )
-            )
-            song_row = song_result.first()
+            )).first()
+            source = "per_user"
+
+            if song_row is None:
+                song_row = (await conn.execute(
+                    sa.select(
+                        global_song_cache.c.catalog_id,
+                        global_song_cache.c.name,
+                        global_song_cache.c.artist_name,
+                        global_song_cache.c.genre_names,
+                        global_song_cache.c.release_date,
+                        global_song_cache.c.isrc,
+                    ).where(global_song_cache.c.catalog_id == catalog_id)
+                )).first()
+                source = "global"
 
             if song_row is None:
                 raise ValueError("Track not found in catalog")
 
-            # Get latest taste profile
-            profile_result = await conn.execute(
+            # ── Load latest taste profile ─────────────────────────────
+            profile_row = (await conn.execute(
                 sa.select(taste_profile_snapshots)
                 .where(taste_profile_snapshots.c.user_id == user_id)
                 .order_by(taste_profile_snapshots.c.computed_at.desc())
                 .limit(1)
-            )
-            profile_row = profile_result.first()
+            )).first()
 
             if profile_row is None:
                 raise ValueError("No taste profile available")
 
-        # Build song dict
-        genre_names = song_row.genre_names
-        if isinstance(genre_names, str):
-            try:
-                genre_names = json.loads(genre_names)
-            except (json.JSONDecodeError, TypeError):
-                genre_names = []
+            # ── Load embeddings + audio features for this track ───────
+            af_row = None
+            emb_row = None
+            if source == "per_user":
+                af_row = (await conn.execute(
+                    sa.select(audio_features_cache).where(
+                        sa.and_(
+                            audio_features_cache.c.catalog_id == catalog_id,
+                            audio_features_cache.c.user_id == user_id,
+                        )
+                    )
+                )).first()
+                emb_row = (await conn.execute(
+                    sa.select(audio_embeddings).where(
+                        sa.and_(
+                            audio_embeddings.c.catalog_id == catalog_id,
+                            audio_embeddings.c.user_id == user_id,
+                        )
+                    )
+                )).first()
 
-        song_dict: dict[str, Any] = {
-            "catalog_id": song_row.catalog_id,
-            "name": song_row.name,
-            "artist_name": song_row.artist_name,
-            "genre_names": genre_names,
-            "release_date": song_row.release_date,
-        }
+            # Fallback to global by ISRC
+            if (af_row is None or emb_row is None) and song_row.isrc:
+                if af_row is None:
+                    af_row = (await conn.execute(
+                        sa.select(audio_features_global).where(
+                            audio_features_global.c.isrc == song_row.isrc
+                        )
+                    )).first()
+                if emb_row is None:
+                    emb_row = (await conn.execute(
+                        sa.select(audio_embeddings_global).where(
+                            audio_embeddings_global.c.isrc == song_row.isrc
+                        )
+                    )).first()
 
-        # Build profile dict
+        # ── Parse JSON columns ──────────────────────────────────────
         def _parse_json(val: Any, default: Any) -> Any:
             if val is None:
                 return default
@@ -384,6 +552,19 @@ class RecommendationService:
                     return default
             return val
 
+        genre_names = _parse_json(song_row.genre_names, [])
+        if isinstance(genre_names, str):
+            genre_names = [genre_names]
+
+        song_dict: dict[str, Any] = {
+            "catalog_id": song_row.catalog_id,
+            "name": song_row.name,
+            "artist_name": song_row.artist_name,
+            "genre_names": genre_names,
+            "release_date": song_row.release_date,
+            "isrc": song_row.isrc,
+        }
+
         profile_dict: dict[str, Any] = {
             "genre_vector": _parse_json(profile_row.genre_vector, {}),
             "top_artists": _parse_json(profile_row.top_artists, []),
@@ -391,43 +572,159 @@ class RecommendationService:
                 profile_row.release_year_distribution, {},
             ),
             "familiarity_score": profile_row.familiarity_score or 0.0,
+            "audio_centroid": _parse_json(profile_row.audio_centroid, {}),
+            "embedding_centroid": _parse_json(profile_row.embedding_centroid, None),
+            "clap_centroid": _parse_json(profile_row.clap_centroid, None),
+            "mert_centroid": _parse_json(profile_row.mert_centroid, None),
         }
 
-        # Score the candidate
-        result = score_candidate(song_dict, profile_dict)
+        # Candidate embeddings + features
+        candidate_clap = None
+        candidate_mert = None
+        candidate_effnet = None
+        audio_features = None
+        if emb_row is not None:
+            candidate_clap = _parse_json(
+                getattr(emb_row, "clap_embedding", None), None,
+            )
+            candidate_mert = _parse_json(
+                getattr(emb_row, "mert_embedding", None), None,
+            )
+            candidate_effnet = _parse_json(
+                getattr(emb_row, "embedding", None), None,
+            )
+            if isinstance(candidate_effnet, list) and len(candidate_effnet) < 10:
+                candidate_effnet = None
+        if af_row is not None:
+            audio_features = {
+                "tempo": getattr(af_row, "tempo", None),
+                "energy": getattr(af_row, "energy", None),
+                "danceability": getattr(af_row, "danceability", None),
+                "brightness": getattr(af_row, "brightness", None),
+                "beat_strength": getattr(af_row, "beat_strength", None),
+                "valence_proxy": getattr(af_row, "valence_proxy", None),
+                "acousticness": getattr(af_row, "acousticness", None),
+            }
 
-        # Map breakdown keys to the 7 reportable dimensions
+        # ── Load mood signal for this track (global_song_cache) ──────
+        candidate_mood_tags: list[str] = []
+        candidate_mood_scores: dict[str, float] | None = None
+        try:
+            async with engine.begin() as conn:
+                row = (await conn.execute(
+                    sa.select(
+                        global_song_cache.c.mood_tags,
+                        global_song_cache.c.mood_scores,
+                    ).where(
+                        global_song_cache.c.catalog_id == catalog_id,
+                    )
+                )).first()
+            if row is not None:
+                tags = row.mood_tags
+                if isinstance(tags, str):
+                    try:
+                        tags = json.loads(tags)
+                    except (ValueError, TypeError):
+                        tags = []
+                if isinstance(tags, list):
+                    candidate_mood_tags = [t for t in tags if isinstance(t, str)]
+                scores = row.mood_scores
+                if isinstance(scores, str):
+                    try:
+                        scores = json.loads(scores)
+                    except (ValueError, TypeError):
+                        scores = None
+                if isinstance(scores, dict):
+                    candidate_mood_scores = {
+                        k: float(v) for k, v in scores.items()
+                        if isinstance(k, str) and isinstance(v, (int, float))
+                    }
+        except Exception:
+            logger.debug(
+                "Could not load mood signal for breakdown", exc_info=True,
+            )
+
+        # Effective (context-adaptive) weights
+        weights = compute_context_weights(
+            profile_dict,
+            has_audio=bool(profile_dict.get("audio_centroid")),
+            has_calibration=False,
+            mood_active=False,
+        )
+
+        # Calibration for this user (may boost artist_match)
+        calibration_artists = await self._load_calibration_artists(
+            engine, user_id=user_id,
+        )
+
+        # ── Score ──────────────────────────────────────────────────
+        result = score_candidate(
+            song_dict, profile_dict,
+            weights=weights,
+            audio_features=audio_features,
+            user_audio_centroid=profile_dict.get("audio_centroid") or None,
+            candidate_embedding=candidate_effnet,
+            user_embedding_centroid=profile_dict.get("embedding_centroid"),
+            candidate_clap=candidate_clap,
+            user_clap_centroid=profile_dict.get("clap_centroid"),
+            candidate_mert=candidate_mert,
+            user_mert_centroid=profile_dict.get("mert_centroid"),
+            calibration_artists=calibration_artists,
+            candidate_mood_tags=candidate_mood_tags or None,
+            candidate_mood_scores=candidate_mood_scores,
+        )
+
         breakdown = result.get("_breakdown", {})
-        dimension_map: list[tuple[str, str, str]] = [
-            ("genre_match", "Genre Match", "genre"),
-            ("audio_similarity", "Audio Similarity", "audio"),
-            ("artist_match", "Artist Affinity", "artist"),
-            ("language_match", "Language/Region", "language"),
+
+        # ── Weighted dimensions (sum to ~1.0 if all present) ────────
+        weighted: list[dict[str, Any]] = [
+            {"name": "clap", "label": "CLAP (audio-semantic)",
+             "score": breakdown.get("clap_similarity", 0.0),
+             "weight": weights.get("clap", 0.0)},
+            {"name": "mert", "label": "MERT (musical structure)",
+             "score": breakdown.get("mert_similarity", 0.0),
+             "weight": weights.get("mert", 0.0)},
+            {"name": "effnet", "label": "EffNet (timbral fingerprint)",
+             "score": breakdown.get("effnet_similarity", 0.0),
+             "weight": weights.get("effnet", 0.0)},
+            {"name": "genre", "label": "Genre match",
+             "score": breakdown.get("genre_match", 0.0),
+             "weight": weights.get("genre", 0.0)},
+            {"name": "scalar", "label": "Scalar audio (tempo/energy)",
+             "score": breakdown.get("scalar_similarity", 0.0),
+             "weight": weights.get("scalar", 0.0)},
+            {"name": "mood_match", "label": "Mood distribution match",
+             "score": breakdown.get("mood_match", 0.0),
+             "weight": weights.get("mood_match", 0.0)},
+            {"name": "artist", "label": "Artist affinity",
+             "score": breakdown.get("artist_match", 0.0),
+             "weight": weights.get("artist", 0.0)},
         ]
 
-        dimensions: list[dict[str, Any]] = []
-        for dim_name, dim_label, weight_key in dimension_map:
-            # Map breakdown keys to dimension names
-            if dim_name == "diversity":
-                score = round(1.0 - breakdown.get("diversity_penalty", 0.0), 3)
-            elif dim_name == "artist_affinity":
-                score = breakdown.get("artist_match", 0.0)
-            elif dim_name == "anti_staleness":
-                score = round(1.0 - breakdown.get("staleness", 0.0), 3)
-            else:
-                score = breakdown.get(dim_name, 0.0)
-
-            dimensions.append({
-                "name": dim_name,
-                "label": dim_label,
-                "score": score,
-                "weight": DEFAULT_WEIGHTS.get(weight_key, 0.0),
-            })
+        # ── Modifiers (additive bonuses + subtractive penalties) ────
+        # weight reflects the ABSOLUTE cap of each modifier; score is the
+        # realized value (positive = bonus, negative = penalty).
+        modifiers: list[dict[str, Any]] = [
+            {"name": "discovery_bonus", "label": "Discovery weight",
+             "score": breakdown.get("discovery_bonus", 0.0), "weight": 0.04},
+            {"name": "cross_strategy_bonus", "label": "Cross-strategy overlap",
+             "score": breakdown.get("cross_strategy_bonus", 0.0), "weight": 0.10},
+            {"name": "calibration_boost", "label": "Calibration boost",
+             "score": breakdown.get("calibration_boost", 0.0), "weight": 0.20},
+            {"name": "mood_boost", "label": "Mood match",
+             "score": breakdown.get("mood_boost", 0.0) * 0.1, "weight": 0.10},
+            {"name": "diversity_penalty", "label": "Diversity penalty",
+             "score": -breakdown.get("diversity_penalty", 0.0) * 0.05, "weight": 0.05},
+            {"name": "staleness", "label": "Staleness penalty",
+             "score": -breakdown.get("staleness", 0.0) * 0.03, "weight": 0.03},
+            {"name": "recency_boost", "label": "Recency boost",
+             "score": breakdown.get("recency_boost", 0.0), "weight": 0.02},
+        ]
 
         return {
             "catalog_id": catalog_id,
             "overall_score": result.get("_score", 0.0),
-            "dimensions": dimensions,
+            "dimensions": weighted + modifiers,
             "explanation": result.get("_explanation", ""),
         }
 
@@ -439,10 +736,10 @@ class RecommendationService:
         catalog_id: str,
         feedback_type: str,
     ) -> None:
-        """Record user feedback on a recommendation.
+        """Record user feedback on a recommendation (stub).
 
-        Stores feedback with optional predicted_score (computed if song and
-        profile data are available) and current weight snapshot.
+        recommendation_feedback table was removed. Logs feedback for now;
+        persistence can be re-added when a new feedback table is introduced.
 
         Args:
             engine: SQLAlchemy async engine.
@@ -450,24 +747,8 @@ class RecommendationService:
             catalog_id: Catalog ID of the track.
             feedback_type: One of thumbs_up, thumbs_down, skip.
         """
-        # Attempt to compute predicted_score
-        predicted_score = await self._compute_predicted_score(
-            engine, user_id=user_id, catalog_id=catalog_id,
-        )
-
-        async with engine.begin() as conn:
-            await conn.execute(
-                recommendation_feedback.insert().values(
-                    user_id=user_id,
-                    catalog_id=catalog_id,
-                    feedback_type=feedback_type,
-                    predicted_score=predicted_score,
-                    weight_snapshot=json.dumps(DEFAULT_WEIGHTS),
-                )
-            )
-
         logger.info(
-            "Recorded %s feedback for catalog_id=%s user=%s",
+            "Received %s feedback for catalog_id=%s user=%s (not persisted — table removed)",
             feedback_type, catalog_id, user_id,
         )
 
@@ -618,6 +899,7 @@ class RecommendationService:
         developer_token: str | None,
         storefront: str = "us",
         profile_genres: list[str] | None = None,
+        seed_scored: list[tuple[str, float]] | None = None,
     ) -> list[dict[str, Any]]:
         """Run discovery strategies and tag candidates with source strategy."""
         candidates: list[dict[str, Any]] = []
@@ -661,10 +943,12 @@ class RecommendationService:
             return results[:3]  # Absolute fallback
 
         async def _run_similar_artists() -> list[dict[str, Any]]:
+            scored = seed_scored or []
             results = await discover_similar_artists(
-                service, access_token, seed_artist_names,
+                service, access_token, scored,
                 developer_token=developer_token,
                 storefront=storefront,
+                total_budget=40,
             )
             results = _filter_by_genre_overlap(results)
             for c in results:
@@ -733,6 +1017,139 @@ class RecommendationService:
                     logger.exception("Discovery strategy '%s' failed", strategy)
 
         return candidates
+
+    @staticmethod
+    async def _load_candidates_from_db(
+        engine,
+        *,
+        user_id: str,
+        strategy: str = "all",
+    ) -> list[dict[str, Any]]:
+        """Read worker-populated discovery candidates from recommendation_candidates.
+
+        Joins with global_song_cache for metadata. Aggregates per catalog_id:
+        - _strategy_count: how many distinct strategies surfaced this track
+        - _discovery_weight: max weight across strategies
+        - _strategy_source: name of the highest-weight strategy
+        """
+        from musicmind.db.schema import (
+            global_song_cache,
+            recommendation_candidates as rc,
+        )
+
+        async with engine.begin() as conn:
+            stmt = sa.select(
+                rc.c.catalog_id,
+                rc.c.strategy_source,
+                rc.c.discovery_weight,
+                rc.c.service_source,
+                global_song_cache.c.name,
+                global_song_cache.c.artist_name,
+                global_song_cache.c.album_name,
+                global_song_cache.c.genre_names,
+                global_song_cache.c.isrc,
+                global_song_cache.c.duration_ms,
+                global_song_cache.c.release_date,
+                global_song_cache.c.preview_url,
+                global_song_cache.c.artwork_url,
+                global_song_cache.c.mood_tags,
+                global_song_cache.c.mood_scores,
+            ).select_from(
+                rc.join(
+                    global_song_cache,
+                    rc.c.catalog_id == global_song_cache.c.catalog_id,
+                )
+            ).where(rc.c.user_id == user_id)
+
+            if strategy != "all":
+                stmt = stmt.where(rc.c.strategy_source == strategy)
+
+            result = await conn.execute(stmt)
+            rows = result.fetchall()
+
+        # Aggregate by catalog_id
+        by_cid: dict[str, dict[str, Any]] = {}
+        strategy_counts: dict[str, set[str]] = {}
+        max_weights: dict[str, tuple[float, str]] = {}
+
+        for row in rows:
+            cid = row.catalog_id
+            if not cid:
+                continue
+            genres = row.genre_names
+            if isinstance(genres, str):
+                try:
+                    genres = json.loads(genres)
+                except (ValueError, TypeError):
+                    genres = []
+            if cid not in by_cid:
+                mood_tags = row.mood_tags
+                if isinstance(mood_tags, str):
+                    try:
+                        mood_tags = json.loads(mood_tags)
+                    except (ValueError, TypeError):
+                        mood_tags = []
+                if not isinstance(mood_tags, list):
+                    mood_tags = []
+                mood_scores = row.mood_scores
+                if isinstance(mood_scores, str):
+                    try:
+                        mood_scores = json.loads(mood_scores)
+                    except (ValueError, TypeError):
+                        mood_scores = None
+                if not isinstance(mood_scores, dict):
+                    mood_scores = None
+                by_cid[cid] = {
+                    "catalog_id": cid,
+                    "name": row.name or "",
+                    "artist_name": row.artist_name or "",
+                    "album_name": row.album_name or "",
+                    "genre_names": genres or [],
+                    "isrc": row.isrc,
+                    "duration_ms": row.duration_ms,
+                    "release_date": row.release_date,
+                    "preview_url": row.preview_url or "",
+                    "service_source": row.service_source or "",
+                    "artwork_url_template": row.artwork_url or "",
+                    "mood_tags": mood_tags,
+                    "mood_scores": mood_scores,
+                }
+                strategy_counts[cid] = set()
+                max_weights[cid] = (0.0, "")
+            strategy_counts[cid].add(row.strategy_source)
+            dw = float(row.discovery_weight or 0.0)
+            if dw >= max_weights[cid][0]:
+                max_weights[cid] = (dw, row.strategy_source)
+
+        for cid, c in by_cid.items():
+            c["_strategy_count"] = len(strategy_counts[cid])
+            best_dw, best_strat = max_weights[cid]
+            c["_discovery_weight"] = best_dw
+            c["_strategy_source"] = best_strat or "db"
+
+        return list(by_cid.values())
+
+    @staticmethod
+    async def _populate_candidates_background(
+        engine,
+        settings,
+        *,
+        user_id: str,
+    ) -> None:
+        """Fire-and-forget: trigger worker-side discovery for this user.
+
+        Runs the same _run_discovery_for_user that the worker uses on each
+        cycle; the 6h cadence guard inside it prevents redundant runs if the
+        worker already touched this user recently.
+        """
+        try:
+            from musicmind.worker import _run_discovery_for_user
+            await _run_discovery_for_user(engine, settings, user_id=user_id)
+        except Exception:
+            logger.warning(
+                "Background candidate populate failed for user %s",
+                user_id[:8], exc_info=True,
+            )
 
     @staticmethod
     def _deduplicate_candidates(
@@ -828,95 +1245,13 @@ class RecommendationService:
         *,
         user_id: str,
     ) -> tuple[dict[str, float] | None, set[str] | None]:
-        """Load Last.fm tag profile and collaborative matches for a user.
+        """Return empty Last.fm data (tables removed).
 
-        Returns:
-            Tuple of (user_tag_profile, collaborative_matches).
-            - user_tag_profile: aggregated tag weights from user's top songs
-            - collaborative_matches: set of "artist:title" keys from Last.fm
-              getSimilar for the user's top songs
+        lastfm_tags_cache and lastfm_similar_tracks tables were removed.
+        Returns (None, None) so the scorer gracefully degrades without
+        tag similarity or collaborative match dimensions.
         """
-        from collections import Counter
-
-        from musicmind.db.schema import (
-            lastfm_similar_tracks,
-            lastfm_tags_cache,
-            song_metadata_cache,
-        )
-
-        # Get user's top songs (most recent 100)
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(
-                    song_metadata_cache.c.artist_name,
-                    song_metadata_cache.c.name,
-                )
-                .where(song_metadata_cache.c.user_id == user_id)
-                .order_by(song_metadata_cache.c.fetched_at.desc())
-                .limit(100)
-            )
-            user_songs = [
-                (row.artist_name, row.name) for row in result if row.artist_name and row.name
-            ]
-
-        if not user_songs:
-            return None, None
-
-        # Build user tag profile: aggregate tags from cached Last.fm tags
-        tag_counter: Counter[str] = Counter()
-        async with engine.begin() as conn:
-            for artist, title in user_songs[:50]:
-                entity_id = f"track:{artist.lower()}:{title.lower()}"
-                result = await conn.execute(
-                    sa.select(lastfm_tags_cache.c.tags).where(
-                        lastfm_tags_cache.c.entity_id == entity_id
-                    )
-                )
-                row = result.first()
-                if row and row.tags:
-                    tags = row.tags
-                    if isinstance(tags, str):
-                        import json
-
-                        try:
-                            tags = json.loads(tags)
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-                    for tag_name, weight in tags.items():
-                        tag_counter[tag_name] += weight
-
-        user_tag_profile: dict[str, float] | None = None
-        if tag_counter:
-            max_val = max(tag_counter.values())
-            user_tag_profile = {
-                k: round(v / max_val, 3) for k, v in tag_counter.most_common(30)
-            }
-
-        # Load collaborative matches: all similar tracks from user's top songs
-        collaborative_matches: set[str] = set()
-        async with engine.begin() as conn:
-            for artist, title in user_songs[:30]:
-                result = await conn.execute(
-                    sa.select(
-                        lastfm_similar_tracks.c.similar_artist,
-                        lastfm_similar_tracks.c.similar_title,
-                    ).where(
-                        sa.and_(
-                            sa.func.lower(lastfm_similar_tracks.c.source_artist)
-                            == artist.lower(),
-                            sa.func.lower(lastfm_similar_tracks.c.source_title)
-                            == title.lower(),
-                        )
-                    )
-                )
-                for row in result:
-                    key = f"{row.similar_artist.lower()}:{row.similar_title.lower()}"
-                    collaborative_matches.add(key)
-
-        return (
-            user_tag_profile,
-            collaborative_matches if collaborative_matches else None,
-        )
+        return None, None
 
     @staticmethod
     async def _load_calibration_artists(
@@ -950,35 +1285,290 @@ class RecommendationService:
         return {row.item_id: row.weight for row in rows}
 
     @staticmethod
+    async def _load_embeddings(
+        engine,
+        candidates: list[dict[str, Any]],
+        *,
+        user_id: str,
+    ) -> tuple[
+        dict[str, list[float]],
+        dict[str, list[float]],
+        dict[str, list[float]],
+    ]:
+        """Load CLAP/MERT/EffNet embeddings for candidate tracks.
+
+        Checks user-scoped audio_embeddings first, then falls back to
+        global audio_embeddings_global via ISRC for cross-user sharing.
+
+        Returns (clap_map, mert_map, effnet_map) — catalog_id keyed.
+        """
+        from musicmind.db.schema import audio_embeddings, audio_embeddings_global
+
+        clap_map: dict[str, list[float]] = {}
+        mert_map: dict[str, list[float]] = {}
+        effnet_map: dict[str, list[float]] = {}
+
+        catalog_ids = [
+            c.get("catalog_id", "") for c in candidates
+            if c.get("catalog_id")
+        ]
+        if not catalog_ids:
+            return clap_map, mert_map, effnet_map
+
+        # User-scoped embeddings
+        for i in range(0, len(catalog_ids), 500):
+            chunk = catalog_ids[i:i + 500]
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(
+                            audio_embeddings.c.catalog_id,
+                            audio_embeddings.c.embedding,
+                            audio_embeddings.c.clap_embedding,
+                            audio_embeddings.c.mert_embedding,
+                        ).where(
+                            sa.and_(
+                                audio_embeddings.c.user_id == user_id,
+                                audio_embeddings.c.catalog_id.in_(chunk),
+                            )
+                        )
+                    )
+                    for row in result:
+                        cid = row.catalog_id
+                        emb = row.embedding
+                        if emb and isinstance(emb, list) and len(emb) > 10:
+                            effnet_map[cid] = emb
+                        clap = row.clap_embedding
+                        if clap and isinstance(clap, list) and len(clap) > 10:
+                            clap_map[cid] = clap
+                        mert = row.mert_embedding
+                        if mert and isinstance(mert, list) and len(mert) > 10:
+                            mert_map[cid] = mert
+            except Exception:
+                logger.debug("Failed to load user embeddings", exc_info=True)
+
+        # Global ISRC fallback for candidates not found in user table
+        missing = [
+            c for c in candidates
+            if c.get("catalog_id", "") not in clap_map
+            and c.get("isrc")
+        ]
+        if missing:
+            isrcs = [c["isrc"] for c in missing]
+            isrc_to_cid = {c["isrc"]: c["catalog_id"] for c in missing}
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(
+                            audio_embeddings_global.c.isrc,
+                            audio_embeddings_global.c.embedding,
+                            audio_embeddings_global.c.clap_embedding,
+                            audio_embeddings_global.c.mert_embedding,
+                        ).where(
+                            audio_embeddings_global.c.isrc.in_(isrcs)
+                        )
+                    )
+                    for row in result:
+                        cid = isrc_to_cid.get(row.isrc, "")
+                        if not cid:
+                            continue
+                        emb = row.embedding
+                        if (
+                            emb and isinstance(emb, list)
+                            and len(emb) > 10 and cid not in effnet_map
+                        ):
+                            effnet_map[cid] = emb
+                        clap = row.clap_embedding
+                        if (
+                            clap and isinstance(clap, list)
+                            and len(clap) > 10 and cid not in clap_map
+                        ):
+                            clap_map[cid] = clap
+                        mert = row.mert_embedding
+                        if (
+                            mert and isinstance(mert, list)
+                            and len(mert) > 10 and cid not in mert_map
+                        ):
+                            mert_map[cid] = mert
+            except Exception:
+                logger.debug(
+                    "Failed to load global embeddings", exc_info=True,
+                )
+
+        return clap_map, mert_map, effnet_map
+
+    @staticmethod
+    async def _load_audio_features(
+        engine,
+        candidates: list[dict[str, Any]],
+        *,
+        user_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Load cached audio features (scalar tempo/energy/etc) — read-only.
+
+        Per-user ``audio_features_cache`` first, then ``audio_features_global``
+        via ISRC for candidates not found in the user table. Does NOT run
+        Essentia extraction; missing candidates simply don't get features
+        and the scorer degrades gracefully.
+        """
+        from musicmind.db.schema import (
+            audio_features_cache,
+            audio_features_global,
+        )
+
+        af_map: dict[str, dict[str, Any]] = {}
+        catalog_ids = [
+            c.get("catalog_id", "") for c in candidates if c.get("catalog_id")
+        ]
+        if not catalog_ids:
+            return af_map
+
+        fields = (
+            "tempo", "energy", "brightness", "danceability",
+            "acousticness", "valence_proxy", "beat_strength",
+            "key", "scale", "instrumentalness", "loudness",
+        )
+
+        for i in range(0, len(catalog_ids), 500):
+            chunk = catalog_ids[i:i + 500]
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(audio_features_cache).where(
+                            sa.and_(
+                                audio_features_cache.c.user_id == user_id,
+                                audio_features_cache.c.catalog_id.in_(chunk),
+                            )
+                        )
+                    )
+                    for row in result:
+                        row_features = {
+                            f: getattr(row, f, None) for f in fields
+                            if getattr(row, f, None) is not None
+                        }
+                        if row_features:
+                            af_map[row.catalog_id] = row_features
+            except Exception:
+                logger.debug(
+                    "Failed to load per-user audio features", exc_info=True,
+                )
+
+        missing = [
+            c for c in candidates
+            if c.get("catalog_id", "") not in af_map and c.get("isrc")
+        ]
+        if missing:
+            isrcs = [c["isrc"] for c in missing]
+            isrc_to_cid = {c["isrc"]: c["catalog_id"] for c in missing}
+            try:
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(audio_features_global).where(
+                            audio_features_global.c.isrc.in_(isrcs)
+                        )
+                    )
+                    for row in result:
+                        cid = isrc_to_cid.get(row.isrc, "")
+                        if not cid or cid in af_map:
+                            continue
+                        row_features = {
+                            f: getattr(row, f, None) for f in fields
+                            if getattr(row, f, None) is not None
+                        }
+                        if row_features:
+                            af_map[cid] = row_features
+            except Exception:
+                logger.debug(
+                    "Failed to load global audio features", exc_info=True,
+                )
+
+        return af_map
+
+    @staticmethod
+    async def _load_user_library_claps(
+        engine,
+        *,
+        user_id: str,
+        known_artist_names: set[str] | None = None,
+    ) -> dict[str, dict[str, Any]] | None:
+        """Load CLAP embeddings for user's library songs (contextual explanations).
+
+        Returns {catalog_id: {"name": str, "artist_name": str, "clap": list[float]}}
+        for songs that have CLAP embeddings, or None if empty.
+
+        V 6.390: when `known_artist_names` is provided (lowercased primary
+        artist names from the user's top-affinity set), the result is filtered
+        to tracks whose primary artist the user actively listens to. Fixes
+        the "Similar to <track user doesn't remember>" bug — Apple Music's
+        library includes tracks from albums the user added wholesale plus
+        other auto-added rows, which the user doesn't think of as their own.
+        """
+        from musicmind.db.schema import audio_embeddings
+        from musicmind.engine.profile import parse_artists
+
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.name,
+                    song_metadata_cache.c.artist_name,
+                    audio_embeddings.c.clap_embedding,
+                ).select_from(
+                    song_metadata_cache.join(
+                        audio_embeddings,
+                        sa.and_(
+                            song_metadata_cache.c.catalog_id == audio_embeddings.c.catalog_id,
+                            song_metadata_cache.c.user_id == audio_embeddings.c.user_id,
+                        ),
+                    )
+                ).where(
+                    sa.and_(
+                        song_metadata_cache.c.user_id == user_id,
+                        audio_embeddings.c.clap_embedding.isnot(None),
+                        sa.or_(
+                            song_metadata_cache.c.library_id.isnot(None),
+                            song_metadata_cache.c.date_added_to_library.isnot(None),
+                        ),
+                    )
+                )
+            )
+            out: dict[str, dict[str, Any]] = {}
+            for row in result:
+                # Affinity filter: primary artist must be in the user's
+                # known-artist set. Skip feat-only matches — the reference
+                # track should be one the user clearly owns by a known name.
+                if known_artist_names is not None:
+                    parsed = parse_artists(row.artist_name or "")
+                    primary = parsed[0][0].lower() if parsed else ""
+                    if primary not in known_artist_names:
+                        continue
+                clap = row.clap_embedding
+                if isinstance(clap, str):
+                    try:
+                        clap = json.loads(clap)
+                    except (ValueError, TypeError):
+                        continue
+                if clap and isinstance(clap, list) and len(clap) > 10:
+                    out[row.catalog_id] = {
+                        "name": row.name or "",
+                        "artist_name": row.artist_name or "",
+                        "clap": clap,
+                    }
+
+        return out if out else None
+
+    @staticmethod
     async def _load_adaptive_weights(
         engine,
         *,
         user_id: str,
     ) -> tuple[dict[str, float], bool]:
-        """Load feedback and compute adaptive weights if sufficient data.
+        """Return default weights (feedback table removed).
 
-        Returns:
-            Tuple of (weights dict, whether weights were adapted).
+        recommendation_feedback table was removed. Always returns
+        default weights with adapted=False until a new feedback
+        persistence mechanism is introduced.
         """
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(recommendation_feedback).where(
-                    recommendation_feedback.c.user_id == user_id,
-                )
-            )
-            rows = result.fetchall()
-
-        if len(rows) >= MIN_FEEDBACK_FOR_OPTIMIZATION:
-            feedback_dicts = [
-                {
-                    "feedback_type": row.feedback_type,
-                    "predicted_score": row.predicted_score,
-                }
-                for row in rows
-            ]
-            weights = optimize_weights(feedback_dicts)
-            return weights, True
-
         return dict(DEFAULT_WEIGHTS), False
 
     @staticmethod

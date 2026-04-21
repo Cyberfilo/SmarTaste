@@ -15,10 +15,24 @@ from fastapi import (
 )
 
 from musicmind.api.rate_limit import TASTE_LIMIT, limiter
+from musicmind.api.taste.insights import (
+    clean_genre_vector,
+    compute_breadth_metrics,
+    compute_sonic_neighbors,
+    get_artist_artworks,
+    get_library_distributions,
+    get_recent_enrichments,
+)
 from musicmind.api.taste.schemas import (
     ArtistEntry,
     AudioTraitsResponse,
+    BreadthMetrics,
     GenreEntry,
+    LibraryDistributionsResponse,
+    RecentEnrichment,
+    RecentEnrichmentsResponse,
+    SonicNeighbor,
+    SonicNeighborsResponse,
     TasteProfileResponse,
     TopArtistsResponse,
     TopGenresResponse,
@@ -153,16 +167,63 @@ async def get_profile(
             detail="Failed to build taste profile",
         )
 
+    raw_artists = profile.get("top_artists", [])
+    artist_names = [
+        a["name"]
+        for a in raw_artists
+        if isinstance(a, dict) and a.get("name")
+    ]
+    # Generate an Apple developer token for catalog search fallback on artist
+    # artwork (required when the user's library rows have empty artwork
+    # templates — which is true for any library indexed before V 6.365).
+    developer_token: str | None = None
+    try:
+        from musicmind.api.services.service import generate_apple_developer_token
+
+        settings = request.app.state.settings
+        developer_token = generate_apple_developer_token(
+            settings.apple_team_id,
+            settings.apple_key_id,
+            settings.apple_private_key_path,
+            private_key_b64=settings.apple_private_key_b64,
+        )
+    except Exception:
+        logger.debug(
+            "Apple developer token generation failed; "
+            "artist artwork will fall back to library-only lookup"
+        )
+
+    try:
+        artworks = await get_artist_artworks(
+            request.app.state.engine,
+            user_id=current_user["user_id"],
+            artist_names=artist_names,
+            developer_token=developer_token,
+        )
+    except Exception:
+        logger.debug("Artist artwork lookup failed; returning profile without artwork")
+        artworks = {}
+
     top_artists = [
         ArtistEntry(
             name=a["name"],
             score=a["score"],
             song_count=a["song_count"],
+            sample_artwork_url=(artworks.get((a["name"] or "").lower()) or None),
         )
         if isinstance(a, dict)
         else a
-        for a in profile.get("top_artists", [])
+        for a in raw_artists
     ]
+
+    # Clean genre vector for display — strip "" / "Musica" noise + merge
+    # redundant parent genres that Apple sometimes double-tags.
+    cleaned_genres = clean_genre_vector(profile.get("genre_vector", {}) or {})
+
+    breadth_raw = compute_breadth_metrics(
+        genre_vector=cleaned_genres,
+        top_artists=raw_artists if isinstance(raw_artists, list) else [],
+    )
 
     return TasteProfileResponse(
         service=profile.get("service", ""),
@@ -170,11 +231,13 @@ async def get_profile(
         total_songs_analyzed=profile.get("total_songs_analyzed", 0),
         listening_hours_estimated=profile.get("listening_hours_estimated", 0.0),
         familiarity_score=profile.get("familiarity_score", 0.0),
-        genre_vector=profile.get("genre_vector", {}),
+        genre_vector=cleaned_genres,
         top_artists=top_artists,
         audio_trait_preferences=profile.get("audio_trait_preferences", {}),
+        audio_centroid=profile.get("audio_centroid", {}) or {},
         release_year_distribution=profile.get("release_year_distribution", {}),
         services_included=profile.get("services_included", []),
+        breadth=BreadthMetrics(**breadth_raw),
     )
 
 
@@ -362,6 +425,7 @@ async def get_audio_traits(
 
 
 @router.get("/enrichment-status")
+@limiter.limit(TASTE_LIMIT)
 async def enrichment_status(
     request: Request,
     current_user: dict = Depends(get_current_user),
@@ -425,6 +489,143 @@ async def enrichment_status(
         "complete": enriched >= total and total > 0 and not user_indexing,
         "indexing": user_indexing,
     }
+
+
+# ── Sonic Neighbors (CLAP-centroid discovery) ────────────────────────────
+
+
+@router.get("/sonic-neighbors")
+@limiter.limit(TASTE_LIMIT)
+async def get_sonic_neighbors(
+    request: Request,
+    limit: int = Query(default=8, ge=1, le=24),
+    service: str | None = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+) -> SonicNeighborsResponse:
+    """Artists whose CLAP embeddings most closely match the user's library centroid.
+
+    Reads the user's `clap_centroid` from the latest taste snapshot, scores a
+    sample of global CLAP-enriched catalog tracks against it, groups by artist
+    (excluding artists already in the user's library), and returns the top N.
+
+    If no CLAP centroid exists yet (new user, or GPU backfill still catching up),
+    returns an empty list with a `note` explaining why.
+    """
+    engine = request.app.state.engine
+    user_id = current_user["user_id"]
+
+    try:
+        profile = await taste_service.get_profile(
+            engine,
+            request.app.state.encryption,
+            request.app.state.settings,
+            user_id=user_id,
+            service=service,
+            force_refresh=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception("Failed to fetch profile for sonic-neighbors")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch sonic neighbors",
+        )
+
+    centroid = profile.get("clap_centroid")
+    resolved_service = profile.get("service", service or "")
+
+    if not centroid:
+        return SonicNeighborsResponse(
+            service=resolved_service,
+            neighbors=[],
+            note=(
+                "Sonic neighbors are not available yet — the GPU enrichment of "
+                "your library is still in progress. Check back once the CLAP "
+                "embeddings finish computing."
+            ),
+        )
+
+    try:
+        raw = await compute_sonic_neighbors(
+            engine, user_id=user_id, clap_centroid=centroid, limit=limit,
+        )
+    except Exception:
+        logger.exception("compute_sonic_neighbors failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to compute sonic neighbors",
+        )
+
+    neighbors = [SonicNeighbor(**n) for n in raw]
+    return SonicNeighborsResponse(
+        service=resolved_service,
+        neighbors=neighbors,
+        note=None if neighbors else "No matching discovery artists found yet.",
+    )
+
+
+@router.get("/distributions")
+@limiter.limit(TASTE_LIMIT)
+async def get_distributions_endpoint(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+) -> LibraryDistributionsResponse:
+    """Aggregated Essentia enrichment ready for interactive charts.
+
+    Returns tempo histogram (7 BPM buckets), key × mode (12 keys × major/minor),
+    acousticness + valence histograms (10 buckets each), and an energy ×
+    danceability scatter sample (up to 200 points with track metadata for
+    tooltip display). Computed on the fly from audio_features_cache — no cache
+    layer, query is <50ms for libraries under 5000 songs.
+    """
+    engine = request.app.state.engine
+    user_id = current_user["user_id"]
+
+    try:
+        data = await get_library_distributions(engine, user_id=user_id)
+    except Exception:
+        logger.exception("get_library_distributions failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to compute library distributions",
+        )
+
+    return LibraryDistributionsResponse(**data)
+
+
+@router.get("/recent-enrichments")
+@limiter.limit(TASTE_LIMIT)
+async def get_recent_enrichments_endpoint(
+    request: Request,
+    limit: int = Query(default=12, ge=1, le=50),
+    current_user: dict = Depends(get_current_user),
+) -> RecentEnrichmentsResponse:
+    """Last N songs the enrichment pipeline processed for this user.
+
+    Joins audio_features_cache (ordered by enriched_at DESC with analyzed_at
+    fallback) with song_metadata_cache for display names and artwork. Used
+    by the dashboard to show "what we just learned about your taste."
+    """
+    engine = request.app.state.engine
+    user_id = current_user["user_id"]
+
+    try:
+        items_raw = await get_recent_enrichments(
+            engine, user_id=user_id, limit=limit,
+        )
+    except Exception:
+        logger.exception("get_recent_enrichments failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch recent enrichments",
+        )
+
+    items = [RecentEnrichment(**i) for i in items_raw]
+    return RecentEnrichmentsResponse(items=items, total=len(items))
 
 
 # ── Background Profile Refresh ───────────────────────────────────────────

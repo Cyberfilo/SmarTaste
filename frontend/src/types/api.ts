@@ -28,6 +28,13 @@ export interface ArtistEntry {
   name: string;
   score: number;
   song_count: number;
+  sample_artwork_url?: string | null;
+}
+
+export interface BreadthMetrics {
+  genre_entropy: number;
+  artist_concentration: number;
+  sonic_breadth: number;
 }
 
 export interface TasteProfile {
@@ -39,8 +46,80 @@ export interface TasteProfile {
   genre_vector: Record<string, number>;
   top_artists: ArtistEntry[];
   audio_trait_preferences: Record<string, number>;
+  audio_centroid?: Record<string, number>;
   release_year_distribution: Record<string, number>;
   services_included: string[];
+  breadth?: BreadthMetrics | null;
+}
+
+export interface SonicNeighbor {
+  artist_name: string;
+  similarity: number;
+  sample_song_name: string;
+  sample_catalog_id: string;
+  sample_album_name: string;
+  artwork_url: string;
+  genre_names: string[];
+}
+
+export interface SonicNeighborsResponse {
+  service: string;
+  neighbors: SonicNeighbor[];
+  note: string | null;
+}
+
+export interface RecentEnrichment {
+  catalog_id: string;
+  name: string;
+  artist_name: string;
+  album_name: string;
+  artwork_url: string;
+  enriched_at: string | null;
+  tempo: number | null;
+  energy: number | null;
+  danceability: number | null;
+}
+
+export interface RecentEnrichmentsResponse {
+  items: RecentEnrichment[];
+  total: number;
+}
+
+export interface TempoBin {
+  range: string;
+  count: number;
+  low: number;
+  high: number;
+}
+
+export interface KeyBucket {
+  key: string;
+  major: number;
+  minor: number;
+}
+
+export interface DistributionBucket {
+  bucket: string;
+  count: number;
+}
+
+export interface ScatterPoint {
+  catalog_id: string;
+  name: string;
+  artist_name: string;
+  energy: number;
+  danceability: number;
+}
+
+export interface LibraryDistributionsResponse {
+  total_songs: number;
+  avg_tempo: number;
+  total_keyed: number;
+  tempo_histogram: TempoBin[];
+  key_distribution: KeyBucket[];
+  acousticness_histogram: DistributionBucket[];
+  valence_histogram: DistributionBucket[];
+  scatter: ScatterPoint[];
 }
 
 export interface TopGenresResponse {

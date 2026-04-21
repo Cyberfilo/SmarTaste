@@ -21,16 +21,15 @@ async def get_enrichment_diagnostics(
     """Smart per-user enrichment diagnostics with failure breakdown.
 
     Returns for EACH user:
-    - Per-stage counts: audio/tags/credits (library vs non-library)
+    - Per-stage counts: audio/embeddings/AI (library vs non-library)
     - Failed vs pending vs complete breakdown
     - Failure reasons from feature_source markers
     - Actionable insights (what the system should do next)
     """
     from musicmind.db.schema import (
         artist_cobweb,
+        audio_embeddings,
         audio_features_cache,
-        kg_relationships,
-        lastfm_tags_cache,
         song_metadata_cache,
         user_indexing_status,
         users,
@@ -119,7 +118,7 @@ async def get_enrichment_diagnostics(
             )
             lib_audio_enriched = lib_enriched_q.scalar() or 0
 
-            # Library songs that permanently failed (Deezer couldn't find)
+            # Library songs that permanently failed (no preview available)
             lib_song_ids = sa.select(song_metadata_cache.c.catalog_id).where(
                 sa.and_(
                     song_metadata_cache.c.user_id == uid,
@@ -143,70 +142,35 @@ async def get_enrichment_diagnostics(
             )
             lib_audio_failed = lib_failed_q.scalar() or 0
 
-            # ── Last.fm tags count for this user's songs ───────────
-            user_eids_q = await conn.execute(
+            # ── GPU embeddings (CLAP + MERT) for this user ─────────
+            gpu_q = await conn.execute(
                 sa.select(
-                    sa.func.count(sa.distinct(
-                        sa.func.concat(
-                            sa.literal("track:"),
-                            sa.func.lower(song_metadata_cache.c.artist_name),
-                            sa.literal(":"),
-                            sa.func.lower(song_metadata_cache.c.name),
+                    sa.func.count().label("total"),
+                    sa.func.count().filter(
+                        audio_embeddings.c.clap_embedding.isnot(None)
+                    ).label("clap"),
+                    sa.func.count().filter(
+                        audio_embeddings.c.mert_embedding.isnot(None)
+                    ).label("mert"),
+                ).where(audio_embeddings.c.user_id == uid)
+            )
+            gpu = gpu_q.first()
+
+            # ── AI enrichment for this user (captions + tags) ─────
+            ai_q = await conn.execute(
+                sa.select(
+                    sa.func.count().filter(
+                        sa.and_(
+                            song_metadata_cache.c.ai_caption.isnot(None),
+                            song_metadata_cache.c.ai_caption != "",
                         )
-                    ))
-                ).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == uid,
-                        song_metadata_cache.c.artist_name.isnot(None),
-                        song_metadata_cache.c.name.isnot(None),
-                    )
-                )
+                    ).label("captions"),
+                    sa.func.count().filter(
+                        song_metadata_cache.c.ai_tags.isnot(None)
+                    ).label("tags"),
+                ).where(song_metadata_cache.c.user_id == uid)
             )
-            total_possible_tags = user_eids_q.scalar() or 0
-
-            # Count cached tags (approximate — entity_id matching is expensive)
-            tags_count_q = await conn.execute(
-                sa.select(sa.func.count()).select_from(lastfm_tags_cache).where(
-                    lastfm_tags_cache.c.entity_type == "track"
-                )
-            )
-            total_tags = tags_count_q.scalar() or 0
-
-            # ── MusicBrainz credits for user's ISRCs ───────────────
-            user_isrcs_q = await conn.execute(
-                sa.select(sa.func.count(sa.distinct(
-                    song_metadata_cache.c.isrc
-                ))).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == uid,
-                        song_metadata_cache.c.isrc.isnot(None),
-                        song_metadata_cache.c.isrc != "",
-                    )
-                )
-            )
-            user_isrcs = user_isrcs_q.scalar() or 0
-
-            user_missing_isrc_q = await conn.execute(
-                sa.select(sa.func.count()).where(
-                    sa.and_(
-                        song_metadata_cache.c.user_id == uid,
-                        sa.or_(
-                            song_metadata_cache.c.isrc.is_(None),
-                            song_metadata_cache.c.isrc == "",
-                        ),
-                    )
-                )
-            )
-            missing_isrc = user_missing_isrc_q.scalar() or 0
-
-            credits_q = await conn.execute(
-                sa.select(sa.func.count(sa.distinct(
-                    kg_relationships.c.source_mbid
-                ))).where(
-                    kg_relationships.c.source_mbid.like("isrc:%")
-                )
-            )
-            total_credits = credits_q.scalar() or 0
+            ai = ai_q.first()
 
             # ── Cobweb stats ───────────────────────────────────────
             cobweb_q = await conn.execute(
@@ -240,7 +204,6 @@ async def get_enrichment_diagnostics(
                     "total": total_songs,
                     "library": library_songs,
                     "non_library": non_library,
-                    "missing_isrc": missing_isrc,
                 },
                 "audio_features": {
                     "enriched": audio_enriched,
@@ -255,13 +218,14 @@ async def get_enrichment_diagnostics(
                     "pct": round(audio_enriched / total_songs * 100, 1)
                     if total_songs > 0 else 0,
                 },
-                "tags": {
-                    "possible": total_possible_tags,
-                    "global_cached": total_tags,
+                "gpu_embeddings": {
+                    "total": gpu.total or 0,
+                    "clap": gpu.clap or 0,
+                    "mert": gpu.mert or 0,
                 },
-                "credits": {
-                    "songs_with_isrc": user_isrcs,
-                    "global_credits": total_credits,
+                "ai_enrichment": {
+                    "captions": ai.captions or 0,
+                    "tags": ai.tags or 0,
                 },
                 "cobweb": {
                     "total": cw.total or 0,
@@ -285,17 +249,20 @@ async def get_enrichment_diagnostics(
             SELECT
                 (SELECT count(*) FROM audio_features_global) AS global_features,
                 (SELECT count(*) FROM global_song_cache) AS global_songs,
-                (SELECT count(*) FROM lastfm_tags_cache
-                 WHERE entity_type = 'track') AS total_tags,
-                (SELECT count(DISTINCT source_mbid) FROM kg_relationships
-                 WHERE source_mbid LIKE 'isrc:%') AS total_credits
+                (SELECT count(*) FROM audio_embeddings
+                 WHERE clap_embedding IS NOT NULL) AS gpu_embeddings,
+                (SELECT count(*) FROM song_metadata_cache
+                 WHERE ai_caption IS NOT NULL AND ai_caption != '') AS ai_captions,
+                (SELECT count(*) FROM song_metadata_cache
+                 WHERE ai_tags IS NOT NULL) AS ai_tags
         """))
         g = global_q.first()
         result["totals"] = {
             "global_audio_features": g.global_features or 0,
             "global_songs": g.global_songs or 0,
-            "total_tags": g.total_tags or 0,
-            "total_credits": g.total_credits or 0,
+            "gpu_embeddings": g.gpu_embeddings or 0,
+            "ai_captions": g.ai_captions or 0,
+            "ai_tags": g.ai_tags or 0,
         }
 
     # ── Failure analysis from logs DB ──────────────────────────────
@@ -357,13 +324,17 @@ async def get_enrichment_diagnostics(
     insights = []
     for u in result["users"]:
         af = u["audio_features"]
+        gpu = u["gpu_embeddings"]
+        ai = u["ai_enrichment"]
+        total = u["songs"]["total"]
+
         if af["failed"] > 0:
             insights.append({
                 "level": "info",
                 "user": u["email"],
                 "message": (
                     f"{af['failed']} songs permanently failed audio enrichment "
-                    f"(Deezer couldn't find them). These won't retry."
+                    f"(no preview available). These won't retry."
                 ),
             })
         if af["not_attempted"] > 0:
@@ -390,17 +361,38 @@ async def get_enrichment_diagnostics(
                 "user": u["email"],
                 "message": (
                     f"{af['library_failed']} library songs failed enrichment "
-                    f"(Deezer couldn't find them). "
+                    f"(no preview available). "
                     f"Library audio: {af['library_enriched']}/{u['songs']['library']} OK."
                 ),
             })
-        if u["songs"]["missing_isrc"] > 0:
+        gpu_pending = total - gpu["total"]
+        if gpu_pending > 0:
             insights.append({
                 "level": "info",
                 "user": u["email"],
                 "message": (
-                    f"{u['songs']['missing_isrc']} songs missing ISRC. "
-                    f"ISRC backfill phase resolves ~100/cycle via Deezer."
+                    f"{gpu_pending} songs need GPU enrichment (CLAP/MERT). "
+                    f"Current: {gpu['clap']} CLAP, {gpu['mert']} MERT."
+                ),
+            })
+        caption_pending = total - ai["captions"]
+        if caption_pending > 0:
+            insights.append({
+                "level": "info",
+                "user": u["email"],
+                "message": (
+                    f"{caption_pending} songs missing AI captions. "
+                    f"Current: {ai['captions']}/{total} captioned."
+                ),
+            })
+        tags_pending = total - ai["tags"]
+        if tags_pending > 0:
+            insights.append({
+                "level": "info",
+                "user": u["email"],
+                "message": (
+                    f"{tags_pending} songs missing classifier labels. "
+                    f"Current: {ai['tags']}/{total} classified."
                 ),
             })
 

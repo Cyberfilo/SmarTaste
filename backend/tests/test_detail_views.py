@@ -187,13 +187,14 @@ def auth_cookies(test_user_id: str) -> dict[str, str]:
 # ── RECO-07: Scoring breakdown ───────────────────────────────────────────────
 
 
-async def test_breakdown_returns_7_dimensions(
+async def test_breakdown_returns_6_dimensions_plus_modifiers(
     client: AsyncClient,
     test_engine: AsyncEngine,
     test_user_id: str,
     auth_cookies: dict[str, str],
 ) -> None:
-    """GET /api/recommendations/{catalog_id}/breakdown returns 200 with 7 dimensions (RECO-07)."""
+    """GET /api/recommendations/{catalog_id}/breakdown returns the 6 embedding
+    dimensions + modifiers aligned with the V6.300 scoring pipeline (RECO-07)."""
     await _insert_test_user(test_engine, test_user_id)
     await _insert_song_metadata(test_engine, test_user_id, "sp_breakdown_001")
     await _insert_taste_profile(test_engine, test_user_id)
@@ -211,7 +212,8 @@ async def test_breakdown_returns_7_dimensions(
     assert 0.0 <= data["overall_score"] <= 1.0
 
     assert "dimensions" in data
-    assert len(data["dimensions"]) == 4
+    # 7 weighted embedding dims (V 6.388 added mood_match) + 7 modifiers
+    assert len(data["dimensions"]) == 14
 
     # Each dimension has required fields
     for dim in data["dimensions"]:
@@ -222,12 +224,16 @@ async def test_breakdown_returns_7_dimensions(
         assert isinstance(dim["score"], (int, float))
         assert isinstance(dim["weight"], (int, float))
 
-    # Check expected dimension names
     dim_names = {d["name"] for d in data["dimensions"]}
-    expected = {
-        "language_match", "audio_similarity", "genre_match", "artist_match",
+    weighted = {
+        "clap", "mert", "effnet", "genre", "scalar", "mood_match", "artist",
     }
-    assert dim_names == expected
+    modifiers = {
+        "discovery_bonus", "cross_strategy_bonus", "calibration_boost",
+        "mood_boost", "diversity_penalty", "staleness", "recency_boost",
+    }
+    assert weighted.issubset(dim_names), f"Missing weighted dims: {weighted - dim_names}"
+    assert modifiers.issubset(dim_names), f"Missing modifiers: {modifiers - dim_names}"
 
     assert "explanation" in data
     assert "catalog_id" in data

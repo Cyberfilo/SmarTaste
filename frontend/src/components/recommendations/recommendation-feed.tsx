@@ -1,21 +1,37 @@
 "use client";
 
-import { useState } from "react";
-import { useRecommendations } from "@/hooks/use-recommendations";
-import { StrategySelector } from "./strategy-selector";
-import { MoodFilter } from "./mood-filter";
+import {
+  useRecommendations,
+  type RecommendationMode,
+} from "@/hooks/use-recommendations";
 import { RecommendationCard } from "./recommendation-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
 import { toast } from "sonner";
 import { Music } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+
+const MODE_OPTIONS: {
+  value: RecommendationMode;
+  label: string;
+  hint: string;
+}[] = [
+  { value: "all", label: "All", hint: "Everything the worker found" },
+  {
+    value: "your_artists",
+    label: "Your artists",
+    hint: "Tracks by artists you already listen to (primary or feat)",
+  },
+  {
+    value: "discover",
+    label: "Discover",
+    hint: "New artists with strong matches — library feats boost the score",
+  },
+];
 
 export function RecommendationFeed() {
-  const [strategy, setStrategy] = useState("all");
-  const [mood, setMood] = useState<string | null>(null);
-
-  const { data, isLoading, isError, error } = useRecommendations(strategy, mood);
+  const [mode, setMode] = useState<RecommendationMode>("all");
+  const { data, isLoading, isError, error } = useRecommendations(mode);
 
   useEffect(() => {
     if (isError && error) {
@@ -25,10 +41,27 @@ export function RecommendationFeed() {
 
   return (
     <div className="space-y-6">
-      {/* Controls */}
-      <div className="space-y-4">
-        <StrategySelector value={strategy} onChange={setStrategy} />
-        <MoodFilter value={mood} onChange={setMood} />
+      {/* Mode picker */}
+      <div className="flex flex-wrap gap-2">
+        {MODE_OPTIONS.map((opt) => {
+          const active = mode === opt.value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setMode(opt.value)}
+              title={opt.hint}
+              className={
+                "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors " +
+                (active
+                  ? "border-purple-500 bg-purple-500/15 text-purple-300"
+                  : "border-border bg-card text-muted-foreground hover:text-foreground")
+              }
+            >
+              {opt.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Adapted weights indicator */}

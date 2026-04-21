@@ -11,7 +11,8 @@ class ExtractedFeatures:
     """Full audio feature extraction result from a preview clip.
 
     Scalar features are always present (or None if extraction failed).
-    The embedding field holds the 128-dim Discogs-EffNet vector when available.
+    The embedding field holds the Discogs-EffNet vector when available
+    (1,280-dim via ONNX, or 128-dim via legacy TensorFlow).
     """
 
     # Scalar features
@@ -24,14 +25,28 @@ class ExtractedFeatures:
     loudness_lufs: float | None = None
     brightness: float | None = None
     beat_strength: float | None = None
+    instrumentalness: float | None = None
+    loudness: float | None = None
     key: str | None = None
     scale: str | None = None
 
-    # 128-dim embedding from Discogs-EffNet (or None)
+    # Discogs-EffNet embedding (1,280-dim via ONNX, 128-dim via TF, or None)
     embedding: list[float] | None = None
 
+    # Classifier head outputs (populated from embedding when models available)
+    mood_aggressive: float | None = None
+    mood_happy: float | None = None
+    mood_party: float | None = None
+    mood_relaxed: float | None = None
+    mood_sad: float | None = None
+    voice_instrumental: float | None = None  # probability track is instrumental
+    mood_acoustic: float | None = None
+
+    # Genre tags (Discogs400 multi-label, tag -> probability)
+    genre_tags: dict[str, float] | None = None
+
     def to_scalar_dict(self) -> dict[str, float | None]:
-        """Convert scalar features to legacy audio_features_cache format."""
+        """Convert scalar features to audio_features_cache format."""
         return {
             "tempo": self.tempo,
             "energy": self.energy,
@@ -40,16 +55,27 @@ class ExtractedFeatures:
             "acousticness": self.acousticness,
             "valence_proxy": self.valence,
             "beat_strength": self.beat_strength,
+            "instrumentalness": self.instrumentalness,
+            "loudness": self.loudness,
+            "key": self.key,
+            "scale": self.scale,
+            # Classifier head outputs
+            "mood_aggressive": self.mood_aggressive,
+            "mood_happy": self.mood_happy,
+            "mood_party": self.mood_party,
+            "mood_relaxed": self.mood_relaxed,
+            "mood_sad": self.mood_sad,
+            "voice_instrumental": self.voice_instrumental,
+            "mood_acoustic": self.mood_acoustic,
         }
 
     def to_full_dict(self) -> dict[str, Any]:
-        """Full serialization including embedding."""
+        """Full serialization including embedding and genre tags."""
         d: dict[str, Any] = self.to_scalar_dict()
         d["arousal"] = self.arousal
         d["loudness_lufs"] = self.loudness_lufs
-        d["key"] = self.key
-        d["scale"] = self.scale
         d["embedding"] = self.embedding
+        d["genre_tags"] = self.genre_tags
         return d
 
     @classmethod
@@ -73,12 +99,12 @@ class ExtractedFeatures:
 
 @dataclass
 class AudioEmbedding:
-    """128-dim audio embedding with metadata."""
+    """Audio embedding with metadata (1,280-dim ONNX or 128-dim TF legacy)."""
 
     catalog_id: str
     isrc: str | None = None
     vector: list[float] = field(default_factory=list)
-    model_version: str = "discogs-effnet-bs64"
+    model_version: str = "discogs-effnet-1280"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for storage."""

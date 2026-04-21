@@ -201,7 +201,12 @@ def build_artist_affinity(
     artist_song_counts: dict[str, int] = Counter()
     now = datetime.now(tz=UTC)
 
-    # Library songs: low weight (just having a song doesn't mean you listen)
+    # Library songs — two-pass approach to avoid linear accumulation dominating plays.
+    # Pass 1: accumulate counts, track max decay, record ratings per primary artist.
+    library_counts: Counter[str] = Counter()
+    library_decay: dict[str, float] = {}
+    library_ratings: dict[str, int] = {}
+
     for song in songs:
         raw_artist = song.get("artist_name", "")
         if not raw_artist:
@@ -213,16 +218,31 @@ def build_artist_affinity(
 
         parsed = parse_artists(raw_artist)
         for name, weight in parsed:
-            artist_scores[name] += 0.3 * decay * weight
+            library_counts[name] += weight  # feat artists add 0.3, primaries add 1.0
             artist_song_counts[name] += 1
+            # Keep the highest decay seen (most recently added song dominates)
+            if decay > library_decay.get(name, 0.0):
+                library_decay[name] = decay
 
-        # Love/dislike ratings are strong explicit signals
+        # Love/dislike ratings — record for primary artist only
+        # First non-None rating per primary artist wins; duplicate ratings on same artist are not aggregated.
         rating = song.get("user_rating")
         primary_name = parsed[0][0] if parsed else raw_artist
+        if rating is not None and primary_name not in library_ratings:
+            library_ratings[primary_name] = rating
+
+    # Pass 2: apply log-saturated presence score once per artist
+    for name, count in library_counts.items():
+        d = library_decay.get(name, 1.0)
+        artist_scores[name] += min(3.0, 0.3 * math.log1p(count)) * d
+
+    # Apply ratings: strong explicit signals — one per primary artist
+    for name, rating in library_ratings.items():
+        d = library_decay.get(name, 1.0)
         if rating == 1:
-            artist_scores[primary_name] += 4.0 * decay
+            artist_scores[name] += 4.0 * d
         elif rating == -1:
-            artist_scores[primary_name] -= 3.0 * decay
+            artist_scores[name] -= 3.0 * d
 
     # Recent plays: the DOMINANT signal for artist affinity
     seen_song_ids: set[str] = set()
@@ -363,6 +383,121 @@ def build_audio_centroid(
     return {k: round(v / total_weight, 3) for k, v in weighted_sums.items()}
 
 
+def _compute_embedding_centroid(
+    songs: list[dict[str, Any]],
+    emb_map: dict[str, list[float]],
+    *,
+    feedback_weights: dict[str, float] | None = None,
+) -> list[float] | None:
+    """Compute L2-normalized mean embedding from a catalog_id → embedding map.
+
+    When feedback_weights is provided, thumbs-up tracks contribute 2x and
+    thumbs-down tracks contribute 0.2x to the centroid. This lets the profile
+    evolve with each interaction.
+    """
+    import numpy as np
+
+    ids_and_embs = [
+        (s.get("catalog_id", ""), emb_map[s.get("catalog_id", "")])
+        for s in songs
+        if s.get("catalog_id", "") in emb_map
+    ]
+    if not ids_and_embs:
+        return None
+
+    weights = []
+    vectors = []
+    for cid, emb in ids_and_embs:
+        vectors.append(emb)
+        w = 1.0
+        if feedback_weights and cid in feedback_weights:
+            w = feedback_weights[cid]
+        weights.append(w)
+
+    arr = np.array(vectors)
+    w_arr = np.array(weights).reshape(-1, 1)
+    mean = (arr * w_arr).sum(axis=0) / w_arr.sum()
+    norm = float(np.linalg.norm(mean))
+    if norm > 0:
+        mean = mean / norm
+    return [round(float(v), 6) for v in mean]
+
+
+def _compute_multi_centroids(
+    songs: list[dict[str, Any]],
+    emb_map: dict[str, list[float]],
+    *,
+    max_clusters: int = 4,
+    min_songs_per_cluster: int = 5,
+    feedback_weights: dict[str, float] | None = None,
+) -> list[list[float]] | None:
+    """Cluster library embeddings into k taste clusters via k-means.
+
+    Returns up to max_clusters L2-normalized centroids. Falls back to a
+    single centroid if the library is too small to cluster meaningfully.
+    """
+    import numpy as np
+
+    ids_and_embs = [
+        (s.get("catalog_id", ""), emb_map[s.get("catalog_id", "")])
+        for s in songs
+        if s.get("catalog_id", "") in emb_map
+    ]
+    if not ids_and_embs:
+        return None
+
+    vectors = []
+    weights = []
+    for cid, emb in ids_and_embs:
+        vectors.append(emb)
+        w = 1.0
+        if feedback_weights and cid in feedback_weights:
+            w = feedback_weights[cid]
+        weights.append(w)
+
+    arr = np.array(vectors)
+    n = len(arr)
+    k = min(max_clusters, max(1, n // min_songs_per_cluster))
+    if k <= 1:
+        mean = _compute_embedding_centroid(
+            songs, emb_map, feedback_weights=feedback_weights,
+        )
+        return [mean] if mean else None
+
+    # Simple k-means (avoid sklearn dependency)
+    rng = np.random.default_rng(42)
+    indices = rng.choice(n, size=k, replace=False)
+    centers = arr[indices].copy()
+    w_arr = np.array(weights)
+
+    for _ in range(20):
+        dists = np.linalg.norm(
+            arr[:, np.newaxis, :] - centers[np.newaxis, :, :], axis=2,
+        )
+        labels = dists.argmin(axis=1)
+        new_centers = np.zeros_like(centers)
+        for j in range(k):
+            mask = labels == j
+            if mask.sum() == 0:
+                new_centers[j] = centers[j]
+                continue
+            cluster_w = w_arr[mask].reshape(-1, 1)
+            new_centers[j] = (
+                (arr[mask] * cluster_w).sum(axis=0) / cluster_w.sum()
+            )
+        if np.allclose(centers, new_centers, atol=1e-6):
+            break
+        centers = new_centers
+
+    result = []
+    for c in centers:
+        norm = float(np.linalg.norm(c))
+        if norm > 0:
+            c = c / norm
+        result.append([round(float(v), 6) for v in c])
+    return result
+
+
 def build_taste_profile(
     songs: list[dict[str, Any]],
     history: list[dict[str, Any]],
@@ -370,6 +505,12 @@ def build_taste_profile(
     use_temporal_decay: bool = False,
     half_life_days: float = 90.0,
     audio_features_map: dict[str, dict[str, float]] | None = None,
+    embedding_map: dict[str, list[float]] | None = None,
+    clap_map: dict[str, list[float]] | None = None,
+    mert_map: dict[str, list[float]] | None = None,
+    mood_tags_map: dict[str, list[str]] | None = None,
+    mood_scores_map: dict[str, dict[str, float]] | None = None,
+    feedback_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build a complete taste profile from cached data.
 
@@ -378,10 +519,12 @@ def build_taste_profile(
         history: Listening history entries
         use_temporal_decay: Apply exponential decay to older songs
         half_life_days: Half-life in days for temporal decay
-        audio_features_map: Optional catalog_id → audio features dict
-
-    Returns:
-        Dict ready for saving as a taste_profile_snapshot
+        audio_features_map: Optional catalog_id → scalar audio features dict
+        embedding_map: Optional catalog_id → EffNet embedding (1280-dim)
+        clap_map: Optional catalog_id → CLAP embedding (512-dim)
+        mert_map: Optional catalog_id → MERT embedding (768-dim)
+        feedback_weights: Optional catalog_id → weight (2.0 for thumbs-up,
+            0.2 for thumbs-down) — shifts centroids toward liked music.
     """
     genre_vector = build_genre_vector(
         songs, history,
@@ -397,13 +540,11 @@ def build_taste_profile(
     audio_prefs = build_audio_trait_preferences(songs)
     familiarity = compute_familiarity_score(genre_vector)
 
-    # Estimate listening hours
     total_duration_ms = sum(
         (s.get("duration_ms") or 0) for s in songs
     )
     listening_hours = round(total_duration_ms / 3_600_000, 1)
 
-    # Build audio centroid from enriched features
     audio_centroid: dict[str, float] = {}
     if audio_features_map:
         feature_list = [
@@ -412,6 +553,51 @@ def build_taste_profile(
             if s.get("catalog_id", "") in audio_features_map
         ]
         audio_centroid = build_audio_centroid(feature_list)
+
+    fw = feedback_weights
+    embedding_centroid = (
+        _compute_embedding_centroid(songs, embedding_map, feedback_weights=fw)
+        if embedding_map else None
+    )
+    clap_centroid = (
+        _compute_embedding_centroid(songs, clap_map, feedback_weights=fw)
+        if clap_map else None
+    )
+    mert_centroid = (
+        _compute_embedding_centroid(songs, mert_map, feedback_weights=fw)
+        if mert_map else None
+    )
+
+    clap_centroids = (
+        _compute_multi_centroids(songs, clap_map, feedback_weights=fw)
+        if clap_map else None
+    )
+    mert_centroids = (
+        _compute_multi_centroids(songs, mert_map, feedback_weights=fw)
+        if mert_map else None
+    )
+    effnet_centroids = (
+        _compute_multi_centroids(songs, embedding_map, feedback_weights=fw)
+        if embedding_map else None
+    )
+
+    # V 6.388/V 6.389: mood distribution aggregated from library's
+    # mood_scores (preferred, carries intensity) with mood_tags as
+    # fallback for rows classified before the hybrid upgrade.
+    mood_distribution: dict[str, float] = {}
+    if mood_scores_map or mood_tags_map:
+        from musicmind.engine.mood_tagger import aggregate_mood_distribution
+        scores_list = [
+            (mood_scores_map or {}).get(s.get("catalog_id", ""))
+            for s in songs
+        ]
+        tags_list = [
+            (mood_tags_map or {}).get(s.get("catalog_id", ""), [])
+            for s in songs
+        ]
+        mood_distribution = aggregate_mood_distribution(
+            scores_list, library_tags_fallback=tags_list,
+        )
 
     return {
         "genre_vector": genre_vector,
@@ -422,4 +608,11 @@ def build_taste_profile(
         "total_songs_analyzed": len(songs),
         "listening_hours_estimated": listening_hours,
         "audio_centroid": audio_centroid,
+        "embedding_centroid": embedding_centroid,
+        "clap_centroid": clap_centroid,
+        "mert_centroid": mert_centroid,
+        "clap_centroids": clap_centroids,
+        "mert_centroids": mert_centroids,
+        "effnet_centroids": effnet_centroids,
+        "mood_distribution": mood_distribution or None,
     }

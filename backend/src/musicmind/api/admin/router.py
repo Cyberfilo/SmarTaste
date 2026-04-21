@@ -1,6 +1,7 @@
-"""Admin API endpoints — live logs, enrichment progress, system status.
+"""Admin API endpoints + static dashboard — enrichment progress, system status.
 
 Protected by ADMIN_SECRET header or is_admin user flag.
+Dashboard served at /admin as static HTML.
 """
 
 from __future__ import annotations
@@ -9,10 +10,11 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from starlette.responses import StreamingResponse
+from starlette.responses import HTMLResponse, StreamingResponse
 
 from musicmind.api.admin.log_stream import get_recent_logs, subscribe, unsubscribe
 from musicmind.api.admin.progress import (
@@ -26,7 +28,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
-ADMIN_SECRET = os.environ.get("MUSICMIND_ADMIN_SECRET", "")
+# Static dashboard served at /admin (outside /api/admin prefix)
+_DASHBOARD_HTML = (Path(__file__).parent / "dashboard.html").read_text()
+dashboard_router = APIRouter(tags=["admin"], include_in_schema=False)
+
+
+@dashboard_router.get("/admin")
+async def admin_dashboard() -> HTMLResponse:
+    """Serve the static admin dashboard."""
+    return HTMLResponse(_DASHBOARD_HTML)
+
+
+ADMIN_SECRET = os.environ.get("MUSICMIND_ADMIN_SECRET") or None
 
 
 async def require_admin(request: Request) -> None:
@@ -127,16 +140,14 @@ async def get_system_status(
     """Get system health + enrichment summary."""
     from musicmind import __version__
     from musicmind.db.schema import (
+        audio_embeddings,
         audio_features_cache,
-        audio_features_global,
-        listening_history,
         service_connections,
         song_metadata_cache,
         user_calibration,
     )
 
     engine = request.app.state.engine
-    settings = request.app.state.settings
 
     # Fast direct counts — no expensive per-user subqueries
     async with engine.begin() as conn:
@@ -144,15 +155,15 @@ async def get_system_status(
             sa.select(sa.func.count()).select_from(users)
         )).scalar() or 0
 
-        connections_count = (await conn.execute(
-            sa.select(sa.func.count()).select_from(service_connections)
+        connected_users = (await conn.execute(
+            sa.select(sa.func.count(sa.distinct(service_connections.c.user_id)))
         )).scalar() or 0
 
         total_songs = (await conn.execute(
             sa.select(sa.func.count()).select_from(song_metadata_cache)
         )).scalar() or 0
 
-        # Enriched = audio_features_cache rows that have a matching song
+        # Enriched = audio_features_cache rows with real features
         existing_ids = sa.select(song_metadata_cache.c.catalog_id).correlate(None)
         total_enriched = (await conn.execute(
             sa.select(sa.func.count()).select_from(audio_features_cache).where(
@@ -163,12 +174,10 @@ async def get_system_status(
             )
         )).scalar() or 0
 
-        global_cache_count = (await conn.execute(
-            sa.select(sa.func.count()).select_from(audio_features_global)
-        )).scalar() or 0
-
-        history_count = (await conn.execute(
-            sa.select(sa.func.count()).select_from(listening_history)
+        gpu_count = (await conn.execute(
+            sa.select(sa.func.count()).select_from(audio_embeddings).where(
+                audio_embeddings.c.clap_embedding.isnot(None)
+            )
         )).scalar() or 0
 
         calibrated_users = (await conn.execute(
@@ -177,17 +186,15 @@ async def get_system_status(
 
     return {
         "version": __version__,
-        "users": user_count,
-        "connections": connections_count,
+        "total_users": user_count,
+        "connected_users": connected_users,
         "calibrated_users": calibrated_users,
         "total_songs": total_songs,
         "total_enriched": total_enriched,
         "enrichment_pct": round(
             min(total_enriched / total_songs, 1.0) * 100, 1
         ) if total_songs > 0 else 0,
-        "global_isrc_cache": global_cache_count,
-        "listening_history_entries": history_count,
-        "soundstat_configured": bool(settings.soundstat_api_key),
+        "gpu_embeddings": gpu_count,
     }
 
 
@@ -370,9 +377,10 @@ async def get_diagnostics(
     """Smart enrichment diagnostics with per-user, per-stage breakdown.
 
     Returns detailed enrichment state for each user including:
-    - Per-stage counts (audio/tags/credits) with library vs non-library split
+    - Per-stage counts (audio/embeddings/AI) with library vs non-library split
     - Failed vs pending vs complete breakdown with failure reasons
-    - ISRC coverage gaps
+    - GPU embedding coverage (CLAP + MERT)
+    - AI enrichment coverage (captions + classifier labels)
     - Cobweb expansion stats
     - Cross-referenced failure analysis from logs DB
     - Actionable insights (what needs attention)
@@ -562,3 +570,432 @@ async def cleanup_orphans(
     """
     result = await cleanup_orphaned_features(request.app.state.engine)
     return result
+
+
+@router.post("/rebuild-taste-profiles")
+async def rebuild_taste_profiles(
+    request: Request,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Recompute taste_profile_snapshots for every user (background task).
+
+    Lightweight compared to /reindex/{user_id}: doesn't refetch library or
+    re-run enrichment, just reads cached song_metadata_cache + audio data
+    and writes a fresh snapshot. Used after engine changes (e.g. log-saturated
+    affinity) so stored snapshots reflect the new math.
+
+    Returns immediately; rebuild runs in the background. Watch worker logs
+    for per-user 'Rebuilt profile for ...' lines.
+    """
+    engine = request.app.state.engine
+    encryption = request.app.state.encryption
+    settings = request.app.state.settings
+
+    async with engine.begin() as conn:
+        user_rows = (await conn.execute(sa.select(users.c.id, users.c.email))).fetchall()
+
+    user_ids = [(r.id, r.email) for r in user_rows]
+
+    async def _rebuild_all() -> None:
+        from musicmind.api.taste.service import TasteService
+        ts = TasteService()
+        ok = 0
+        failed = 0
+        for uid, email in user_ids:
+            try:
+                await ts.get_profile(
+                    engine, encryption, settings,
+                    user_id=uid, force_refresh=True,
+                )
+                ok += 1
+                logger.info("Rebuilt profile for %s", email)
+            except Exception:
+                failed += 1
+                logger.exception("Failed to rebuild profile for %s", email)
+        logger.info("Profile rebuild complete: %d ok, %d failed", ok, failed)
+
+    asyncio.ensure_future(_rebuild_all())
+
+    return {
+        "status": "rebuild_started",
+        "user_count": len(user_ids),
+        "note": "Watch worker logs for per-user progress lines.",
+    }
+
+
+@router.get("/songs-table")
+async def admin_songs_table(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Paginated, per-song enrichment grid for the admin dashboard.
+
+    Each row reports presence booleans for:
+      essentia (audio_features_cache.energy IS NOT NULL)
+      clap    (audio_embeddings.clap_embedding IS NOT NULL, or global by ISRC)
+      mert    (same, for MERT)
+      isrc    (valid ISRC that's not the NO_ISRC sentinel)
+      cached_audio (preview_audio_cache row exists)
+      user_linked  (in song_metadata_cache with library_id or date_added)
+    """
+    engine = request.app.state.engine
+    limit = max(1, min(limit, 200))
+
+    async with engine.begin() as conn:
+        total = (await conn.execute(sa.text("""
+            SELECT count(*) FROM (
+                SELECT catalog_id FROM song_metadata_cache
+                UNION
+                SELECT catalog_id FROM global_song_cache
+            ) s
+        """))).scalar() or 0
+
+        rows = (await conn.execute(sa.text("""
+            WITH merged AS (
+                SELECT s.catalog_id,
+                       coalesce(s.name, g.name, '') AS name,
+                       coalesce(s.artist_name, g.artist_name, '') AS artist_name,
+                       coalesce(NULLIF(s.artwork_url_template, ''),
+                                NULLIF(g.artwork_url, ''), '') AS artwork_url,
+                       coalesce(s.isrc, g.isrc) AS isrc,
+                       (s.library_id IS NOT NULL
+                        OR s.date_added_to_library IS NOT NULL) AS user_linked
+                FROM song_metadata_cache s
+                FULL OUTER JOIN global_song_cache g
+                  ON s.catalog_id = g.catalog_id
+                LIMIT :lim OFFSET :off
+            )
+            SELECT
+                m.catalog_id, m.name, m.artist_name, m.artwork_url,
+                m.isrc, m.user_linked,
+                EXISTS (
+                    SELECT 1 FROM audio_features_cache af
+                    WHERE af.catalog_id = m.catalog_id AND af.energy IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM audio_features_global afg
+                    WHERE afg.isrc = m.isrc AND afg.energy IS NOT NULL
+                ) AS has_essentia,
+                EXISTS (
+                    SELECT 1 FROM audio_embeddings ae
+                    WHERE ae.catalog_id = m.catalog_id AND ae.clap_embedding IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM audio_embeddings_global aeg
+                    WHERE aeg.isrc = m.isrc AND aeg.clap_embedding IS NOT NULL
+                ) AS has_clap,
+                EXISTS (
+                    SELECT 1 FROM audio_embeddings ae
+                    WHERE ae.catalog_id = m.catalog_id AND ae.mert_embedding IS NOT NULL
+                ) OR EXISTS (
+                    SELECT 1 FROM audio_embeddings_global aeg
+                    WHERE aeg.isrc = m.isrc AND aeg.mert_embedding IS NOT NULL
+                ) AS has_mert,
+                EXISTS (
+                    SELECT 1 FROM preview_audio_cache p
+                    WHERE p.catalog_id = m.catalog_id
+                ) AS has_cached_audio
+            FROM merged m
+        """), {"lim": limit, "off": offset})).fetchall()
+
+    items = [
+        {
+            "catalog_id": r.catalog_id,
+            "name": r.name or "",
+            "artist_name": r.artist_name or "",
+            "artwork_url": r.artwork_url or "",
+            "isrc_ok": bool(r.isrc) and r.isrc != "__NO_ISRC__",
+            "user_linked": bool(r.user_linked),
+            "has_essentia": bool(r.has_essentia),
+            "has_clap": bool(r.has_clap),
+            "has_mert": bool(r.has_mert),
+            "has_cached_audio": bool(r.has_cached_audio),
+        }
+        for r in rows
+    ]
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@router.get("/artists-table")
+async def admin_artists_table(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Paginated per-artist grid. Columns:
+      source: library | cobweb | feat  (how the artist entered our system)
+      user: owning user email if any
+      tracks_total / tracks_library (how many + how many in user libraries)
+      discovery_pct: 1 - (library / total), as a percentage
+    """
+    engine = request.app.state.engine
+    limit = max(1, min(limit, 200))
+
+    async with engine.begin() as conn:
+        # Total distinct artists across library + global + cobweb
+        total = (await conn.execute(sa.text("""
+            SELECT count(DISTINCT artist_name) FROM (
+                SELECT artist_name FROM song_metadata_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM global_song_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM artist_cobweb WHERE artist_name <> ''
+            ) a
+        """))).scalar() or 0
+
+        rows = (await conn.execute(sa.text("""
+            WITH all_artists AS (
+                SELECT artist_name FROM song_metadata_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM global_song_cache WHERE artist_name <> ''
+                UNION
+                SELECT artist_name FROM artist_cobweb WHERE artist_name <> ''
+            ),
+            library_counts AS (
+                SELECT artist_name, count(*) AS c, max(user_id) AS any_user
+                FROM song_metadata_cache
+                WHERE (library_id IS NOT NULL OR date_added_to_library IS NOT NULL)
+                GROUP BY artist_name
+            ),
+            disco_counts AS (
+                SELECT artist_name, count(*) AS c
+                FROM song_metadata_cache
+                WHERE library_id IS NULL AND date_added_to_library IS NULL
+                GROUP BY artist_name
+            ),
+            global_counts AS (
+                SELECT artist_name, count(*) AS c
+                FROM global_song_cache GROUP BY artist_name
+            ),
+            cobweb_flag AS (
+                SELECT DISTINCT artist_name, 1 AS in_cobweb FROM artist_cobweb
+            )
+            SELECT a.artist_name,
+                   coalesce(lc.c, 0) AS library_tracks,
+                   coalesce(dc.c, 0) AS disco_tracks,
+                   coalesce(gc.c, 0) AS global_tracks,
+                   coalesce(cf.in_cobweb, 0) AS in_cobweb,
+                   lc.any_user AS any_user
+            FROM all_artists a
+            LEFT JOIN library_counts lc ON lc.artist_name = a.artist_name
+            LEFT JOIN disco_counts   dc ON dc.artist_name = a.artist_name
+            LEFT JOIN global_counts  gc ON gc.artist_name = a.artist_name
+            LEFT JOIN cobweb_flag    cf ON cf.artist_name = a.artist_name
+            ORDER BY coalesce(lc.c, 0) DESC, coalesce(gc.c, 0) DESC,
+                     a.artist_name
+            LIMIT :lim OFFSET :off
+        """), {"lim": limit, "off": offset})).fetchall()
+
+    # User email lookup for any_user id
+    any_user_ids = {r.any_user for r in rows if r.any_user}
+    email_by_uid: dict[str, str] = {}
+    if any_user_ids:
+        async with engine.begin() as conn:
+            urows = await conn.execute(
+                sa.select(users.c.id, users.c.email).where(
+                    users.c.id.in_(list(any_user_ids))
+                )
+            )
+            for u in urows:
+                email_by_uid[u.id] = u.email
+
+    items = []
+    for r in rows:
+        total_tracks = int(r.library_tracks) + int(r.disco_tracks)
+        # Prefer "library" if the artist is in any user's library, else
+        # "cobweb" if in artist_cobweb, else "feat" (appears as featured in
+        # a library track — implicit when neither library nor cobweb flag).
+        if r.library_tracks > 0:
+            source = "library"
+        elif r.in_cobweb:
+            source = "cobweb"
+        else:
+            source = "feat"
+        discovery_pct = (
+            round(100 * r.disco_tracks / total_tracks, 1)
+            if total_tracks > 0 else 0.0
+        )
+        items.append({
+            "artist_name": r.artist_name,
+            "source": source,
+            "user": email_by_uid.get(r.any_user, "") if r.any_user else "",
+            "tracks_library": int(r.library_tracks),
+            "tracks_discovered": int(r.disco_tracks),
+            "tracks_total": total_tracks,
+            "tracks_global": int(r.global_tracks),
+            "discovery_pct": discovery_pct,
+            "library_pct": round(100 - discovery_pct, 1),
+        })
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@router.post("/reindex/{user_id}")
+async def reindex_user(
+    request: Request,
+    user_id: str,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Smart reindex: preserve enriched data, re-scan library, re-enrich gaps.
+
+    Steps:
+    1. Promote per-user audio features to global cache (by ISRC)
+    2. Clear per-user song_metadata_cache + audio_features_cache
+    3. Reset indexing status to trigger fresh library scan
+    4. The indexer will re-fetch library from Apple Music/Spotify
+    5. Audio enrichment will find existing data in global cache (instant)
+
+    No API calls are wasted: audio features are preserved in audio_features_global.
+    Only the library re-scan calls the music service API.
+    """
+    from musicmind.db.schema import (
+        audio_features_cache,
+        song_metadata_cache,
+        user_indexing_status,
+    )
+
+    engine = request.app.state.engine
+
+    # Verify user exists
+    async with engine.begin() as conn:
+        user_row = (await conn.execute(
+            sa.select(users.c.id, users.c.email).where(users.c.id == user_id)
+        )).first()
+    if not user_row:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Step 1: Promote per-user audio features to global ISRC cache
+    promoted = 0
+    async with engine.begin() as conn:
+        # Get all per-user features that have ISRC
+        af_rows = (await conn.execute(
+            sa.select(audio_features_cache, song_metadata_cache.c.isrc).where(
+                sa.and_(
+                    audio_features_cache.c.user_id == user_id,
+                    audio_features_cache.c.energy.isnot(None),
+                    audio_features_cache.c.catalog_id == song_metadata_cache.c.catalog_id,
+                    song_metadata_cache.c.user_id == user_id,
+                    song_metadata_cache.c.isrc.isnot(None),
+                    song_metadata_cache.c.isrc != "",
+                    song_metadata_cache.c.isrc != "__NO_ISRC__",
+                )
+            )
+        )).fetchall()
+
+        for row in af_rows:
+            try:
+                await conn.execute(sa.text(
+                    "INSERT INTO audio_features_global"
+                    " (isrc, tempo, energy, brightness, danceability,"
+                    "  acousticness, valence_proxy, beat_strength,"
+                    "  key, scale, instrumentalness, loudness,"
+                    "  feature_source, analyzed_at)"
+                    " VALUES (:isrc, :tempo, :energy, :brightness,"
+                    "  :danceability, :acousticness, :valence_proxy,"
+                    "  :beat_strength, :key, :scale, :instrumentalness,"
+                    "  :loudness, :feature_source, now())"
+                    " ON CONFLICT (isrc) DO NOTHING"
+                ), {
+                    "isrc": row.isrc,
+                    "tempo": row.tempo, "energy": row.energy,
+                    "brightness": row.brightness,
+                    "danceability": row.danceability,
+                    "acousticness": row.acousticness,
+                    "valence_proxy": row.valence_proxy,
+                    "beat_strength": row.beat_strength,
+                    "key": row.key, "scale": row.scale,
+                    "instrumentalness": row.instrumentalness,
+                    "loudness": row.loudness,
+                    "feature_source": (
+                        row.feature_source if isinstance(row.feature_source, str)
+                        else json.dumps(row.feature_source or {})
+                    ),
+                })
+                promoted += 1
+            except Exception:
+                pass
+
+    # Step 2: Clear per-user data
+    async with engine.begin() as conn:
+        del_af = await conn.execute(
+            sa.delete(audio_features_cache).where(
+                audio_features_cache.c.user_id == user_id
+            )
+        )
+        del_songs = await conn.execute(
+            sa.delete(song_metadata_cache).where(
+                song_metadata_cache.c.user_id == user_id
+            )
+        )
+
+    # Step 3: Reset indexing status
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.delete(user_indexing_status).where(
+                user_indexing_status.c.user_id == user_id
+            )
+        )
+
+    logger.info(
+        "Reindex for %s: promoted %d features to global, cleared %d songs + %d features",
+        user_row.email, promoted, del_songs.rowcount, del_af.rowcount,
+    )
+
+    # Step 4: Build taste profile (fetches library) then run full indexing
+    async def _reindex_pipeline() -> None:
+        try:
+            # First: fetch library via taste profile (populates song_metadata_cache)
+            from musicmind.api.taste.service import TasteService
+            logger.info("Reindex %s: fetching library via taste profile...", user_row.email)
+            await TasteService().get_profile(
+                engine, request.app.state.encryption, request.app.state.settings,
+                user_id=user_id, force_refresh=True,
+            )
+            # Then: run the full enrichment pipeline (audio + embeddings + AI)
+            from musicmind.indexer import run_indexing
+            logger.info("Reindex %s: starting enrichment pipeline...", user_row.email)
+            await run_indexing(
+                engine, request.app.state.encryption, request.app.state.settings,
+                user_id=user_id,
+            )
+            logger.info("Reindex %s: complete", user_row.email)
+        except Exception:
+            logger.exception("Reindex pipeline failed for %s", user_row.email)
+
+    asyncio.ensure_future(_reindex_pipeline())
+
+    return {
+        "status": "reindex_started",
+        "user": user_row.email,
+        "promoted_to_global": promoted,
+        "songs_cleared": del_songs.rowcount,
+        "features_cleared": del_af.rowcount,
+        "message": (
+            f"Promoted {promoted} audio features to global cache. "
+            f"Cleared {del_songs.rowcount} songs. "
+            "Indexing will re-fetch library and reuse cached data."
+        ),
+    }
+
+
+@router.post("/gpu-log")
+async def receive_gpu_log(
+    request: Request,
+    data: dict,
+    _admin: None = Depends(require_admin),
+) -> dict:
+    """Receive enrichment log from Modal GPU worker.
+
+    Called by the Modal handler after each enrichment to forward logs
+    to the Railway logs DB.
+    """
+    log_writer = getattr(request.app.state, "log_writer", None)
+    if log_writer:
+        log_writer.log_enrichment(
+            user_id="modal-gpu",
+            catalog_id=data.get("detail", "")[:50],
+            stage=data.get("stage", "gpu"),
+            result=data.get("result", "unknown"),
+            duration_ms=data.get("duration_ms"),
+        )
+    return {"ok": True}

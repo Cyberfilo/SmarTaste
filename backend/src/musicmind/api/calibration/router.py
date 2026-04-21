@@ -415,5 +415,4 @@ async def _enrich_top_artists_discography(
         )
         await enrich_tracks(
             engine, all_tracks, user_id=user_id,
-            soundstat_api_key=settings.soundstat_api_key,
         )

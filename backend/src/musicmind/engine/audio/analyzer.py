@@ -26,7 +26,6 @@ from musicmind.engine.audio.cache import (
     store_features,
 )
 from musicmind.engine.audio.models import AudioEmbedding, ExtractedFeatures
-from musicmind.engine.enrichment.deezer import fetch_deezer_features
 
 logger = logging.getLogger(__name__)
 
@@ -120,17 +119,6 @@ async def analyze_seeds(
 
         # Try to get a preview URL
         preview_url = track.get("preview_url") or ""
-
-        # Fallback: get preview from Deezer via search
-        if not preview_url:
-            name = track.get("name", "")
-            artist_name = track.get("artist_name", "")
-            if name and artist_name:
-                deezer_data = await fetch_deezer_features(
-                    name=name, artist_name=artist_name, isrc=isrc,
-                )
-                if deezer_data:
-                    preview_url = deezer_data.get("preview_url", "")
 
         if not preview_url:
             results.append({

@@ -1,12 +1,20 @@
 """Candidate scoring — rank catalog songs against a taste profile.
 
-Uses adaptive weights across 7+ dimensions: genre cosine, artist affinity,
-audio similarity, graduated novelty, freshness, MMR diversity, anti-staleness,
-cross-strategy bonus, mood boost, and optional classification bonus.
+Uses 6 weighted dimensions: CLAP embedding cosine, MERT embedding cosine,
+EffNet embedding cosine, genre cosine, scalar audio similarity, and artist
+affinity. Plus additive bonuses (calibration, cross-strategy, mood) and
+penalties (diversity, staleness).
+
+Re-ranker (V 6.386): the greedy selection uses a DPP-inspired
+quality-weighted gaussian diversity kernel on CLAP embeddings plus a
+Steck-style genre-distribution calibration penalty. Both are post-hoc
+and degrade to legacy metadata MMR when embeddings are unavailable.
 """
 
 from __future__ import annotations
 
+import math
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,65 +23,18 @@ import numpy as np
 from musicmind.engine.profile import expand_genres
 from musicmind.engine.weights import DEFAULT_WEIGHTS
 
-
-def _language_match(
-    song_genres: list[str],
-    genre_vector: dict[str, float],
-) -> float:
-    """Score how well a song matches the user's regional/language preferences.
-
-    Detects regional prefixes in genre names (e.g. "Italian", "French", "Korean")
-    and checks if the candidate's regional tags match the user's dominant regions.
-    Returns 1.0 for perfect match, 0.0 for no regional overlap.
-    """
-    if not song_genres or not genre_vector:
-        return 0.0
-
-    # Extract regional prefixes from genre names
-    # E.g. "Italian Hip-Hop/Rap" → "Italian", "K-Pop" → "K"
-    def _extract_region(genre: str) -> str | None:
-        parts = genre.split()
-        if len(parts) >= 2:
-            # "Italian Hip-Hop/Rap" → "Italian"
-            candidate = parts[0]
-            # Filter out non-regional prefixes
-            if candidate[0].isupper() and len(candidate) > 1:
-                return candidate.lower()
-        # Handle "K-Pop", "J-Rock" style
-        if "-" in genre and len(genre.split("-")[0]) <= 2:
-            return genre.split("-")[0].lower()
-        return None
-
-    # Build user's regional profile from genre_vector
-    user_regions: dict[str, float] = {}
-    for genre, weight in genre_vector.items():
-        region = _extract_region(genre)
-        if region:
-            user_regions[region] = user_regions.get(region, 0.0) + weight
-
-    if not user_regions:
-        return 0.5  # No regional signal — neutral
-
-    # Check candidate's regional tags
-    candidate_regions: set[str] = set()
-    for genre in song_genres:
-        region = _extract_region(genre)
-        if region:
-            candidate_regions.add(region)
-
-    if not candidate_regions:
-        # Candidate has no regional tag — neutral, don't penalize
-        return 0.5
-
-    # Score: weighted overlap
-    total_user_weight = sum(user_regions.values())
-    if total_user_weight == 0:
-        return 0.5
-
-    overlap_weight = sum(
-        user_regions.get(r, 0.0) for r in candidate_regions
-    )
-    return min(1.0, overlap_weight / total_user_weight)
+# ── Re-ranker constants (V 6.386) ────────────────────────────────────────────
+# DPP gaussian kernel bandwidth on CLAP cosine distance. σ=0.5 gives a sharp
+# penalty for near-duplicates (cos≈0.9 → ~0.98) while fading quickly for
+# moderately-similar pairs (cos≈0.5 → ~0.61).
+_DPP_SIGMA = 0.5
+# How strongly to pull list composition toward the user's genre distribution.
+# Applied as a subtractive penalty on the adjusted score during greedy
+# selection. 0.08 tuned to be noticeable without dominating quality signal.
+_CALIBRATION_WEIGHT = 0.08
+# Smoothing added to both distributions in KL(P||Q) so zero-probability
+# genres don't blow up. Small enough to preserve relative differences.
+_KL_SMOOTHING = 0.01
 
 
 def _genre_cosine(
@@ -161,31 +122,145 @@ def _compute_staleness(
     return 0.0
 
 
-def _tag_cosine(
-    candidate_tags: dict[str, float] | None,
-    user_tag_profile: dict[str, float] | None,
-) -> float:
-    """Cosine similarity between candidate's Last.fm tags and user tag profile.
+def _build_user_genre_distribution(
+    genre_vector: dict[str, float] | None,
+) -> dict[str, float]:
+    """Normalize the user's genre_vector into a probability distribution.
 
-    Tags encode mood/vibe signals ("dark", "aggressive", "Italian drill")
-    that structured genres miss. Returns 0.5 (neutral) if either is None.
+    The profile's genre_vector already carries relative weights; this just
+    L1-normalizes them so sum == 1.0. Empty input → empty dict (calibration
+    will noop).
     """
-    if not candidate_tags or not user_tag_profile:
-        return 0.5
+    if not genre_vector:
+        return {}
+    total = sum(float(v) for v in genre_vector.values() if v > 0)
+    if total <= 0:
+        return {}
+    return {g: float(v) / total for g, v in genre_vector.items() if v > 0}
 
-    all_tags = set(candidate_tags.keys()) | set(user_tag_profile.keys())
-    if not all_tags:
-        return 0.5
 
-    vec_a = np.array([candidate_tags.get(t, 0.0) for t in all_tags])
-    vec_b = np.array([user_tag_profile.get(t, 0.0) for t in all_tags])
+def _genres_with_parents(genre_names: list[str]) -> dict[str, float]:
+    """Return weighted genre counts: 1.0 for originals, 0.3 for expanded parents.
 
-    dot = np.dot(vec_a, vec_b)
-    norm_a = np.linalg.norm(vec_a)
-    norm_b = np.linalg.norm(vec_b)
-    if norm_a == 0 or norm_b == 0:
-        return 0.5
-    return float(dot / (norm_a * norm_b))
+    Mirrors the weighting used in `_genre_cosine` so calibration tracks the
+    same signal the per-track scorer uses.
+    """
+    if not genre_names:
+        return {}
+    originals = set(genre_names)
+    out: dict[str, float] = {}
+    for g in expand_genres(genre_names):
+        out[g] = out.get(g, 0.0) + (1.0 if g in originals else 0.3)
+    return out
+
+
+def _kl_divergence(
+    p: dict[str, float],
+    q: dict[str, float],
+    smoothing: float = _KL_SMOOTHING,
+) -> float:
+    """KL(P || Q) with additive smoothing on both distributions.
+
+    Used by the Steck-style calibration re-ranker. Low values = P aligned
+    with Q. Smoothing prevents ∞ from zero-probability genres; it also
+    makes the metric less twitchy on small lists.
+    """
+    if not p or not q:
+        return 0.0
+    keys = set(p.keys()) | set(q.keys())
+    kl = 0.0
+    for k in keys:
+        pk = p.get(k, 0.0) + smoothing
+        qk = q.get(k, 0.0) + smoothing
+        if pk > 0 and qk > 0:
+            kl += pk * math.log(pk / qk)
+    return max(0.0, kl)
+
+
+def _calibration_penalty(
+    candidate_genres: list[str],
+    running_genre_counts: dict[str, float],
+    target_dist: dict[str, float],
+) -> float:
+    """Return KL divergence of the list-including-candidate vs user target.
+
+    Smaller = better. Caller subtracts `weight × this` from the adjusted
+    score. `running_genre_counts` is a running sum (weighted by parent-of
+    expansion rules) across the already-selected tracks; this function
+    virtually adds the candidate without mutating it.
+    """
+    if not target_dist:
+        return 0.0
+    cand = _genres_with_parents(candidate_genres)
+    if not cand and not running_genre_counts:
+        return 0.0
+    merged = defaultdict(float, running_genre_counts)
+    for g, w in cand.items():
+        merged[g] += w
+    total = sum(merged.values())
+    if total <= 0:
+        return 0.0
+    running_dist = {g: w / total for g, w in merged.items()}
+    return _kl_divergence(running_dist, target_dist)
+
+
+def _dpp_diversity_penalty(
+    candidate_clap: list[float] | None,
+    candidate_score: float,
+    selected: list[dict[str, Any]],
+    clap_map: dict[str, list[float]] | None,
+    *,
+    sigma: float = _DPP_SIGMA,
+) -> float | None:
+    """Quality-weighted gaussian diversity kernel on CLAP embeddings.
+
+    Returns the max penalty across already-selected tracks, or None when
+    the candidate lacks CLAP (caller should fall back to metadata MMR).
+
+    Kernel: `q_cand × q_sel × exp(−(1−cos_sim)² / (2·σ²))`
+      - high-similarity pairs produce strong penalty (kernel ≈ 1)
+      - quality weighting ensures low-quality candidates can't "buy"
+        diversity credit by being far from everyone
+    """
+    if not candidate_clap or not selected or not clap_map:
+        return None
+    cand_vec = np.asarray(candidate_clap, dtype=np.float32)
+    cand_norm = float(np.linalg.norm(cand_vec))
+    if cand_norm == 0:
+        return None
+
+    max_penalty = 0.0
+    any_clap = False
+    for s in selected:
+        s_clap = clap_map.get(s.get("catalog_id", ""))
+        if not s_clap:
+            continue
+        any_clap = True
+        s_vec = np.asarray(s_clap, dtype=np.float32)
+        s_norm = float(np.linalg.norm(s_vec))
+        if s_norm == 0:
+            continue
+        sim = float(np.dot(cand_vec, s_vec) / (cand_norm * s_norm))
+        sim = max(-1.0, min(1.0, sim))
+        dist = 1.0 - sim
+        kernel = math.exp(-(dist * dist) / (2.0 * sigma * sigma))
+        q_sel = float(s.get("_score", 0.5))
+        penalty = candidate_score * q_sel * kernel
+        if penalty > max_penalty:
+            max_penalty = penalty
+
+    return max_penalty if any_clap else None
+
+
+def _best_centroid_similarity(
+    candidate_emb: list[float] | None,
+    centroids: list[list[float]] | None,
+    sim_fn,
+) -> float:
+    """Return the highest cosine similarity across multiple taste centroids."""
+    if not candidate_emb or not centroids:
+        return 0.0
+    return max(sim_fn(c, candidate_emb) for c in centroids)
 
 
 def score_candidate(
@@ -196,57 +271,172 @@ def score_candidate(
     weights: dict[str, float] | None = None,
     audio_features: dict[str, Any] | None = None,
     user_audio_centroid: dict[str, float] | None = None,
+    candidate_embedding: list[float] | None = None,
+    user_embedding_centroid: list[float] | None = None,
+    candidate_clap: list[float] | None = None,
+    user_clap_centroid: list[float] | None = None,
+    candidate_mert: list[float] | None = None,
+    user_mert_centroid: list[float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     staleness_index: dict[str, dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
-    candidate_tags: dict[str, float] | None = None,
-    user_tag_profile: dict[str, float] | None = None,
-    collaborative_matches: set[str] | None = None,
+    nearest_tracks: list[dict[str, Any]] | None = None,
+    candidate_mood_tags: list[str] | None = None,
+    candidate_mood_scores: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Score a single candidate song against a taste profile.
+
+    Six weighted dimensions:
+    - CLAP cosine (0.30) — holistic audio-text similarity
+    - MERT cosine (0.25) — musical structure (pitch, rhythm)
+    - EffNet cosine (0.15) — genre/style granularity
+    - Genre match (0.15) — Apple Music / Spotify genre cosine
+    - Scalar audio (0.10) — normalized euclidean on tempo/energy/danceability
+    - Artist affinity (0.05) — library presence + calibration
+
+    Multi-centroid: when the profile contains clap_centroids / mert_centroids /
+    effnet_centroids (lists of cluster centroids), similarity is computed
+    against the *nearest* cluster. Falls back to the single centroid.
 
     Returns the candidate dict augmented with:
     - _score: overall score (0-1)
     - _breakdown: per-dimension scores
     - _explanation: human-readable explanation
     """
+    from musicmind.engine.similarity import (
+        clap_similarity,
+        effnet_similarity,
+        mert_similarity,
+        scalar_audio_similarity,
+    )
+
     w = weights or DEFAULT_WEIGHTS
     genre_vector = profile.get("genre_vector", {})
     top_artists = profile.get("top_artists", [])
 
-    # 1. Language/region match (most important for regional listeners)
-    language_score = _language_match(
-        candidate.get("genre_names", []), genre_vector
-    )
+    # ── 1. Embedding similarities (multi-centroid aware) ──────
+    clap_centroids = profile.get("clap_centroids")
+    mert_centroids = profile.get("mert_centroids")
+    effnet_centroids = profile.get("effnet_centroids")
 
-    # 2. Genre match (cosine similarity)
+    clap_score = 0.0
+    has_clap = candidate_clap is not None and (
+        user_clap_centroid is not None or clap_centroids
+    )
+    if has_clap:
+        if clap_centroids:
+            clap_score = _best_centroid_similarity(
+                candidate_clap, clap_centroids, clap_similarity,
+            )
+        else:
+            clap_score = clap_similarity(user_clap_centroid, candidate_clap)
+
+    mert_score = 0.0
+    has_mert = candidate_mert is not None and (
+        user_mert_centroid is not None or mert_centroids
+    )
+    if has_mert:
+        if mert_centroids:
+            mert_score = _best_centroid_similarity(
+                candidate_mert, mert_centroids, mert_similarity,
+            )
+        else:
+            mert_score = mert_similarity(user_mert_centroid, candidate_mert)
+
+    effnet_score = 0.0
+    has_effnet = candidate_embedding is not None and (
+        user_embedding_centroid is not None or effnet_centroids
+    )
+    if has_effnet:
+        if effnet_centroids:
+            effnet_score = _best_centroid_similarity(
+                candidate_embedding, effnet_centroids, effnet_similarity,
+            )
+        else:
+            effnet_score = effnet_similarity(
+                user_embedding_centroid, candidate_embedding,
+            )
+
+    # ── 2. Genre match (cosine similarity) ────────────────
     genre_score = _genre_cosine(
         candidate.get("genre_names", []), genre_vector
     )
 
-    # 3. Audio similarity
-    audio_sim = 0.5  # neutral default when no features available
-    if audio_features and user_audio_centroid:
-        from musicmind.engine.similarity import audio_feature_similarity
-        audio_sim = audio_feature_similarity(audio_features, user_audio_centroid)
+    # ── 3. Scalar audio match ─────────────────────────────
+    scalar_score = 0.0
+    has_scalar = (
+        audio_features is not None
+        and user_audio_centroid is not None
+    )
+    if has_scalar:
+        scalar_score = scalar_audio_similarity(user_audio_centroid, audio_features)
 
-    # 4. Artist match — penalized if known artist but wrong genre
-    artist_name = candidate.get("artist_name", "").lower()
+    # ── 3b. Mood match (V 6.388 → V 6.389 hybrid) ─────────
+    # Cosine similarity between the user's library-aggregated mood
+    # distribution and the candidate's mood signal. Prefers the V 6.389
+    # sparse score vector (carries intensity — "strongly reflective" vs
+    # "faintly reflective"); falls back to the V 6.388 tag list with
+    # positional weights for tracks classified before the upgrade.
+    mood_score = 0.0
+    user_mood_dist = profile.get("mood_distribution") or None
+    has_mood = bool(
+        user_mood_dist and (candidate_mood_scores or candidate_mood_tags)
+    )
+    if has_mood:
+        from musicmind.engine.mood_tagger import mood_similarity
+        mood_score = mood_similarity(
+            user_mood_dist,
+            candidate_scores=candidate_mood_scores,
+            candidate_tags=candidate_mood_tags,
+        )
+
+    # ── 4. Artist affinity — three-tier match, wrong-genre penalised ─────
+    # Tier 1 (primary match): candidate's primary artist is in user's top —
+    #         full score, e.g. "Capo Plaza" on a Capo Plaza track.
+    # Tier 2 (feat match): candidate's primary isn't in top, but one of its
+    #         featured artists is — score discounted by FEATURING_WEIGHT=0.3.
+    #         e.g. a "Lacrim feat. Simba La Rue" track where the user has
+    #         Simba La Rue in their library but not Lacrim.
+    # Tier 3 (no match): neither → 0.
+    # The "candidate's primary was feat'd on library tracks" case is already
+    # handled by build_artist_affinity, which injects feat artists into
+    # top_artists with a 0.3 weight during profile computation.
+    from musicmind.engine.profile import parse_artists
+    raw_artist_str = candidate.get("artist_name", "")
+    # Primary artist lowercase — used by the calibration-boost lookup below.
+    # V 6.377 removed the direct `artist_name` binding when rewriting the
+    # match loop; the cal branch still needed it and broke at runtime.
+    _parsed_for_primary = parse_artists(raw_artist_str)
+    artist_name = (
+        _parsed_for_primary[0][0].lower() if _parsed_for_primary else ""
+    )
     artist_scores = {a["name"].lower(): a["score"] for a in top_artists}
-    artist_match = artist_scores.get(artist_name, 0.0)
+
+    artist_match = 0.0
+    matched_as = ""
+    for name, component_weight in parse_artists(raw_artist_str):
+        score = artist_scores.get(name.lower(), 0.0)
+        if score <= 0:
+            continue
+        weighted = score * component_weight  # primary 1.0, feat 0.3
+        if weighted > artist_match:
+            artist_match = weighted
+            matched_as = "primary" if component_weight >= 1.0 else "feat"
+
     if artist_match > 0 and genre_score < 0.2:
         artist_match *= 0.3
 
-    # 5. Diversity penalty (MMR-style)
+    # ── 5. Diversity penalty (MMR-style) ──────────────────
     diversity_penalty = 0.0
     if already_selected:
         from musicmind.engine.similarity import song_similarity
+
         max_sim = max(
             song_similarity(candidate, s) for s in already_selected
         )
         diversity_penalty = max_sim * 0.3
 
-    # 6. Staleness penalty
+    # ── 6. Staleness penalty ──────────────────────────────
     if staleness_index is not None:
         staleness = _compute_staleness(
             candidate.get("catalog_id", ""), staleness_index
@@ -256,126 +446,173 @@ def score_candidate(
         idx = _build_staleness_index(recs) if recs else {}
         staleness = _compute_staleness(candidate.get("catalog_id", ""), idx)
 
-    # 7. Cross-strategy bonus
+    # ── 7. Cross-strategy bonus ───────────────────────────
     strategy_count = candidate.get("_strategy_count", 1)
     cross_bonus = min(0.10, max(0, (strategy_count - 1)) * 0.05)
 
-    # 8. Mood boost (set by filter_candidates_by_mood)
+    # ── 7b. Discovery-weight bonus ────────────────────────
+    # Cross-strategy bonus already counts duplicate sources; discovery_weight
+    # captures positional + seed affinity from the similar_artist crawl. Cap
+    # the bonus so it stays additive (max +0.04 at perfect alignment).
+    discovery_weight = float(candidate.get("_discovery_weight", 0.0))
+    discovery_bonus = max(0.0, min(0.04, discovery_weight * 0.04))
+
+    # ── 8. Mood boost (set by filter_candidates_by_mood) ──
     mood_boost = candidate.get("_mood_boost", 0.0)
 
-    # 9. Tag similarity (Last.fm crowd-sourced mood/vibe tags)
-    tag_sim = _tag_cosine(candidate_tags, user_tag_profile)
-
-    # 10. Collaborative match (Last.fm similar tracks)
-    collab_boost = 0.0
-    if collaborative_matches:
-        candidate_key = f"{artist_name}:{candidate.get('name', '').lower()}"
-        if candidate_key in collaborative_matches:
-            collab_boost = 0.20  # Direct collaborative signal
-
-    # 11. Calibration boost — continuous function of calibration weight
-    # Scales smoothly: weight 5.0 → +0.15, 3.0 → +0.09, 1.0 → +0.03
-    # Zeroed out if the song's genre doesn't match user profile (wrong-genre penalty)
+    # ── 9. Calibration boost ──────────────────────────────
     cal_boost = 0.0
     if calibration_artists:
         cal_weight = calibration_artists.get(artist_name, 0.0)
         if cal_weight > 0:
             cal_boost = min(0.20, cal_weight * 0.03)
-            # Kill boost if this is a known artist in the wrong genre
             if genre_score < 0.15:
                 cal_boost = 0.0
 
-    # Weighted combination — 6 dimensions + bonuses
-    # When audio/tags unavailable, redistribute weight proportionally
-    has_audio = audio_features is not None and user_audio_centroid is not None
-    has_tags = candidate_tags is not None and user_tag_profile is not None
+    # ── 10. Recency boost ──────────────────────────────────
+    recency_boost = 0.0
+    release_date = candidate.get("release_date", "")
+    if release_date and len(release_date) >= 10:
+        try:
+            from datetime import UTC, datetime
+            rd = datetime.fromisoformat(release_date).replace(tzinfo=UTC)
+            age_days = (datetime.now(tz=UTC) - rd).days
+            if age_days < 30:
+                recency_boost = 0.02
+            elif age_days < 90:
+                recency_boost = 0.01
+        except (ValueError, TypeError):
+            pass
 
-    w_genre = w.get("genre", 0.25)
-    w_audio = w.get("audio", 0.20)
-    w_artist = w.get("artist", 0.15)
-    w_lang = w.get("language", 0.15)
-    w_tags = w.get("tags", 0.15)
-    w_collab = w.get("collab", 0.10)
+    # ── Weighted combination with graceful degradation ────
+    dim_scores: dict[str, float] = {}
+    dim_weights: dict[str, float] = {}
 
-    # Redistribute unavailable dimensions
-    if not has_audio:
-        redistribute = w_audio
-        w_audio = 0.0
-        w_genre += redistribute * 0.4
-        w_tags += redistribute * 0.3
-        w_artist += redistribute * 0.3
+    if has_clap:
+        dim_scores["clap"] = clap_score
+        dim_weights["clap"] = w.get("clap", 0.30)
+    if has_mert:
+        dim_scores["mert"] = mert_score
+        dim_weights["mert"] = w.get("mert", 0.25)
+    if has_effnet:
+        dim_scores["effnet"] = effnet_score
+        dim_weights["effnet"] = w.get("effnet", 0.15)
 
-    if not has_tags:
-        redistribute = w_tags
-        w_tags = 0.0
-        w_genre += redistribute * 0.5
-        w_lang += redistribute * 0.5
+    dim_scores["genre"] = genre_score
+    dim_weights["genre"] = w.get("genre", 0.15)
+    dim_scores["artist"] = artist_match
+    dim_weights["artist"] = w.get("artist", 0.05)
 
-    # Renormalize redistributed weights so core dimensions sum to 1.0
-    w_total = w_genre + w_audio + w_artist + w_lang + w_tags + w_collab
-    if w_total > 0 and abs(w_total - 1.0) > 0.001:
-        w_genre /= w_total
-        w_audio /= w_total
-        w_artist /= w_total
-        w_lang /= w_total
-        w_tags /= w_total
-        w_collab /= w_total
+    if has_scalar:
+        dim_scores["scalar"] = scalar_score
+        dim_weights["scalar"] = w.get("scalar", 0.10)
+    if has_mood:
+        dim_scores["mood_match"] = mood_score
+        dim_weights["mood_match"] = w.get("mood_match", 0.10)
 
-    overall = (
-        w_genre * genre_score
-        + w_audio * audio_sim
-        + w_artist * artist_match
-        + w_lang * language_score
-        + w_tags * tag_sim
-        + w_collab * collab_boost  # 0.0 or 0.20 — continuous, not binary
-        - 0.05 * diversity_penalty
-        - 0.03 * staleness
-        + cross_bonus
-        + mood_boost * 0.1
-        + cal_boost
+    w_total = sum(dim_weights.values())
+    if w_total > 0:
+        dim_weights = {k: v / w_total for k, v in dim_weights.items()}
+
+    overall = sum(
+        dim_weights[k] * dim_scores[k] for k in dim_scores
     )
+
+    overall += cross_bonus
+    overall += discovery_bonus
+    overall += mood_boost * 0.1
+    overall += cal_boost
+    overall += recency_boost
+    overall -= 0.05 * diversity_penalty
+    overall -= 0.03 * staleness
+
     overall = max(0.0, min(1.0, overall))
 
-    # Build explanation
+    # ── Build contextual explanation ─────────────────────
     parts = []
-    if collab_boost > 0:
-        parts.append("fans also listen to this")
-    if tag_sim > 0.6 and has_tags:
-        parts.append("similar vibe")
+    if nearest_tracks:
+        nt = nearest_tracks[0]
+        parts.append(
+            f"Similar to {nt.get('name', '?')} by "
+            f"{nt.get('artist_name', '?')}"
+        )
+    if has_clap and clap_score > 0.7:
+        parts.append("sounds like your taste")
+    if has_mert and mert_score > 0.7:
+        parts.append("similar musical structure")
     if genre_score > 0.5:
         top_genres = ", ".join(candidate.get("genre_names", [])[:2])
         parts.append(f"genre match ({top_genres})")
-    if audio_sim > 0.6 and audio_features:
-        parts.append("sounds like your taste")
+    if has_scalar and scalar_score > 0.7:
+        parts.append("similar energy/tempo")
     if artist_match > 0.5:
-        parts.append(f"you like {candidate.get('artist_name', 'this artist')}")
+        if matched_as == "feat":
+            parts.append(
+                f"features {candidate.get('artist_name', '')}"
+            )
+        else:
+            parts.append(
+                f"you like {candidate.get('artist_name', 'this artist')}"
+            )
     if cal_boost > 0.1:
         parts.append("top calibrated artist")
-    if language_score > 0.7:
-        parts.append("matches your language/region")
+    if recency_boost > 0:
+        parts.append("new release")
     if cross_bonus > 0:
         parts.append(f"found by {strategy_count} strategies")
-    if mood_boost > 0.2:
-        parts.append("strong mood match")
 
     return {
         **candidate,
         "_score": round(overall, 3),
         "_breakdown": {
+            "clap_similarity": round(clap_score, 3),
+            "mert_similarity": round(mert_score, 3),
+            "effnet_similarity": round(effnet_score, 3),
             "genre_match": round(genre_score, 3),
-            "tag_similarity": round(tag_sim, 3),
-            "collaborative_match": round(collab_boost, 3),
-            "audio_similarity": round(audio_sim, 3),
+            "scalar_similarity": round(scalar_score, 3),
+            "mood_match": round(mood_score, 3),
             "artist_match": round(artist_match, 3),
-            "language_match": round(language_score, 3),
             "calibration_boost": round(cal_boost, 3),
+            "recency_boost": round(recency_boost, 3),
             "diversity_penalty": round(diversity_penalty, 3),
             "staleness": round(staleness, 3),
             "cross_strategy_bonus": round(cross_bonus, 3),
+            "discovery_bonus": round(discovery_bonus, 3),
             "mood_boost": round(mood_boost, 3),
         },
         "_explanation": "; ".join(parts) if parts else "moderate match",
     }
+
+
+def _find_nearest_tracks(
+    candidate_clap: list[float] | None,
+    user_library_claps: dict[str, dict[str, Any]] | None,
+    top_n: int = 2,
+) -> list[dict[str, Any]]:
+    """Find the user's library tracks most similar to the candidate."""
+    if not candidate_clap or not user_library_claps:
+        return []
+    import numpy as np
+    c_arr = np.array(candidate_clap)
+    c_norm = np.linalg.norm(c_arr)
+    if c_norm == 0:
+        return []
+    c_arr = c_arr / c_norm
+
+    scored = []
+    for cid, info in user_library_claps.items():
+        emb = info.get("clap")
+        if not emb:
+            continue
+        e_arr = np.array(emb)
+        e_norm = np.linalg.norm(e_arr)
+        if e_norm == 0:
+            continue
+        sim = float(np.dot(c_arr, e_arr / e_norm))
+        scored.append((sim, info))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [s[1] for s in scored[:top_n]]
 
 
 def rank_candidates(
@@ -386,8 +623,18 @@ def rank_candidates(
     weights: dict[str, float] | None = None,
     audio_features_map: dict[str, dict[str, Any]] | None = None,
     user_audio_centroid: dict[str, float] | None = None,
+    embedding_map: dict[str, list[float]] | None = None,
+    user_embedding_centroid: list[float] | None = None,
+    clap_map: dict[str, list[float]] | None = None,
+    user_clap_centroid: list[float] | None = None,
+    mert_map: dict[str, list[float]] | None = None,
+    user_mert_centroid: list[float] | None = None,
     recent_recommendations: list[dict[str, Any]] | None = None,
     calibration_artists: dict[str, float] | None = None,
+    user_library_claps: dict[str, dict[str, Any]] | None = None,
+    mood_tags_map: dict[str, list[str]] | None = None,
+    mood_scores_map: dict[str, dict[str, float]] | None = None,
+    # Legacy params — accepted but ignored for backward compat
     user_tag_profile: dict[str, float] | None = None,
     collaborative_matches: set[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -400,66 +647,109 @@ def rank_candidates(
         return []
 
     af_map = audio_features_map or {}
+    emb_map = embedding_map or {}
     staleness_idx = _build_staleness_index(recent_recommendations or [])
 
-    # Step 1: Precompute base scores for all candidates (no diversity penalty)
     base_scored: list[dict[str, Any]] = []
     for c in candidates:
-        # Get candidate's Last.fm tags if available
-        c_tags = c.get("_lastfm_tags")
+        cid = c.get("catalog_id", "")
+        c_clap = (clap_map or {}).get(cid)
 
+        nearest = _find_nearest_tracks(
+            c_clap, user_library_claps,
+        ) if user_library_claps else None
+
+        c_moods = (mood_tags_map or {}).get(cid) or c.get("mood_tags")
+        c_scores = (mood_scores_map or {}).get(cid) or c.get("mood_scores")
         scored = score_candidate(
             c, profile, already_selected=None,
             weights=weights,
-            audio_features=af_map.get(c.get("catalog_id", "")),
+            audio_features=af_map.get(cid),
             user_audio_centroid=user_audio_centroid,
+            candidate_embedding=emb_map.get(cid),
+            user_embedding_centroid=user_embedding_centroid,
+            candidate_clap=c_clap,
+            user_clap_centroid=user_clap_centroid,
+            candidate_mert=(mert_map or {}).get(cid),
+            user_mert_centroid=user_mert_centroid,
+            candidate_mood_tags=c_moods,
+            candidate_mood_scores=c_scores,
             staleness_index=staleness_idx,
             calibration_artists=calibration_artists,
-            candidate_tags=c_tags,
-            user_tag_profile=user_tag_profile,
-            collaborative_matches=collaborative_matches,
+            nearest_tracks=nearest,
         )
         base_scored.append(scored)
 
-    # Step 2: Greedy MMR selection — only recompute diversity penalty per iteration
+    # Step 2: Greedy re-rank — DPP-style diversity + Steck calibration (V 6.386)
+    # Falls back to legacy metadata MMR for candidates without CLAP.
     from musicmind.engine.similarity import song_similarity
 
     w = weights or DEFAULT_WEIGHTS
     diversity_weight = w.get("diversity", 0.10)
+    target_genre_dist = _build_user_genre_distribution(
+        profile.get("genre_vector"),
+    )
     selected: list[dict[str, Any]] = []
     remaining = list(base_scored)
+    running_genre_counts: dict[str, float] = defaultdict(float)
+
+    cmap = clap_map or {}
 
     for _ in range(min(count, len(base_scored))):
         best_idx = -1
         best_score = -1.0
+        best_div_penalty = 0.0
+        best_cal_penalty = 0.0
 
         for i, c in enumerate(remaining):
             base_score = c["_score"]
-            # Recompute only the diversity component
-            if selected:
+            cid = c.get("catalog_id", "")
+            c_clap = cmap.get(cid)
+
+            # DPP-style quality-weighted gaussian diversity penalty on CLAP.
+            # Returns None when CLAP data is unavailable for either the
+            # candidate or all of the already-selected tracks.
+            dpp_penalty = _dpp_diversity_penalty(
+                c_clap, base_score, selected, cmap,
+            ) if selected else None
+
+            if dpp_penalty is not None:
+                diversity_penalty = dpp_penalty
+            elif selected:
+                # Fallback: legacy metadata-based MMR.
                 max_sim = max(song_similarity(c, s) for s in selected)
                 diversity_penalty = max_sim * 0.3
             else:
                 diversity_penalty = 0.0
 
-            # Base score was computed with already_selected=None (diversity=0).
-            # Simply subtract the diversity penalty from the base score.
-            adjusted = base_score - diversity_weight * diversity_penalty
+            # Steck calibration — KL(running∪cand || user target dist).
+            cal_penalty = _calibration_penalty(
+                c.get("genre_names", []),
+                running_genre_counts,
+                target_genre_dist,
+            )
+
+            adjusted = (
+                base_score
+                - diversity_weight * diversity_penalty
+                - _CALIBRATION_WEIGHT * cal_penalty
+            )
             adjusted = max(0.0, min(1.0, adjusted))
 
             if adjusted > best_score:
                 best_score = adjusted
                 best_idx = i
+                best_div_penalty = diversity_penalty
+                best_cal_penalty = cal_penalty
 
         best = remaining.pop(best_idx)
-        # Update the score and breakdown with final diversity penalty
-        if selected:
-            max_sim = max(song_similarity(best, s) for s in selected)
-            final_penalty = max_sim * 0.3
-        else:
-            final_penalty = 0.0
         best["_score"] = round(best_score, 3)
-        best["_breakdown"]["diversity_penalty"] = round(final_penalty, 3)
+        best["_breakdown"]["diversity_penalty"] = round(best_div_penalty, 3)
+        best["_breakdown"]["calibration_kl"] = round(best_cal_penalty, 4)
         selected.append(best)
+
+        # Update running genre distribution with the chosen track.
+        for g, wt in _genres_with_parents(best.get("genre_names", [])).items():
+            running_genre_counts[g] += wt
 
     return selected

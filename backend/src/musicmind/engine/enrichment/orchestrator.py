@@ -1,12 +1,11 @@
-"""Audio enrichment orchestrator — fast batch processing with Retry-After.
+"""Audio enrichment orchestrator — 2-phase local pipeline.
 
 Pipeline per track:
-1. Deezer: search by name → 30s preview MP3 + BPM (free)
-2. ReccoBeats: upload preview → 9 audio features (free)
-3. SoundStat: Spotify ID → complete features (paid, optional)
+1. Essentia (CPU): local audio features + classifier labels from preview audio
+2. Modal GPU: CLAP + MERT embeddings from preview (if configured)
 
 Features cached globally by ISRC (shared across all users).
-No artificial delays — only pauses on Retry-After headers from APIs.
+Preview URLs come from Apple Music / Spotify (already in song_metadata_cache).
 """
 
 from __future__ import annotations
@@ -22,9 +21,6 @@ from typing import Any
 import sqlalchemy as sa
 
 from musicmind.db.schema import audio_features_cache, audio_features_global
-from musicmind.engine.enrichment.deezer import fetch_deezer_features
-from musicmind.engine.enrichment.musicbrainz import resolve_spotify_id
-from musicmind.engine.enrichment.soundstat import fetch_soundstat_features
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +31,9 @@ ENRICHABLE_FIELDS = {
 
 # Concurrent tracks in-flight at once (bounded by memory: 15 × ~500KB = 7.5MB)
 # With 8 vCPU available, I/O-bound async work scales well to 15 concurrent requests
-CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "15"))
+# With ONNX pinned to 1 thread/inference, 25 concurrent async tasks
+# saturate 8 vCPU with I/O overlap. Memory: 25 × 10MB = 250MB.
+CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "25"))
 BATCH_SIZE = int(os.environ.get("WORKER_BATCH_SIZE", "50"))
 
 
@@ -44,124 +42,244 @@ async def enrich_tracks(
     tracks: list[dict[str, Any]],
     *,
     user_id: str,
-    soundstat_api_key: str | None = None,
-    budget_mode: bool = False,
+    openai_api_key: str | None = None,
+    modal_endpoint_url: str | None = None,
 ) -> dict[str, int]:
-    """Enrich tracks concurrently with bounded parallelism.
+    """2-phase enrichment pipeline.
 
-    Runs CONCURRENCY tracks simultaneously using asyncio.Semaphore.
-    Each track: Deezer search + preview download + ReccoBeats upload
-    overlap with other tracks' I/O waits.
+    Phase 1 (CPU — Essentia):
+        For each track with preview_url:
+        - Download preview audio
+        - Run Essentia extract_all → (scalar_features, effnet_embedding)
+        - Run Essentia classifier heads → mood/genre/acousticness labels
+        - Store scalar features in audio_features_cache
+        - Store EffNet embedding in audio_embeddings
+        - Store classifier labels as ai_tags in song_metadata_cache
+        - Generate AI caption via OpenAI if configured
 
-    Speed: ~5x faster than sequential (8s/track → ~1.6s/track effective).
-    Memory: bounded at CONCURRENCY × ~500KB previews.
+    Phase 2 (GPU — Modal):
+        If modal_endpoint_url configured:
+        - Batch all preview URLs that lack CLAP embeddings
+        - Call enrich_batch_via_gpu
+        - Store CLAP + MERT embeddings in audio_embeddings
+
+    Returns stats dict with enrichment counts.
     """
-    stats = {
-        "deezer": 0, "reccobeats": 0, "soundstat": 0,
+    stats: dict[str, Any] = {
+        "essentia": 0, "captions": 0,
         "skipped": 0, "failed": 0, "total": len(tracks),
+        "gpu_enriched": 0,
+        "failed_ids": [],  # catalog_ids that raised exceptions
     }
-    semaphore = asyncio.Semaphore(CONCURRENCY)
 
-    async def _bounded_enrich(track: dict[str, Any]) -> str:
-        async with semaphore:
+    # ── Phase 1: Essentia audio features (CPU, local) ─────────────────
+    audio_sem = asyncio.Semaphore(CONCURRENCY)
+
+    async def _bounded_audio(track: dict[str, Any]) -> str:
+        async with audio_sem:
             return await _enrich_single_track(
                 engine, track, user_id=user_id,
-                soundstat_api_key=soundstat_api_key,
+                openai_api_key=openai_api_key,
             )
 
-    # Process in batches of BATCH_SIZE with concurrent tracks within each batch
     for batch_start in range(0, len(tracks), BATCH_SIZE):
         batch = tracks[batch_start:batch_start + BATCH_SIZE]
-
-        # Run all tracks in this batch concurrently (bounded by semaphore)
         results = await asyncio.gather(
-            *[_bounded_enrich(track) for track in batch],
+            *[_bounded_audio(t) for t in batch],
             return_exceptions=True,
         )
-
-        for result in results:
-            if isinstance(result, str):
-                stats[result] += 1
+        for i, r in enumerate(results):
+            if isinstance(r, str):
+                stats[r] = stats.get(r, 0) + 1
             else:
                 stats["failed"] += 1
-
+                t = batch[i] if i < len(batch) else {}
+                cid = t.get("catalog_id", "")
+                if cid:
+                    stats["failed_ids"].append(cid)
+                logger.warning(
+                    "Track enrichment failed: %s — %s (%s)",
+                    t.get("name", "?"), t.get("artist_name", "?"),
+                    type(r).__name__ if isinstance(r, Exception) else r,
+                )
         gc.collect()
 
     logger.info(
-        "Enriched %d/%d: %d Deezer, %d ReccoBeats, %d SoundStat, "
-        "%d skipped, %d failed",
-        stats["deezer"] + stats["reccobeats"] + stats["soundstat"],
-        stats["total"], stats["deezer"], stats["reccobeats"],
-        stats["soundstat"], stats["skipped"], stats["failed"],
+        "Phase 1 done: %d/%d Essentia enriched (%d skipped, %d failed)",
+        stats["essentia"], stats["total"], stats["skipped"], stats["failed"],
     )
-    return stats
 
+    # ── Phase 2: GPU embeddings — CLAP + MERT via Modal ───────────────
+    if modal_endpoint_url:
+        import base64
 
-async def enrich_tracks_global(
-    engine: Any,
-    tracks: list[dict[str, Any]],
-    *,
-    soundstat_api_key: str | None = None,
-) -> dict[str, int]:
-    """Enrich tracks and store ONLY in audio_features_global (by ISRC).
+        from musicmind.db.schema import audio_embeddings
+        from musicmind.engine.enrichment.gpu_client import (
+            GPU_MIN_BATCH,
+            enrich_bytes_concurrent,
+            enrich_urls_concurrent,
+        )
 
-    Used by the worker for global enrichment — no per-user audio_features_cache.
-    Skips tracks without ISRC (can't store globally without it).
-    Reuses the same Deezer → ReccoBeats pipeline but only writes globally.
-    """
-    stats = {"enriched": 0, "skipped": 0, "failed": 0, "total": len(tracks)}
+        # Collect all track catalog_ids that might need GPU enrichment
+        track_cids = [
+            t.get("catalog_id", "") for t in tracks
+            if t.get("catalog_id")
+        ]
 
-    for track in tracks:
-        isrc = track.get("isrc", "")
-        if not isrc:
-            stats["skipped"] += 1
-            continue
-
-        # Check if already globally enriched
-        existing = await _get_global_features(engine, isrc)
-        if existing and existing.get("energy") is not None:
-            stats["skipped"] += 1
-            continue
-
-        name = track.get("name", "")
-        artist_name = track.get("artist_name", "")
-        features: dict[str, Any] = {}
-        feature_source: dict[str, str] = {}
-
-        # Stage 1: Deezer (check cached preview_url first)
-        preview_url = track.get("preview_url") or None
-        if not preview_url and (name or isrc):
-            try:
-                deezer_result = await fetch_deezer_features(
-                    name=name, artist_name=artist_name, isrc=isrc or None,
-                )
-                if deezer_result:
-                    preview_url = deezer_result.pop("preview_url", None)
-                    deezer_result.pop("deezer_id", None)
-                    _merge_features(features, feature_source, deezer_result, "deezer")
-            except Exception:
-                pass
-
-        # Stage 2: ReccoBeats
-        if preview_url:
-            try:
-                audio_bytes = await _download_preview(preview_url)
-                if audio_bytes:
-                    recco_result = await _reccobeats_with_retry(audio_bytes)
-                    del audio_bytes
-                    if recco_result:
-                        _merge_features(
-                            features, feature_source, recco_result, "reccobeats",
+        # Batch check which already have CLAP embeddings
+        cached_clap: set[str] = set()
+        if track_cids:
+            for i in range(0, len(track_cids), 500):
+                chunk = track_cids[i:i + 500]
+                async with engine.begin() as conn:
+                    result = await conn.execute(
+                        sa.select(audio_embeddings.c.catalog_id).where(
+                            sa.and_(
+                                audio_embeddings.c.user_id == user_id,
+                                audio_embeddings.c.catalog_id.in_(chunk),
+                                audio_embeddings.c.clap_embedding.isnot(None),
+                            )
                         )
+                    )
+                    cached_clap.update(row.catalog_id for row in result)
+
+        # Split into bytes-based (cached) and URL-based (fallback)
+        bytes_candidates: list[tuple[dict[str, Any], bytes]] = []
+        url_candidates: list[tuple[dict[str, Any], str]] = []
+
+        for t in tracks:
+            cid = t.get("catalog_id", "")
+            if not cid or cid in cached_clap:
+                continue
+            # Try cached audio bytes first (avoids URL expiry)
+            cached = await _get_cached_audio(engine, cid)
+            if cached:
+                bytes_candidates.append((t, cached))
+            else:
+                # Fallback: re-read fresh URL from DB
+                preview = t.get("preview_url", "")
+                if not preview:
+                    async with engine.begin() as conn:
+                        from musicmind.db.schema import (
+                            song_metadata_cache as smc,
+                        )
+                        row = (await conn.execute(
+                            sa.select(smc.c.preview_url).where(
+                                sa.and_(
+                                    smc.c.catalog_id == cid,
+                                    smc.c.preview_url.isnot(None),
+                                    smc.c.preview_url != "",
+                                )
+                            ).limit(1)
+                        )).first()
+                        if row:
+                            preview = row.preview_url
+                if preview:
+                    url_candidates.append((t, preview))
+
+        total_gpu = len(bytes_candidates) + len(url_candidates)
+        if total_gpu > 0:
+            logger.info(
+                "Phase 2: %d tracks need GPU enrichment"
+                " (%d cached bytes, %d URL fallback)",
+                total_gpu, len(bytes_candidates), len(url_candidates),
+            )
+
+        # Defer tiny batches to the next worker backfill cycle — it queries
+        # up to 200 pending tracks at once, so these will be batched with
+        # others instead of spinning up the GPU for 1-2 items.
+        if 0 < total_gpu < GPU_MIN_BATCH:
+            logger.info(
+                "Phase 2: deferring %d tracks (< %d min batch) to next "
+                "worker backfill cycle",
+                total_gpu, GPU_MIN_BATCH,
+            )
+            bytes_candidates = []
+            url_candidates = []
+
+        # Helper to store GPU results
+        async def _store_gpu_result(
+            t: dict[str, Any], gpu_data: dict[str, Any],
+        ) -> bool:
+            if not gpu_data:
+                return False
+            cid = t.get("catalog_id", "")
+            clap = gpu_data.get("clap_512")
+            mert = gpu_data.get("mert_768")
+            if not (clap or mert):
+                if gpu_data.get("error"):
+                    logger.debug(
+                        "GPU enrichment failed for %s: %s",
+                        cid, gpu_data["error"][:100],
+                    )
+                return False
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(
+                    "INSERT INTO audio_embeddings"
+                    " (catalog_id, user_id, embedding,"
+                    "  clap_embedding, mert_embedding)"
+                    " VALUES (:cid, :uid, :emb, :clap, :mert)"
+                    " ON CONFLICT (catalog_id, user_id)"
+                    " DO UPDATE SET"
+                    " clap_embedding = :clap,"
+                    " mert_embedding = :mert"
+                ), {
+                    "cid": cid, "uid": user_id,
+                    "emb": "[]",
+                    "clap": json.dumps(clap) if clap else None,
+                    "mert": json.dumps(mert) if mert else None,
+                })
+            return True
+
+        # Process bytes-based candidates (preferred — no URL expiry).
+        # enrich_bytes_concurrent splits into GPU_BATCH_SIZE chunks and
+        # dispatches up to GPU_MAX_CONCURRENT in parallel.
+        if bytes_candidates:
+            b64_items = [
+                base64.b64encode(audio).decode("ascii")
+                for _, audio in bytes_candidates
+            ]
+            try:
+                gpu_results = await enrich_bytes_concurrent(
+                    b64_items, modal_endpoint_url,
+                )
+                for (t, _), gpu_data in zip(bytes_candidates, gpu_results):
+                    if await _store_gpu_result(t, gpu_data):
+                        stats["gpu_enriched"] += 1
             except Exception:
-                pass
+                logger.warning(
+                    "Phase 2 GPU bytes dispatch failed (%d items)",
+                    len(bytes_candidates), exc_info=True,
+                )
 
-        if features and any(v is not None for v in features.values()):
-            await _store_global_features(engine, isrc, features, feature_source)
-            stats["enriched"] += 1
-        else:
-            stats["failed"] += 1
+        # Process URL-based fallback candidates
+        if url_candidates:
+            urls = [url for _, url in url_candidates]
+            try:
+                gpu_results = await enrich_urls_concurrent(
+                    urls, modal_endpoint_url,
+                )
+                for (t, _), gpu_data in zip(url_candidates, gpu_results):
+                    if await _store_gpu_result(t, gpu_data):
+                        stats["gpu_enriched"] += 1
+            except Exception:
+                logger.warning(
+                    "Phase 2 GPU URL dispatch failed (%d items)",
+                    len(url_candidates), exc_info=True,
+                )
 
+        if total_gpu > 0:
+            logger.info(
+                "Phase 2 done: %d CLAP/MERT embeddings stored",
+                stats["gpu_enriched"],
+            )
+
+    logger.info(
+        "Pipeline complete: %d essentia, %d gpu, %d captions "
+        "(%d skipped, %d failed) out of %d tracks",
+        stats["essentia"], stats["gpu_enriched"], stats["captions"],
+        stats["skipped"], stats["failed"], stats["total"],
+    )
     return stats
 
 
@@ -175,7 +293,7 @@ async def enrich_candidates(
     """Lazy-enrich recommendation candidates and return audio features map.
 
     Checks global ISRC cache first. Only enriches candidates missing features.
-    Returns catalog_id → features dict for scoring.
+    Returns catalog_id -> features dict for scoring.
     """
     af_map: dict[str, dict[str, Any]] = {}
 
@@ -218,7 +336,7 @@ async def enrich_candidates(
         if isinstance(item, Exception):
             continue
         cid, result = item
-        if result in ("deezer", "reccobeats", "soundstat"):
+        if result == "essentia":
             features = await _get_existing_features(engine, cid, user_id)
             if features:
                 clean = {k: v for k, v in features.items()
@@ -234,30 +352,37 @@ async def _enrich_single_track(
     track: dict[str, Any],
     *,
     user_id: str,
-    soundstat_api_key: str | None = None,
+    openai_api_key: str | None = None,
 ) -> str:
-    """Enrich one track. Returns result category string."""
+    """Enrich one track via Essentia. Returns result category string."""
     catalog_id = track.get("catalog_id", "")
-    name = track.get("name", "")
-    artist_name = track.get("artist_name", "")
     isrc = track.get("isrc") or ""
-    service_source = track.get("service_source", "")
 
     if not catalog_id:
         return "skipped"
 
-    # Skip fully enriched (per-user cache)
+    # Check existing features — skip only if FULLY enriched by Essentia
     existing = await _get_existing_features(engine, catalog_id, user_id)
-    if existing and not _missing_fields(existing):
+    existing_source = _get_source_dict(existing)
+    stale_sources = {"deezer", "reccobeats", "soundstat"}
+    has_stale = bool(
+        existing_source and any(s in stale_sources for s in existing_source.values())
+    )
+
+    if existing and not _missing_fields(existing) and not has_stale:
         return "skipped"
 
-    # Check global ISRC cache — if another user already enriched this song, reuse it
-    if isrc:
+    # Check global ISRC cache — reuse if enriched by Essentia (not stale)
+    if isrc and not has_stale:
         global_hit = await _get_global_features(engine, isrc)
-        if global_hit and not _missing_fields(global_hit):
+        global_source = _get_source_dict(global_hit)
+        global_stale = bool(
+            global_source and any(s in stale_sources for s in global_source.values())
+        )
+        if global_hit and not _missing_fields(global_hit) and not global_stale:
             await _store_features(
                 engine, catalog_id, user_id,
-                dict(global_hit), _get_source_dict(global_hit),
+                dict(global_hit), global_source,
             )
             return "skipped"
 
@@ -265,43 +390,7 @@ async def _enrich_single_track(
     feature_source = _get_source_dict(existing)
     enriched_by = "failed"
 
-    # Stage 0: AcousticBrainz (free, no API calls — from bulk import)
-    if isrc and _missing_fields(features):
-        try:
-            # We need the MBID — try to get it from the MusicBrainz ISRC lookup
-            # (the query is already rate-limited and cached)
-            from musicmind.engine.enrichment.acousticbrainz import (
-                enrich_from_acousticbrainz,
-            )
-
-            # Quick MBID lookup from existing data (no API call if cached)
-            async with engine.begin() as conn:
-                from musicmind.db.schema import isrc_spotify_mapping
-                result = await conn.execute(
-                    sa.select(isrc_spotify_mapping.c.resolved_via).where(
-                        isrc_spotify_mapping.c.isrc == isrc.upper()
-                    )
-                )
-                result.first()
-                # If we have an MBID-style resolved_via, try AcousticBrainz
-                # Otherwise skip (don't make API calls here)
-
-            # Try AcousticBrainz with ISRC as MBID proxy (some overlap)
-            ab_features = await enrich_from_acousticbrainz(
-                engine, isrc.upper(), existing_features=features,
-            )
-            if ab_features:
-                for k, v in ab_features.items():
-                    if k != "feature_source" and v is not None and features.get(k) is None:
-                        features[k] = v
-                        feature_source[k] = "acousticbrainz"
-                if not _missing_fields(features):
-                    enriched_by = "acousticbrainz"
-        except Exception:
-            pass  # AcousticBrainz is best-effort
-
-    # Stage 1: Deezer (BPM + preview URL)
-    # Check if we already have a cached preview URL from a previous enrichment
+    # Resolve preview URL — from track dict or song_metadata_cache
     preview_url = track.get("preview_url") or None
     if not preview_url:
         async with engine.begin() as conn:
@@ -315,60 +404,155 @@ async def _enrich_single_track(
             if row and row.preview_url:
                 preview_url = row.preview_url
 
-    if not preview_url and (name or isrc):
+    # Fallback: search Deezer for preview URL if none from service
+    if not preview_url:
         try:
-            deezer_result = await fetch_deezer_features(
-                name=name, artist_name=artist_name, isrc=isrc or None,
+            from musicmind.engine.enrichment.deezer import search_preview_url
+            preview_url = await search_preview_url(
+                name=track.get("name", ""),
+                artist_name=track.get("artist_name", ""),
+                isrc=isrc or None,
             )
-            if deezer_result:
-                preview_url = deezer_result.pop("preview_url", None)
-                deezer_result.pop("deezer_id", None)
-                if _merge_features(features, feature_source, deezer_result, "deezer"):
-                    enriched_by = "deezer"
-                # Save the preview URL to song_metadata_cache for future use
-                if preview_url:
-                    try:
-                        async with engine.begin() as conn:
-                            await conn.execute(
-                                sa.text(
-                                    "UPDATE song_metadata_cache"
-                                    " SET preview_url = :url"
-                                    " WHERE catalog_id = :cid"
-                                    "   AND (preview_url IS NULL OR preview_url = '')"
-                                ),
-                                {"url": preview_url, "cid": catalog_id},
-                            )
-                    except Exception:
-                        pass
+            if preview_url:
+                await _cache_preview_url(engine, catalog_id, preview_url)
         except Exception:
-            logger.debug("Deezer enrichment failed for %s - %s", artist_name, name)
+            logger.debug("Deezer preview fallback failed for %s", catalog_id)
 
-    # Stage 2: ReccoBeats (upload preview)
+    # Second fallback: iTunes Search API. Apple's public catalogue has
+    # stronger coverage than Deezer for Italian rap / drill — Apple is the
+    # dominant service in that market, Deezer is a distant third. Same MP3
+    # format + 30s length, so Essentia consumes it identically.
+    if not preview_url:
+        try:
+            from musicmind.engine.enrichment.itunes import (
+                search_preview_url as itunes_search_preview_url,
+            )
+            preview_url = await itunes_search_preview_url(
+                name=track.get("name", ""),
+                artist_name=track.get("artist_name", ""),
+            )
+            if preview_url:
+                await _cache_preview_url(engine, catalog_id, preview_url)
+        except Exception:
+            logger.debug("iTunes preview fallback failed for %s", catalog_id)
+
+    # No preview URL from any source → permanently mark as failed
+    if not preview_url:
+        await _store_features(
+            engine, catalog_id, user_id,
+            {}, {"_status": "no_data_available", "_reason": "no_preview_url"}, isrc="",
+        )
+        return "failed"
+
+    # Audio analysis via Essentia (local, no API limits)
     if preview_url:
         try:
-            audio_bytes = await _download_preview(preview_url)
-            if audio_bytes:
-                recco_result = await _reccobeats_with_retry(audio_bytes)
-                del audio_bytes
-                if recco_result:
-                    if _merge_features(features, feature_source, recco_result, "reccobeats"):
-                        enriched_by = "reccobeats"
-        except Exception:
-            logger.debug("ReccoBeats enrichment failed for %s", catalog_id)
+            # Check preview audio cache first (avoids expired Deezer URLs)
+            audio_bytes = await _get_cached_audio(engine, catalog_id)
 
-    # Stage 3: SoundStat (paid, gap-fill)
-    if _missing_fields(features) and soundstat_api_key:
-        try:
-            spotify_id = await _get_spotify_id(engine, track, isrc, service_source)
-            if spotify_id:
-                ss_result = await fetch_soundstat_features(
-                    spotify_id, api_key=soundstat_api_key
+            if audio_bytes is None:
+                audio_bytes = await _download_preview(preview_url)
+
+                # Cached Deezer URL expired (403)? Get a fresh one
+                if audio_bytes is None and "dzcdn.net" in preview_url:
+                    try:
+                        from musicmind.engine.enrichment.deezer import (
+                            search_preview_url,
+                        )
+                        fresh_url = await search_preview_url(
+                            name=track.get("name", ""),
+                            artist_name=track.get("artist_name", ""),
+                            isrc=isrc or None,
+                        )
+                        if fresh_url:
+                            audio_bytes = await _download_preview(fresh_url)
+                            if audio_bytes:
+                                preview_url = fresh_url
+                                # Update cached URL
+                                async with engine.begin() as conn:
+                                    from musicmind.db.schema import (
+                                        song_metadata_cache as smc,
+                                    )
+                                    await conn.execute(
+                                        sa.update(smc)
+                                        .where(
+                                            sa.and_(
+                                                smc.c.catalog_id == catalog_id,
+                                            )
+                                        )
+                                        .values(preview_url=fresh_url)
+                                    )
+                    except Exception:
+                        pass
+
+                # Cache the downloaded audio for reuse
+                if audio_bytes:
+                    await _cache_preview_audio(
+                        engine, catalog_id, audio_bytes, preview_url,
+                    )
+
+            if audio_bytes:
+                from musicmind.engine.audio.essentia_extractor import (
+                    is_essentia_available,
                 )
-                if ss_result:
-                    if _merge_features(features, feature_source, ss_result, "soundstat"):
-                        enriched_by = "soundstat"
+                if is_essentia_available():
+                    try:
+                        from musicmind.engine.audio.essentia_extractor import (
+                            extract_all,
+                        )
+                        extracted, embedding = extract_all(audio_bytes)
+
+                        # DSP scalar features (may partially fail — best effort)
+                        scalar = extracted.to_scalar_dict() if extracted else {}
+                        if scalar and _merge_features(
+                            features, feature_source, scalar, "essentia",
+                        ):
+                            enriched_by = "essentia"
+
+                        # EffNet embedding (1280-dim) — independent of DSP
+                        if embedding and len(embedding) >= 128:
+                            await _store_embedding(
+                                engine, catalog_id, user_id,
+                                embedding, isrc=isrc,
+                            )
+                            # Embedding alone counts as enrichment
+                            if enriched_by == "failed":
+                                enriched_by = "essentia"
+
+                        # AI caption from extracted features
+                        if scalar and openai_api_key:
+                            try:
+                                from musicmind.engine.explanations import (
+                                    generate_track_caption,
+                                )
+                                caption = await generate_track_caption(
+                                    scalar, openai_api_key,
+                                )
+                                if caption:
+                                    await _store_caption(
+                                        engine, catalog_id, user_id, caption,
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "Caption generation failed for %s", catalog_id,
+                                )
+
+                        # Store Essentia classifier labels as ai_tags
+                        if scalar:
+                            try:
+                                await _store_ai_tags(
+                                    engine, catalog_id, user_id, scalar,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "AI tags storage failed for %s", catalog_id,
+                                )
+                    except Exception:
+                        logger.debug("Essentia failed for %s", catalog_id)
+
+                del audio_bytes
         except Exception:
-            logger.debug("SoundStat enrichment failed for %s", catalog_id)
+            logger.debug("Audio enrichment failed for %s", catalog_id)
 
     if feature_source:
         await _store_features(
@@ -380,61 +564,11 @@ async def _enrich_single_track(
             {}, {"_status": "no_data_available"}, isrc="",
         )
 
+    # Mark preview audio as fully enriched so the worker can clean it up
+    if enriched_by != "failed":
+        await _mark_preview_enrichment_complete(engine, catalog_id)
+
     return enriched_by
-
-
-async def _reccobeats_with_retry(audio_bytes: bytes, max_retries: int = 3) -> dict[str, Any] | None:
-    """Upload to ReccoBeats with Retry-After header handling."""
-    import httpx
-
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                files = {"audioFile": ("preview.mp3", audio_bytes, "audio/mpeg")}
-                resp = await client.post(
-                    "https://api.reccobeats.com/v1/analysis/audio-features",
-                    files=files,
-                )
-                if resp.status_code == 200:
-                    return _parse_reccobeats_response(resp.json())
-
-                if resp.status_code == 429:
-                    # Use Retry-After header if present, else short default
-                    retry_after = resp.headers.get("Retry-After")
-                    wait = float(retry_after) if retry_after else 2.0
-                    logger.info("ReccoBeats 429, waiting %.1fs (Retry-After)", wait)
-                    await asyncio.sleep(wait)
-                    continue
-
-                return None
-        except httpx.ReadTimeout:
-            logger.debug("ReccoBeats timeout, attempt %d/%d", attempt + 1, max_retries)
-            continue
-        except Exception:
-            return None
-
-    return None
-
-
-def _parse_reccobeats_response(data: dict[str, Any]) -> dict[str, Any] | None:
-    """Parse ReccoBeats response into our schema."""
-    result: dict[str, Any] = {}
-    if data.get("tempo") and data["tempo"] > 0:
-        result["tempo"] = round(float(data["tempo"]), 2)
-    if data.get("energy") is not None:
-        result["energy"] = round(float(data["energy"]), 4)
-    if data.get("danceability") is not None:
-        result["danceability"] = round(float(data["danceability"]), 4)
-    if data.get("acousticness") is not None:
-        result["acousticness"] = round(float(data["acousticness"]), 4)
-    if data.get("valence") is not None:
-        result["valence_proxy"] = round(float(data["valence"]), 4)
-    if data.get("instrumentalness") is not None:
-        result["instrumentalness"] = round(float(data["instrumentalness"]), 4)
-    if data.get("loudness") is not None:
-        raw = float(data["loudness"])
-        result["loudness"] = round(max(0.0, min(1.0, (raw + 60) / 60)), 4)
-    return result if result else None
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -459,14 +593,133 @@ def _merge_features(
     features: dict[str, Any], feature_source: dict[str, str],
     new_data: dict[str, Any], source_name: str,
 ) -> int:
+    """Merge new features into existing, OVERWRITING stale sources.
+
+    Essentia always overwrites deezer/reccobeats/soundstat values.
+    Only skips fields already set by the SAME source.
+    """
     filled = 0
+    # Sources that should be overwritten by newer data
+    stale_sources = {"deezer", "reccobeats", "soundstat"}
     for field, value in new_data.items():
-        if field not in ENRICHABLE_FIELDS or features.get(field) is not None:
+        if field not in ENRICHABLE_FIELDS:
             continue
-        features[field] = value
-        feature_source[field] = source_name
-        filled += 1
+        existing_source = feature_source.get(field, "")
+        # Skip if same source already set this field
+        if features.get(field) is not None and existing_source == source_name:
+            continue
+        # Overwrite stale sources or fill empty
+        if features.get(field) is None or existing_source in stale_sources:
+            features[field] = value
+            feature_source[field] = source_name
+            filled += 1
     return filled
+
+
+async def _cache_preview_url(engine: Any, catalog_id: str, preview_url: str) -> None:
+    """Persist a resolved preview URL AND immediately download+cache bytes.
+
+    The URL is an ephemeral resource — Deezer CDN keys expire ~24h, iTunes
+    links are more durable but not guaranteed. Bytes in preview_audio_cache
+    are durable until the 7d cleanup. Downloading on resolve means every
+    future enrichment pass reads from cache and never re-hits the CDN.
+
+    If the download itself fails (403/404/timeout), we skip the URL write
+    too — storing a dead URL would leak it into next cycle's queue.
+    """
+    audio_bytes = await _download_preview(preview_url)
+    if not audio_bytes:
+        logger.debug(
+            "Preview URL resolved but download failed — skipping cache for %s",
+            catalog_id,
+        )
+        return
+
+    await _cache_preview_audio(engine, catalog_id, audio_bytes, preview_url)
+
+    from musicmind.db.schema import global_song_cache, song_metadata_cache as smc
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.update(smc)
+            .where(smc.c.catalog_id == catalog_id)
+            .values(preview_url=preview_url)
+        )
+        await conn.execute(
+            sa.update(global_song_cache)
+            .where(global_song_cache.c.catalog_id == catalog_id)
+            .values(preview_url=preview_url)
+        )
+
+
+async def _get_cached_audio(engine: Any, catalog_id: str) -> bytes | None:
+    """Check preview_audio_cache for existing audio bytes (< 7 days old)."""
+    from musicmind.db.schema import preview_audio_cache
+
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa.select(
+                    preview_audio_cache.c.audio_data,
+                    preview_audio_cache.c.downloaded_at,
+                ).where(preview_audio_cache.c.catalog_id == catalog_id)
+            )
+            row = result.first()
+        if row and row.audio_data:
+            age = (datetime.now(UTC) - row.downloaded_at).total_seconds()
+            if age < 7 * 86400:  # 7 days
+                return row.audio_data
+    except Exception:
+        logger.debug("Preview cache lookup failed for %s", catalog_id)
+    return None
+
+
+async def _cache_preview_audio(
+    engine: Any, catalog_id: str, audio_data: bytes, source_url: str,
+) -> None:
+    """Store downloaded preview audio bytes for reuse."""
+    from musicmind.db.schema import preview_audio_cache as pac
+
+    try:
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            existing = await conn.execute(
+                sa.select(pac.c.catalog_id).where(pac.c.catalog_id == catalog_id)
+            )
+            if existing.first():
+                await conn.execute(
+                    sa.update(pac).where(pac.c.catalog_id == catalog_id).values(
+                        audio_data=audio_data, source_url=source_url,
+                        downloaded_at=now, enrichment_complete=False,
+                    )
+                )
+            else:
+                await conn.execute(
+                    pac.insert().values(
+                        catalog_id=catalog_id, audio_data=audio_data,
+                        source_url=source_url, downloaded_at=now,
+                        enrichment_complete=False,
+                    )
+                )
+    except Exception:
+        logger.debug("Preview cache write failed for %s", catalog_id)
+
+
+async def _mark_preview_enrichment_complete(
+    engine: Any, catalog_id: str,
+) -> None:
+    """Mark cached preview audio as fully enriched (ready for cleanup)."""
+    from musicmind.db.schema import preview_audio_cache
+
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.update(preview_audio_cache)
+                .where(preview_audio_cache.c.catalog_id == catalog_id)
+                .values(enrichment_complete=True)
+            )
+    except Exception:
+        logger.debug("Preview cache mark-complete failed for %s", catalog_id)
 
 
 async def _download_preview(url: str) -> bytes | None:
@@ -496,13 +749,13 @@ async def _load_features_batch(
             )
         )
         for row in result:
-            features: dict[str, Any] = {}
+            row_features: dict[str, Any] = {}
             for field in ENRICHABLE_FIELDS:
                 val = getattr(row, field, None)
                 if val is not None:
-                    features[field] = val
-            if features:
-                af_map[row.catalog_id] = features
+                    row_features[field] = val
+            if row_features:
+                af_map[row.catalog_id] = row_features
     return af_map
 
 
@@ -680,11 +933,108 @@ async def _store_features(
         })
 
 
-async def _get_spotify_id(
-    engine: Any, track: dict[str, Any], isrc: str, service_source: str,
-) -> str | None:
-    if service_source == "spotify":
-        return track.get("catalog_id")
+async def _store_embedding(
+    engine: Any,
+    catalog_id: str,
+    user_id: str,
+    embedding: list[float],
+    *,
+    isrc: str = "",
+) -> None:
+    """Store embedding in per-user + global (ISRC) tables."""
+    now = datetime.now(UTC)
+    dim = len(embedding)
+    model = f"discogs-effnet-{dim}"
+
+    # Per-user storage — UPSERT to avoid TOCTOU race under concurrency
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text(
+                "INSERT INTO audio_embeddings"
+                " (catalog_id, user_id, embedding, isrc,"
+                "  model_version, embedding_dim, analyzed_at)"
+                " VALUES (:catalog_id, :user_id, :embedding, :isrc,"
+                "  :model_version, :embedding_dim, :analyzed_at)"
+                " ON CONFLICT (catalog_id, user_id) DO UPDATE SET"
+                " embedding = :embedding,"
+                " model_version = :model_version,"
+                " embedding_dim = :embedding_dim,"
+                " analyzed_at = :analyzed_at"
+            ), {
+                "catalog_id": catalog_id, "user_id": user_id,
+                "embedding": json.dumps(embedding), "isrc": isrc,
+                "model_version": model, "embedding_dim": dim,
+                "analyzed_at": now,
+            })
+    except sa.exc.IntegrityError:
+        logger.warning(
+            "Embedding integrity error for %s (concurrent insert), skipping",
+            catalog_id,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to store embedding for %s", catalog_id, exc_info=True,
+        )
+
+    # Global ISRC storage — UPSERT
     if isrc:
-        return await resolve_spotify_id(isrc, engine=engine)
-    return None
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text(
+                    "INSERT INTO audio_embeddings_global"
+                    " (isrc, embedding, embedding_dim,"
+                    "  model_version, analyzed_at)"
+                    " VALUES (:isrc, :embedding, :embedding_dim,"
+                    "  :model_version, :analyzed_at)"
+                    " ON CONFLICT (isrc) DO UPDATE SET"
+                    " embedding = :embedding,"
+                    " embedding_dim = :embedding_dim,"
+                    " model_version = :model_version,"
+                    " analyzed_at = :analyzed_at"
+                ), {
+                    "isrc": isrc,
+                    "embedding": json.dumps(embedding),
+                    "embedding_dim": dim,
+                    "model_version": model,
+                    "analyzed_at": now,
+                })
+        except sa.exc.IntegrityError:
+            logger.warning(
+                "Global embedding integrity error for ISRC %s, skipping", isrc,
+            )
+        except Exception:
+            logger.debug("Failed to store global embedding for ISRC %s", isrc)
+
+
+async def _store_caption(
+    engine: Any, catalog_id: str, user_id: str, caption: str,
+) -> None:
+    """Store AI-generated caption in song_metadata_cache."""
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "UPDATE song_metadata_cache SET ai_caption = :caption"
+                    " WHERE catalog_id = :cid AND user_id = :uid"
+                ),
+                {"caption": caption, "cid": catalog_id, "uid": user_id},
+            )
+    except Exception:
+        logger.debug("Failed to store caption for %s", catalog_id)
+
+
+async def _store_ai_tags(
+    engine: Any, catalog_id: str, user_id: str, tags: dict,
+) -> None:
+    """Store structured AI tags in song_metadata_cache."""
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "UPDATE song_metadata_cache SET ai_tags = :tags"
+                    " WHERE catalog_id = :cid AND user_id = :uid"
+                ),
+                {"tags": json.dumps(tags), "cid": catalog_id, "uid": user_id},
+            )
+    except Exception:
+        logger.debug("Failed to store AI tags for %s", catalog_id)

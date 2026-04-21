@@ -26,6 +26,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+audio = [
+    "essentia>=2.1b6.dev0",
+    "onnxruntime>=1.17",
+]
 lyrics = [
     "sentence-transformers>=2.0",
 ]

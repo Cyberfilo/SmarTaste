@@ -180,96 +180,138 @@ async def _search_artist_id(
     return None
 
 
+# ── Genre Helpers ───────────────────────────────────────────────────────────
+
+
+def _genre_overlap_with_expansion(
+    track_genres: list[str],
+    profile_genres: list[str],
+) -> bool:
+    """Check genre overlap after expanding both sides to include parent genres.
+
+    Converts "Italian Hip-Hop/Rap" → ["Italian Hip-Hop/Rap", "Hip-Hop/Rap"]
+    on both sides before set intersection, so regional and parent genres
+    match each other correctly.
+    """
+    if not track_genres or not profile_genres:
+        return False
+    from musicmind.engine.profile import expand_genres
+    track_set = {g.lower() for g in expand_genres(track_genres)}
+    profile_set = {g.lower() for g in expand_genres(profile_genres)}
+    return bool(track_set & profile_set)
+
+
 # ── Discovery Strategies ────────────────────────────────────────────────────
+
+
+def allocate_seed_budget(
+    scored_seeds: list[tuple[str, float]],
+    *,
+    total_budget: int,
+) -> dict[str, int]:
+    """Allocate track-fetch budget across seeds proportional to affinity.
+
+    Every seed gets at least 1 slot (prevents tiny-affinity seeds from being
+    silently dropped). Unallocated slots from rounding go to highest-affinity seeds.
+    """
+    if not scored_seeds or total_budget <= 0:
+        return {}
+    positive = [(n, max(0.001, s)) for n, s in scored_seeds]
+    total_weight = sum(s for _, s in positive)
+    allocation: dict[str, int] = {}
+    for name, score in positive:
+        share = int(total_budget * score / total_weight)
+        allocation[name] = max(1, share)
+    spent = sum(allocation.values())
+    leftover = total_budget - spent
+    if leftover > 0:
+        for name, _ in sorted(positive, key=lambda x: x[1], reverse=True):
+            if leftover <= 0:
+                break
+            allocation[name] += 1
+            leftover -= 1
+    return allocation
 
 
 async def discover_similar_artists(
     service: str,
     access_token: str,
-    seed_artist_names: list[str],
+    scored_seeds: list[tuple[str, float]],
     *,
     developer_token: str | None = None,
     storefront: str = "us",
     depth: int = 1,
-    songs_per_artist: int = 5,
+    total_budget: int = 40,
 ) -> list[dict[str, Any]]:
-    """Crawl similar artists and collect their top songs.
-
-    First resolves artist names to service-specific IDs via search,
-    then fetches related artists and their top tracks.
+    """Crawl similar artists with affinity-proportional budget + positional weights.
 
     Args:
         service: "spotify" or "apple_music".
         access_token: Valid access token for the service.
-        seed_artist_names: Artist names from the taste profile.
+        scored_seeds: [(artist_name, affinity_score)] from taste profile.
         developer_token: Required for Apple Music (ES256 JWT).
         storefront: Apple Music storefront (default "us").
-        depth: Hops of similar artists (default 1).
-        songs_per_artist: Top songs to collect per discovered artist.
+        depth: Hops of similar artists (default 1, unused reserved param).
+        total_budget: Total track-fetch budget across all seeds.
 
     Returns:
-        List of song_metadata_cache-compatible dicts.
+        List of song_metadata_cache-compatible dicts, each with _discovery_weight.
     """
+    import math as _math
+
     candidates: list[dict[str, Any]] = []
 
-    # Resolve seed names to IDs
-    seed_ids: list[str] = []
-    for name in seed_artist_names[:5]:
-        aid = await _search_artist_id(
-            service, access_token, name,
-            developer_token=developer_token, storefront=storefront,
-        )
-        if aid:
-            seed_ids.append(aid)
-
-    if not seed_ids:
+    if not scored_seeds:
         return candidates
 
-    visited: set[str] = set(seed_ids)
-    current_layer = list(seed_ids)
+    allocation = allocate_seed_budget(scored_seeds, total_budget=total_budget)
 
-    try:
+    for seed_name, seed_affinity in scored_seeds:
+        per_seed_budget = allocation.get(seed_name, 1)
+        related_count = max(1, min(5, int(_math.ceil(_math.sqrt(per_seed_budget)))))
+        songs_per_artist = max(1, per_seed_budget // related_count)
+
+        aid = await _search_artist_id(
+            service, access_token, seed_name,
+            developer_token=developer_token, storefront=storefront,
+        )
+        if not aid:
+            continue
+
         client = _get_shared_client()
-        for _ in range(depth):
-            next_layer: list[str] = []
-            for artist_id in current_layer[:10]:
-                try:
-                    related = await _fetch_related_artists(
-                        client, service, access_token, artist_id,
-                        developer_token=developer_token,
-                        storefront=storefront,
-                        limit=5,
-                    )
-                    for rid, artist_genres in related:
-                        if rid in visited:
-                            continue
-                        visited.add(rid)
-                        next_layer.append(rid)
+        try:
+            related = await _fetch_related_artists(
+                client, service, access_token, aid,
+                developer_token=developer_token,
+                storefront=storefront,
+                limit=related_count,
+            )
+        except (httpx.HTTPStatusError, httpx.HTTPError):
+            logger.warning("Error crawling seed %s on %s", seed_name, service)
+            continue
 
-                        tracks = await _fetch_artist_top_tracks(
-                            client, service, access_token, rid,
-                            developer_token=developer_token,
-                            storefront=storefront,
-                            limit=songs_per_artist,
-                        )
-                        # Backfill Spotify genres from artist data
-                        if service == "spotify" and artist_genres:
-                            for t in tracks:
-                                if not t.get("genre_names"):
-                                    t["genre_names"] = artist_genres
-                        candidates.extend(tracks)
-                except (httpx.HTTPStatusError, httpx.HTTPError):
-                    logger.warning(
-                        "Error crawling artist %s on %s", artist_id, service
-                    )
-                    continue
-            current_layer = next_layer
-
-    except (httpx.HTTPStatusError, httpx.HTTPError):
-        logger.exception("Connection error during similar artist crawl on %s", service)
+        for position, (rid, artist_genres) in enumerate(related):
+            positional_weight = 1.0 / (1.0 + position * 0.3)
+            try:
+                tracks = await _fetch_artist_top_tracks(
+                    client, service, access_token, rid,
+                    developer_token=developer_token,
+                    storefront=storefront,
+                    limit=songs_per_artist,
+                )
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                continue
+            if service == "spotify" and artist_genres:
+                for t in tracks:
+                    if not t.get("genre_names"):
+                        t["genre_names"] = artist_genres
+            for t in tracks:
+                t["_discovery_weight"] = positional_weight * seed_affinity
+            candidates.extend(tracks)
 
     logger.info(
-        "Discovered %d tracks via similar_artists on %s", len(candidates), service
+        "Discovered %d tracks via similar_artists on %s (budget=%d)",
+        len(candidates), service, total_budget,
     )
     return candidates
 
@@ -300,7 +342,7 @@ async def discover_genre_adjacent(
 
     try:
         client = _get_shared_client()
-        for genre in top_genres[:3]:
+        for genre in top_genres:
             try:
                 if service == "spotify":
                     genre_slug = genre.lower().replace("/", " ")
@@ -427,7 +469,7 @@ async def discover_editorial(
 
     try:
         client = _get_shared_client()
-        for genre in top_genres[:3]:
+        for genre in top_genres:
             try:
                 if service == "spotify":
                     # Spotify search: use genre: filter + year range for fresh tracks
@@ -452,6 +494,7 @@ async def discover_editorial(
                         candidates.append(track)
 
                 elif service == "apple_music":
+                    genre_term = genre.replace("/", " ")
                     headers = {
                         "Authorization": f"Bearer {developer_token or access_token}"
                     }
@@ -459,7 +502,7 @@ async def discover_editorial(
                         f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/search",
                         headers=headers,
                         params={
-                            "term": query,
+                            "term": genre_term,
                             "types": "songs",
                             "limit": limit,
                         },
@@ -515,7 +558,7 @@ async def discover_chart_filter(
         List of song_metadata_cache-compatible dicts filtered by genre overlap.
     """
     candidates: list[dict[str, Any]] = []
-    top5 = set(g.lower() for g in profile_genres[:5])
+    profile_genres_top5 = list(profile_genres)[:5]
 
     try:
         client = _get_shared_client()
@@ -550,6 +593,19 @@ async def discover_chart_filter(
                 except (httpx.HTTPStatusError, httpx.HTTPError):
                     continue
 
+            # Post-filter: only apply genre overlap to tracks that HAVE genres.
+            # Spotify new-release tracks usually carry empty genre_names (genres
+            # live on artist objects, not tracks). Pass them through when untagged;
+            # reject only when tagged genres are known to not match.
+            candidates = [
+                c for c in candidates
+                if not c.get("genre_names")
+                or _genre_overlap_with_expansion(
+                    c.get("genre_names", []),
+                    profile_genres_top5,
+                )
+            ]
+
         elif service == "apple_music":
             headers = {
                 "Authorization": f"Bearer {developer_token or access_token}"
@@ -564,11 +620,11 @@ async def discover_chart_filter(
             for chart in chart_data:
                 for item in chart.get("data", []):
                     track = _apple_track_to_cache_dict(item)
-                    # Filter: keep only tracks with genre overlap
-                    track_genres = set(
-                        g.lower() for g in track.get("genre_names", [])
-                    )
-                    if track_genres & top5:
+                    # Filter: keep only tracks with expanded genre overlap
+                    if _genre_overlap_with_expansion(
+                        track.get("genre_names", []),
+                        profile_genres_top5,
+                    ):
                         candidates.append(track)
 
     except (httpx.HTTPStatusError, httpx.HTTPError):
@@ -664,5 +720,142 @@ async def _fetch_artist_top_tracks(
         views = resp.json().get("data", [{}])[0].get("views", {})
         songs = views.get("top-songs", {}).get("data", [])
         return [_apple_track_to_cache_dict(s) for s in songs[:limit]]
+
+    return []
+
+
+async def _fetch_artist_full_discography(
+    client: httpx.AsyncClient,
+    service: str,
+    access_token: str,
+    artist_id: str,
+    *,
+    developer_token: str | None = None,
+    storefront: str = "us",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Paginate albums → tracks to build a deduped discography list.
+
+    The service top-tracks endpoints are hard-capped at ~10 items, so the
+    indexer's "100% discography for the top artist" guarantee used to be a
+    lie — the top artist got at most 10 tracks fetched. This walks the
+    artist's album list and aggregates every track, deduped by ISRC (or by
+    (title, album) pair when ISRC is absent on the short object).
+
+    Stops as soon as `limit` tracks are collected so the function is
+    bounded even for prolific artists. Apple returns ISRC inline; Spotify
+    returns SimplifiedTrackObject without ISRC — those rows rely on the
+    worker's _backfill_isrcs pass to resolve via Deezer/MusicBrainz later.
+    """
+    collected: list[dict[str, Any]] = []
+    seen_isrcs: set[str] = set()
+    seen_keys: set[tuple[str, str]] = set()
+
+    def _maybe_push(track: dict[str, Any]) -> bool:
+        """Add if not a duplicate. Returns True when we still need more."""
+        isrc = (track.get("isrc") or "").strip()
+        if isrc and isrc in seen_isrcs:
+            return len(collected) < limit
+        key = (
+            (track.get("name", "") or "").strip().lower(),
+            (track.get("album_name", "") or "").strip().lower(),
+        )
+        if not isrc and key in seen_keys:
+            return len(collected) < limit
+        if isrc:
+            seen_isrcs.add(isrc)
+        else:
+            seen_keys.add(key)
+        collected.append(track)
+        return len(collected) < limit
+
+    if service == "spotify":
+        offset = 0
+        page_size = 50
+        while len(collected) < limit:
+            try:
+                resp = await _request_with_retry(client, "GET",
+                    f"{SPOTIFY_API_BASE}/artists/{artist_id}/albums",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={
+                        "include_groups": "album,single,compilation",
+                        "limit": page_size, "offset": offset,
+                    },
+                )
+                resp.raise_for_status()
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                break
+            payload = resp.json()
+            albums = payload.get("items", [])
+            if not albums:
+                break
+            for album in albums:
+                album_id = album.get("id", "")
+                if not album_id:
+                    continue
+                try:
+                    tr_resp = await _request_with_retry(client, "GET",
+                        f"{SPOTIFY_API_BASE}/albums/{album_id}/tracks",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        params={"limit": 50},
+                    )
+                    tr_resp.raise_for_status()
+                except (httpx.HTTPStatusError, httpx.HTTPError):
+                    continue
+                for track in tr_resp.json().get("items", []):
+                    # /albums/{id}/tracks returns SimplifiedTrackObject — no
+                    # ISRC and no album embedded. Re-inject album so the
+                    # cache-dict converter can pick up artwork + release.
+                    track.setdefault("album", album)
+                    if not _maybe_push(_spotify_track_to_cache_dict(track)):
+                        return collected[:limit]
+            if not payload.get("next"):
+                break
+            offset += len(albums)
+        return collected[:limit]
+
+    if service == "apple_music":
+        headers = {"Authorization": f"Bearer {developer_token or access_token}"}
+        offset = 0
+        page_size = 100
+        while len(collected) < limit:
+            try:
+                resp = await _request_with_retry(client, "GET",
+                    f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/artists/{artist_id}/albums",
+                    headers=headers,
+                    params={"limit": page_size, "offset": offset},
+                )
+                resp.raise_for_status()
+            except (httpx.HTTPStatusError, httpx.HTTPError):
+                break
+            payload = resp.json()
+            albums = payload.get("data", [])
+            if not albums:
+                break
+            for album in albums:
+                album_id = album.get("id", "")
+                if not album_id:
+                    continue
+                try:
+                    tr_resp = await _request_with_retry(client, "GET",
+                        f"{APPLE_MUSIC_API_BASE}/catalog/{storefront}/albums/{album_id}",
+                        headers=headers,
+                    )
+                    tr_resp.raise_for_status()
+                except (httpx.HTTPStatusError, httpx.HTTPError):
+                    continue
+                album_data = tr_resp.json().get("data", [{}])[0]
+                tracks = (
+                    album_data.get("relationships", {})
+                    .get("tracks", {})
+                    .get("data", [])
+                )
+                for track in tracks:
+                    if not _maybe_push(_apple_track_to_cache_dict(track)):
+                        return collected[:limit]
+            if not payload.get("next"):
+                break
+            offset += len(albums)
+        return collected[:limit]
 
     return []

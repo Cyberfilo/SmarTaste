@@ -69,12 +69,18 @@ class Settings(BaseSettings):
     # Logging database (separate PostgreSQL for request/enrichment logs)
     logs_database_url: str | None = None
 
-    # Last.fm API key (free, used for tags + similar tracks)
-    lastfm_api_key: str | None = None
+    # OpenAI API key for AI-generated track captions and recommendation explanations
+    openai_api_key: str | None = None
 
-    # Audio Enrichment APIs (optional — degrades gracefully)
-    # SoundStat: paid API (0.01 EUR/track), used only for specific recommendations
-    soundstat_api_key: str | None = None
+    # Modal GPU worker endpoint URL for Tier 2 enrichment (CLAP + MERT)
+    modal_endpoint_url: str | None = None
+
+    # GPU enrichment mode: CLOUD (Modal) or LOCAL (self-hosted, via tunnel).
+    # When LOCAL, modal_endpoint_url is transparently swapped with
+    # local_gpu_endpoint_url in model_post_init — so every caller of
+    # settings.modal_endpoint_url gets the active endpoint without changes.
+    gpu_mode: str = "CLOUD"
+    local_gpu_endpoint_url: str | None = None
 
     # Staging mode: auto-resets DB on startup (clean slate for testing).
     # Set MUSICMIND_STAGING=true on the staging Railway environment.
@@ -83,10 +89,21 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "MUSICMIND_", "env_file": ".env"}
 
     def model_post_init(self, __context: object) -> None:
-        """Fix database URLs after loading from env.
+        """Validate required secrets and fix database URLs after loading from env.
 
         Railway/Heroku provide postgresql:// but asyncpg needs postgresql+asyncpg://.
         """
+        if not self.sandbox and not self.staging:
+            if not self.fernet_key:
+                raise ValueError(
+                    "MUSICMIND_FERNET_KEY is required in production. "
+                    "Generate with: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+                )
+            if not self.jwt_secret_key:
+                raise ValueError(
+                    "MUSICMIND_JWT_SECRET_KEY is required in production. "
+                    "Generate with: python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+                )
         if self.database_url.startswith("postgresql://"):
             object.__setattr__(
                 self,
@@ -98,4 +115,16 @@ class Settings(BaseSettings):
                 self,
                 "logs_database_url",
                 self.logs_database_url.replace("postgresql://", "postgresql+asyncpg://", 1),
+            )
+        # GPU mode override: when LOCAL, swap modal_endpoint_url with the
+        # local endpoint so every existing caller transparently routes to
+        # the self-hosted server instead of Modal.
+        if (
+            self.gpu_mode.upper() == "LOCAL"
+            and self.local_gpu_endpoint_url
+        ):
+            object.__setattr__(
+                self,
+                "modal_endpoint_url",
+                self.local_gpu_endpoint_url,
             )

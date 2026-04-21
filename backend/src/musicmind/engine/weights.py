@@ -2,7 +2,7 @@
 
 Two layers:
 1. Context-adaptive: weights shift based on user profile characteristics
-   (regional concentration, audio availability, calibration presence).
+   (embedding availability, calibration presence, mood mode).
    Works from day one, no feedback needed.
 2. Feedback-learned: coordinate descent on per-dimension breakdowns.
    Requires 10+ feedback entries with stored breakdowns.
@@ -15,12 +15,16 @@ from typing import Any
 import numpy as np
 
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "genre": 0.25,
-    "tags": 0.15,
-    "collab": 0.10,
-    "audio": 0.20,
-    "artist": 0.15,
-    "language": 0.15,
+    # V 6.388: mood_match added (0.10) as a dedicated affect/valence
+    # signal; CLAP and MERT each lose 0.05 to make room so production-
+    # style neighbors with opposite mood stop tying on similarity.
+    "clap": 0.25,
+    "mert": 0.22,
+    "effnet": 0.13,
+    "genre": 0.15,
+    "scalar": 0.10,
+    "mood_match": 0.10,
+    "artist": 0.05,
 }
 
 MIN_FEEDBACK_FOR_OPTIMIZATION = 10
@@ -34,12 +38,13 @@ FEEDBACK_TARGETS: dict[str, float] = {
 
 # Maps weight keys to breakdown keys for score recomputation
 _BREAKDOWN_MAP: dict[str, str] = {
+    "clap": "clap_similarity",
+    "mert": "mert_similarity",
+    "effnet": "effnet_similarity",
     "genre": "genre_match",
-    "tags": "tag_similarity",
-    "collab": "collaborative_match",
-    "audio": "audio_similarity",
+    "scalar": "scalar_similarity",
+    "mood_match": "mood_match",
     "artist": "artist_match",
-    "language": "language_match",
     "diversity": "diversity_penalty",
     "staleness": "staleness",
 }
@@ -58,100 +63,89 @@ def compute_context_weights(
     """Compute scoring weights adapted to this user's profile characteristics.
 
     Shifts weights based on:
-    - Regional concentration: users with >50% one language get higher language weight
-    - Audio availability: if enriched features exist, audio weight increases
+    - Embedding availability: CLAP/MERT/EffNet centroids present → boost those
+    - Audio scalar availability: if enriched features exist, scalar weight increases
     - Calibration presence: if user did onboarding, artist weight increases
-    - Mood mode: if mood filter active, audio becomes dominant
+    - Mood mode: if mood filter active, CLAP + scalar become dominant
 
     Returns normalized weights summing to 1.0.
     """
-    genre_vector = profile.get("genre_vector", {})
+    # ── Base weights ──────────────────────────────────────
+    w_clap = 0.25
+    w_mert = 0.22
+    w_effnet = 0.13
+    w_genre = 0.15
+    w_scalar = 0.10
+    w_mood = 0.10
+    w_artist = 0.05
 
-    # ── Measure regional concentration ─────────────────────
-    regional_strength = _measure_regional_strength(genre_vector)
+    # Check which embedding centroids are available in the profile
+    has_clap = profile.get("clap_centroid") is not None
+    has_mert = profile.get("mert_centroid") is not None
+    has_effnet = profile.get("embedding_centroid") is not None
 
-    # ── Base weights, then shift ───────────────────────────
-    w_genre = 0.25
-    w_tags = 0.15
-    w_collab = 0.10
-    w_audio = 0.20
-    w_artist = 0.15
-    w_language = 0.15
+    # If embeddings are missing, redistribute their weight to genre + scalar
+    if not has_clap:
+        redistribute = w_clap
+        w_clap = 0.0
+        w_genre += redistribute * 0.6
+        w_scalar += redistribute * 0.4
 
-    # Regional listeners: proportional scaling based on actual concentration.
-    # 90% regional → language becomes dominant (~35%), genre/audio reduced
-    # 50% regional → moderate boost (~22%)
-    # 10% regional → language nearly zero (~5%), genre/tags get the weight
-    if regional_strength > 0.3:
-        # Continuous scaling: stronger regional taste = more language weight
-        # At 0.3 → boost=0.0, at 0.6 → boost=0.075, at 0.9 → boost=0.225
-        boost = min(0.25, (regional_strength - 0.3) ** 1.5 * 0.6)
-        w_language += boost
-        # Take proportionally from genre and audio (the least regional signals)
-        w_genre -= boost * 0.4
-        w_audio -= boost * 0.4
-        w_collab -= boost * 0.2
-    elif regional_strength < 0.15:
-        # Very global listener: language nearly irrelevant
-        reduction = w_language - 0.03
-        w_language = 0.03
-        w_genre += reduction * 0.5
-        w_tags += reduction * 0.5
+    if not has_mert:
+        redistribute = w_mert
+        w_mert = 0.0
+        w_genre += redistribute * 0.6
+        w_scalar += redistribute * 0.4
 
-    # Audio features available: boost audio
+    if not has_effnet:
+        redistribute = w_effnet
+        w_effnet = 0.0
+        w_genre += redistribute * 0.6
+        w_scalar += redistribute * 0.4
+
+    # Audio scalar features available: boost scalar weight slightly
     if has_audio:
-        w_audio += 0.05
-        w_language -= 0.03
-        w_genre -= 0.02
+        w_scalar += 0.05
+        w_genre -= 0.03
+        w_artist -= 0.02
 
     # Calibration exists: boost artist
     if has_calibration:
         w_artist += 0.05
         w_genre -= 0.03
-        w_language -= 0.02
+        w_scalar -= 0.02
 
-    # Mood active: audio + tags become dominant
+    # V 6.388: no mood_match signal available → redistribute to genre + scalar.
+    has_mood = bool(profile.get("mood_distribution"))
+    if not has_mood:
+        redistribute = w_mood
+        w_mood = 0.0
+        w_genre += redistribute * 0.5
+        w_scalar += redistribute * 0.5
+
+    # Mood active (the separate mood filter, not mood_match dimension):
+    # CLAP holistic vibe + scalar become dominant
     if mood_active:
-        w_audio = max(w_audio, 0.30)
-        w_tags = max(w_tags, 0.25)
-        remaining = 1.0 - w_audio - w_tags
-        other = w_genre + w_artist + w_language + w_collab
+        w_clap = max(w_clap, 0.35)
+        w_scalar = max(w_scalar, 0.20)
+        remaining = 1.0 - w_clap - w_scalar
+        other = w_mert + w_effnet + w_genre + w_mood + w_artist
         ratio = remaining / other if other > 0 else 1.0
+        w_mert *= ratio
+        w_effnet *= ratio
         w_genre *= ratio
+        w_mood *= ratio
         w_artist *= ratio
-        w_language *= ratio
-        w_collab *= ratio
 
     return _normalize_weights({
+        "clap": w_clap,
+        "mert": w_mert,
+        "effnet": w_effnet,
         "genre": w_genre,
-        "tags": w_tags,
-        "collab": w_collab,
-        "audio": w_audio,
+        "scalar": w_scalar,
+        "mood_match": w_mood,
         "artist": w_artist,
-        "language": w_language,
     })
-
-
-def _measure_regional_strength(genre_vector: dict[str, float]) -> float:
-    """Measure how regional/language-concentrated the user's taste is.
-
-    Returns 0.0 (completely global) to 1.0 (entirely one region).
-    Looks at genre names with regional prefixes (Italian, French, Korean, etc.)
-    and sums their weight in the genre vector.
-    """
-    if not genre_vector:
-        return 0.0
-
-    regional_weight = 0.0
-    for genre, weight in genre_vector.items():
-        parts = genre.split()
-        if len(parts) >= 2 and parts[0][0].isupper() and len(parts[0]) > 1:
-            regional_weight += weight
-        elif "-" in genre and len(genre.split("-")[0]) <= 2:
-            # K-Pop, J-Rock style
-            regional_weight += weight
-
-    return min(1.0, regional_weight)
 
 
 # ── Feedback-Learned Weights ──────────────────────────────────────────────

@@ -87,12 +87,13 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _extract_user_id(request: Request) -> str | None:
-        """Best-effort user_id extraction from JWT cookie."""
+        """Extract user_id from JWT cookie with full signature verification."""
         token = request.cookies.get("access_token")
         if not token:
             return None
         try:
-            payload = jwt.decode(token, options={"verify_signature": False})
+            settings = request.app.state.settings
+            payload = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
             return payload.get("sub")
         except Exception:
             return None

@@ -35,6 +35,10 @@ async def get_recommendations(
     strategy: str = Query(default="all", description="Discovery strategy"),
     mood: str | None = Query(default=None, description="Mood filter"),
     limit: int = Query(default=10, ge=1, le=50, description="Max results"),
+    mode: str = Query(
+        default="all",
+        description="Candidate pool: all | your_artists | discover",
+    ),
     current_user: dict = Depends(get_current_user),
 ) -> RecommendationsResponse:
     """Get personalized music recommendations.
@@ -66,6 +70,11 @@ async def get_recommendations(
         )
 
     try:
+        if mode not in {"all", "your_artists", "discover"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="mode must be one of: all, your_artists, discover",
+            )
         result = await recommendation_service.get_recommendations(
             request.app.state.engine,
             request.app.state.encryption,
@@ -74,6 +83,7 @@ async def get_recommendations(
             strategy=strategy,
             mood=mood,
             limit=limit,
+            mode=mode,
         )
     except ValueError as exc:
         raise HTTPException(

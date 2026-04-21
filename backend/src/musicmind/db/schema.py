@@ -109,34 +109,6 @@ refresh_tokens = sa.Table(
 
 # ── Adapted Data Tables (all with user_id FK) ───────────────────────────────
 
-listening_history = sa.Table(
-    "listening_history",
-    metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column(
-        "user_id",
-        sa.Text,
-        sa.ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    ),
-    sa.Column("song_id", sa.Text, nullable=False, index=True),
-    sa.Column("song_name", sa.Text, nullable=False),
-    sa.Column("artist_name", sa.Text, nullable=False),
-    sa.Column("album_name", sa.Text, server_default=""),
-    sa.Column("genre_names", sa.JSON, server_default="[]"),
-    sa.Column("duration_ms", sa.Integer, nullable=True),
-    sa.Column(
-        "observed_at",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-    sa.Column("position_in_recent", sa.Integer, nullable=True),
-    sa.Column("source", sa.Text, nullable=False, server_default="recently_played"),
-    sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
-)
-
 song_metadata_cache = sa.Table(
     "song_metadata_cache",
     metadata,
@@ -163,6 +135,8 @@ song_metadata_cache = sa.Table(
     sa.Column("artwork_url_template", sa.Text, nullable=True),
     sa.Column("preview_url", sa.Text, nullable=True),
     sa.Column("user_rating", sa.Integer, nullable=True),
+    sa.Column("ai_caption", sa.Text, nullable=True),
+    sa.Column("ai_tags", sa.JSON, nullable=True),
     sa.Column("date_added_to_library", sa.DateTime(timezone=True), nullable=True),
     sa.Column(
         "fetched_at",
@@ -224,30 +198,13 @@ taste_profile_snapshots = sa.Table(
     sa.Column("listening_hours_estimated", sa.Float, server_default="0.0"),
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
     sa.Column("audio_centroid", sa.JSON, server_default="{}"),
-)
-
-recommendation_feedback = sa.Table(
-    "recommendation_feedback",
-    metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column(
-        "user_id",
-        sa.Text,
-        sa.ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    ),
-    sa.Column("catalog_id", sa.Text, nullable=False, index=True),
-    sa.Column("recommendation_id", sa.Text, nullable=True),
-    sa.Column("feedback_type", sa.Text, nullable=False),
-    sa.Column("predicted_score", sa.Float, nullable=True),
-    sa.Column("weight_snapshot", sa.JSON, server_default="{}"),
-    sa.Column(
-        "created_at",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
+    sa.Column("embedding_centroid", sa.JSON, nullable=True),
+    sa.Column("clap_centroid", sa.JSON, nullable=True),
+    sa.Column("mert_centroid", sa.JSON, nullable=True),
+    # V 6.388: normalized distribution over the mood taxonomy, summed
+    # across the user's library mood_tags. Used by the `mood_match`
+    # scorer dimension. Nullable while old snapshots age out.
+    sa.Column("mood_distribution", sa.JSON, nullable=True),
 )
 
 audio_features_cache = sa.Table(
@@ -272,7 +229,7 @@ audio_features_cache = sa.Table(
     sa.Column("scale", sa.Text, nullable=True),
     sa.Column("instrumentalness", sa.Float, nullable=True),
     sa.Column("loudness", sa.Float, nullable=True),
-    # Per-field provenance: {"tempo": "deezer", "energy": "soundstat", ...}
+    # Per-field provenance: {"tempo": "essentia", "energy": "essentia", ...}
     sa.Column("feature_source", sa.JSON, server_default="{}"),
     sa.Column(
         "analyzed_at",
@@ -308,20 +265,6 @@ audio_features_global = sa.Table(
     ),
 )
 
-isrc_spotify_mapping = sa.Table(
-    "isrc_spotify_mapping",
-    metadata,
-    sa.Column("isrc", sa.Text, primary_key=True),
-    sa.Column("spotify_id", sa.Text, nullable=True),
-    sa.Column("resolved_via", sa.Text, nullable=False, server_default="unknown"),
-    sa.Column(
-        "resolved_at",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-)
-
 sound_classification_cache = sa.Table(
     "sound_classification_cache",
     metadata,
@@ -341,32 +284,6 @@ sound_classification_cache = sa.Table(
     ),
     sa.Column("analyzer_version", sa.Text, server_default=""),
     sa.PrimaryKeyConstraint("catalog_id", "user_id"),
-)
-
-play_count_proxy = sa.Table(
-    "play_count_proxy",
-    metadata,
-    sa.Column("song_id", sa.Text, nullable=False),
-    sa.Column(
-        "user_id",
-        sa.Text,
-        sa.ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-    ),
-    sa.Column("seen_count", sa.Integer, nullable=False, server_default="1"),
-    sa.Column(
-        "first_seen",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-    sa.Column(
-        "last_seen",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-    sa.PrimaryKeyConstraint("song_id", "user_id"),
 )
 
 chat_conversations = sa.Table(
@@ -430,7 +347,10 @@ audio_embeddings = sa.Table(
     ),
     sa.Column("embedding", sa.JSON, nullable=False, server_default="[]"),
     sa.Column("isrc", sa.Text, nullable=True),
-    sa.Column("model_version", sa.Text, server_default="discogs-effnet-bs64"),
+    sa.Column("model_version", sa.Text, server_default="discogs-effnet-1280"),
+    sa.Column("embedding_dim", sa.Integer, server_default="128"),
+    sa.Column("clap_embedding", sa.JSON, nullable=True),
+    sa.Column("mert_embedding", sa.JSON, nullable=True),
     sa.Column(
         "analyzed_at",
         sa.DateTime(timezone=True),
@@ -440,124 +360,21 @@ audio_embeddings = sa.Table(
     sa.PrimaryKeyConstraint("catalog_id", "user_id"),
 )
 
-# ── Knowledge Graph Tables ─────────────────────────────────────────────────
-
-kg_artists = sa.Table(
-    "kg_artists",
+audio_embeddings_global = sa.Table(
+    "audio_embeddings_global",
     metadata,
-    sa.Column("mbid", sa.Text, primary_key=True),
-    sa.Column("name", sa.Text, nullable=False),
-    sa.Column("disambiguation", sa.Text, server_default=""),
-    sa.Column("genres", sa.JSON, server_default="[]"),
-    sa.Column("embedding", sa.JSON, nullable=True),
+    sa.Column("isrc", sa.Text, primary_key=True),
+    sa.Column("embedding", sa.JSON, nullable=False, server_default="[]"),
+    sa.Column("embedding_dim", sa.Integer, nullable=False, server_default="1280"),
+    sa.Column("model_version", sa.Text, server_default="discogs-effnet-1280"),
+    sa.Column("clap_embedding", sa.JSON, nullable=True),
+    sa.Column("mert_embedding", sa.JSON, nullable=True),
     sa.Column(
-        "fetched_at",
+        "analyzed_at",
         sa.DateTime(timezone=True),
         nullable=False,
         server_default=sa.func.now(),
     ),
-)
-
-kg_relationships = sa.Table(
-    "kg_relationships",
-    metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("source_mbid", sa.Text, nullable=False, index=True),
-    sa.Column("target_mbid", sa.Text, nullable=False, index=True),
-    sa.Column("relation_type", sa.Text, nullable=False),
-    sa.Column("weight", sa.Float, server_default="1.0"),
-    sa.Column(
-        "fetched_at",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-)
-
-# ── Bandit State Table ─────────────────────────────────────────────────────
-
-bandit_arms = sa.Table(
-    "bandit_arms",
-    metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column(
-        "user_id",
-        sa.Text,
-        sa.ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    ),
-    sa.Column("context_key", sa.Text, nullable=False),
-    sa.Column("alpha", sa.Float, nullable=False, server_default="1.0"),
-    sa.Column("beta", sa.Float, nullable=False, server_default="1.0"),
-    sa.Column(
-        "updated_at",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-    sa.UniqueConstraint("user_id", "context_key", name="uq_bandit_user_context"),
-)
-
-# ── Last.fm Tags Cache ─────────────────────────────────────────────────────
-
-lastfm_tags_cache = sa.Table(
-    "lastfm_tags_cache",
-    metadata,
-    sa.Column("entity_type", sa.Text, nullable=False),
-    sa.Column("entity_id", sa.Text, nullable=False),
-    sa.Column("tags", sa.JSON, nullable=False, server_default="{}"),
-    sa.Column(
-        "fetched_at",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-    sa.PrimaryKeyConstraint("entity_type", "entity_id"),
-)
-
-acousticbrainz_cache = sa.Table(
-    "acousticbrainz_cache",
-    metadata,
-    sa.Column("mbid", sa.Text, primary_key=True),
-    # High-level descriptors (probabilities 0-1)
-    sa.Column("mood_aggressive", sa.Float, nullable=True),
-    sa.Column("mood_happy", sa.Float, nullable=True),
-    sa.Column("mood_relaxed", sa.Float, nullable=True),
-    sa.Column("mood_sad", sa.Float, nullable=True),
-    sa.Column("mood_party", sa.Float, nullable=True),
-    sa.Column("mood_electronic", sa.Float, nullable=True),
-    sa.Column("mood_acoustic", sa.Float, nullable=True),
-    sa.Column("danceability", sa.Float, nullable=True),
-    sa.Column("gender", sa.Text, nullable=True),  # male/female
-    sa.Column("voice_instrumental", sa.Text, nullable=True),  # voice/instrumental
-    sa.Column("tonal_atonal", sa.Text, nullable=True),
-    # Genre probabilities (top 3 as JSON: {"electronic": 0.8, "rock": 0.15})
-    sa.Column("genre_probabilities", sa.JSON, server_default="{}"),
-    # Low-level summary
-    sa.Column("average_loudness", sa.Float, nullable=True),
-    sa.Column("bpm", sa.Float, nullable=True),
-    sa.Column("key", sa.Text, nullable=True),
-    sa.Column("scale", sa.Text, nullable=True),
-)
-
-lastfm_similar_tracks = sa.Table(
-    "lastfm_similar_tracks",
-    metadata,
-    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-    sa.Column("source_artist", sa.Text, nullable=False),
-    sa.Column("source_title", sa.Text, nullable=False),
-    sa.Column("similar_artist", sa.Text, nullable=False),
-    sa.Column("similar_title", sa.Text, nullable=False),
-    sa.Column("similarity_score", sa.Float, nullable=False),
-    sa.Column("similar_mbid", sa.Text, nullable=True),
-    sa.Column(
-        "fetched_at",
-        sa.DateTime(timezone=True),
-        nullable=False,
-        server_default=sa.func.now(),
-    ),
-    sa.Index("ix_lastfm_similar_source", "source_artist", "source_title"),
 )
 
 generated_playlists = sa.Table(
@@ -585,7 +402,7 @@ generated_playlists = sa.Table(
     sa.Column(
         "taste_snapshot_id",
         sa.Integer,
-        sa.ForeignKey("taste_profile_snapshots.id"),
+        sa.ForeignKey("taste_profile_snapshots.id", ondelete="SET NULL"),
         nullable=True,
     ),
     sa.Column("service_source", sa.Text, nullable=False, server_default="apple_music"),
@@ -709,6 +526,7 @@ global_song_cache = sa.Table(
     sa.Column("duration_ms", sa.Integer, nullable=True),
     sa.Column("release_date", sa.Text, nullable=True),
     sa.Column("preview_url", sa.Text, server_default=""),
+    sa.Column("artwork_url", sa.Text, server_default=""),
     sa.Column("service_source", sa.Text, server_default=""),
     sa.Column(
         "fetched_at",
@@ -716,6 +534,15 @@ global_song_cache = sa.Table(
         nullable=False,
         server_default=sa.func.now(),
     ),
+    # V 6.388: OpenAI-classified mood tags from fixed 12-entry taxonomy.
+    # Primary mood first; 1-3 tags per track; empty array when unclassified.
+    sa.Column("mood_tags", sa.JSON, nullable=False, server_default="[]"),
+    # V 6.389: sparse score vector from the hybrid classifier —
+    # {mood: score_0_to_1} for non-zero moods only. Nullable while
+    # older mood_tags-only rows are migrated lazily. Drives the
+    # `mood_match` cosine in the scorer (fallback: positional weights
+    # from mood_tags when None).
+    sa.Column("mood_scores", sa.JSON, nullable=True),
 )
 
 playlist_items = sa.Table(
@@ -744,3 +571,66 @@ playlist_items = sa.Table(
     ),
     sa.Column("added_by", sa.Text, server_default="user"),  # user, ai_expand, ai_improve
 )
+
+# ── Preview Audio Cache ─────────────────────────────────────────────────────
+# Caches raw preview audio bytes to avoid re-downloading expiring Deezer URLs.
+# Worker cleans up rows where enrichment_complete=true or downloaded_at > 7 days.
+
+preview_audio_cache = sa.Table(
+    "preview_audio_cache",
+    metadata,
+    sa.Column("catalog_id", sa.Text, primary_key=True),
+    sa.Column("audio_data", sa.LargeBinary, nullable=False),
+    sa.Column("content_type", sa.Text, server_default="audio/mpeg"),
+    sa.Column("source_url", sa.Text, nullable=True),
+    sa.Column(
+        "downloaded_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "enrichment_complete",
+        sa.Boolean,
+        nullable=False,
+        server_default=sa.text("false"),
+    ),
+)
+
+# Per-user discovery candidate pool — populated by the worker, consumed by
+# the recommendations API. The four discover_* strategies (similar_artist,
+# genre_adjacent, editorial, chart) used to run live on every recommendation
+# request. They now run in the worker on a refresh cadence; the API reads
+# from this table + global_song_cache + audio_embeddings, scores, and ranks.
+recommendation_candidates = sa.Table(
+    "recommendation_candidates",
+    metadata,
+    sa.Column("user_id", sa.Text, nullable=False),
+    sa.Column("catalog_id", sa.Text, nullable=False),
+    sa.Column("strategy_source", sa.Text, nullable=False),
+    sa.Column(
+        "discovery_weight", sa.Float, nullable=False, server_default="0.0",
+    ),
+    sa.Column("service_source", sa.Text, nullable=False, server_default=""),
+    sa.Column(
+        "fetched_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.PrimaryKeyConstraint(
+        "user_id", "catalog_id", "strategy_source",
+        name="pk_recommendation_candidates",
+    ),
+    sa.Index("ix_rc_user_fetched", "user_id", "fetched_at"),
+)
+
+# ── Performance Indexes ─────────────────────────────────────────────────────
+# Composite PK tables index only the first column; queries filtering by
+# user_id alone need explicit indexes to avoid full table scans.
+
+sa.Index("ix_song_metadata_cache_user_id", song_metadata_cache.c.user_id)
+sa.Index("ix_audio_features_cache_user_id", audio_features_cache.c.user_id)
+sa.Index("ix_artist_cache_user_id", artist_cache.c.user_id)
+sa.Index("ix_sound_classification_cache_user_id", sound_classification_cache.c.user_id)
+sa.Index("ix_audio_embeddings_user_id", audio_embeddings.c.user_id)

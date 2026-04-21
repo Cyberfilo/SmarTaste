@@ -1,16 +1,97 @@
-"""Song similarity scoring from metadata.
+"""Song similarity scoring from metadata and audio embeddings.
 
 Compares songs by genre overlap, artist match, release year proximity,
-and other metadata signals. No API calls — works purely from cached data.
+embedding cosine similarity (CLAP/MERT/EffNet), and scalar audio features.
+No API calls — works purely from cached data.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
 
 from musicmind.engine.profile import expand_genres
+
+logger = logging.getLogger(__name__)
+
+
+# ── Embedding Similarity Wrappers ──────────────────────────────────────────
+
+
+def clap_similarity(
+    centroid: list[float] | None,
+    candidate_embedding: list[float] | None,
+) -> float:
+    """Cosine similarity between user's CLAP centroid and candidate CLAP embedding (512-dim).
+
+    CLAP captures holistic audio-text similarity — the primary scoring signal.
+    Returns 0.0 if either embedding is missing.
+    """
+    return embedding_cosine_similarity(centroid, candidate_embedding)
+
+
+def mert_similarity(
+    centroid: list[float] | None,
+    candidate_embedding: list[float] | None,
+) -> float:
+    """Cosine similarity between user's MERT centroid and candidate MERT embedding (768-dim).
+
+    MERT captures musical structure — pitch, tonality, rhythm patterns.
+    Returns 0.0 if either embedding is missing.
+    """
+    return embedding_cosine_similarity(centroid, candidate_embedding)
+
+
+def effnet_similarity(
+    centroid: list[float] | None,
+    candidate_embedding: list[float] | None,
+) -> float:
+    """Cosine similarity between user's EffNet centroid and candidate EffNet embedding (1280-dim).
+
+    EffNet captures genre/style granularity from Discogs-EffNet model.
+    Returns 0.0 if either embedding is missing.
+    """
+    return embedding_cosine_similarity(centroid, candidate_embedding)
+
+
+def scalar_audio_similarity(
+    profile_scalars: dict[str, float] | None,
+    candidate_scalars: dict[str, float] | None,
+) -> float:
+    """Normalized euclidean distance similarity on scalar audio features.
+
+    Compares tempo, energy, danceability, and other scalar features.
+    Returns 0.0 if either is None, 1.0 for identical, decaying toward 0.0 for
+    increasing distance.
+    """
+    if not profile_scalars or not candidate_scalars:
+        return 0.0
+
+    keys = ["energy", "brightness", "danceability", "acousticness",
+            "valence_proxy", "beat_strength"]
+
+    def _norm_tempo(t: float | None) -> float:
+        if t is None:
+            return 0.5
+        return max(0.0, min(1.0, (t - 40.0) / 180.0))
+
+    vec_a = [_norm_tempo(profile_scalars.get("tempo"))] + [
+        profile_scalars.get(k, 0.5) for k in keys
+    ]
+    vec_b = [_norm_tempo(candidate_scalars.get("tempo"))] + [
+        candidate_scalars.get(k, 0.5) for k in keys
+    ]
+
+    a = np.array(vec_a)
+    b = np.array(vec_b)
+    # Euclidean distance, normalized to [0, 1] then inverted so 1.0 = identical
+    dist = float(np.linalg.norm(a - b))
+    max_dist = float(np.sqrt(len(vec_a)))  # max possible distance
+    if max_dist == 0:
+        return 0.0
+    return max(0.0, 1.0 - dist / max_dist)
 
 
 def genre_jaccard(genres_a: list[str], genres_b: list[str]) -> float:
@@ -118,7 +199,7 @@ def embedding_cosine_similarity(
     embedding_a: list[float] | None,
     embedding_b: list[float] | None,
 ) -> float:
-    """Cosine similarity between two audio embeddings (128-dim).
+    """Cosine similarity between two audio embeddings (128 or 1,280-dim).
 
     Primary similarity metric when Discogs-EffNet embeddings are available.
     Returns 0.5 (neutral) if either embedding is None or mismatched length.
@@ -126,6 +207,11 @@ def embedding_cosine_similarity(
     if not embedding_a or not embedding_b:
         return 0.5
     if len(embedding_a) != len(embedding_b):
+        logger.warning(
+            "Embedding dimension mismatch: %d vs %d — returning neutral 0.5",
+            len(embedding_a),
+            len(embedding_b),
+        )
         return 0.5
 
     a = np.array(embedding_a)
@@ -155,6 +241,74 @@ def combined_audio_similarity(
         return 0.7 * embed_sim + 0.3 * scalar_sim
 
     return scalar_sim
+
+
+def multi_signal_similarity(
+    a: dict[str, Any],
+    b: dict[str, Any],
+) -> float:
+    """Multi-signal similarity using all available embeddings + features.
+
+    Weights adapt based on which signals are available:
+      0.30 × CLAP cosine (holistic vibe, enables text search)
+      0.25 × EffNet cosine (genre/style granularity)
+      0.20 × MERT cosine (musical structure — pitch, tonal, rhythmic)
+      0.10 × mood vector similarity (emotional match)
+      0.10 × scalar similarity (BPM, key, energy, danceability)
+      0.05 × reserved (future: caption embedding similarity)
+
+    Falls back gracefully: unavailable signals redistribute weight
+    to available ones.
+
+    Args:
+        a, b: Dicts with keys: effnet_1280, clap_512, mert_768,
+               moods (dict), scalars (dict with tempo/energy/danceability/etc.)
+    """
+    weights: dict[str, float] = {}
+    scores: dict[str, float] = {}
+
+    # EffNet
+    if a.get("effnet_1280") and b.get("effnet_1280"):
+        scores["effnet"] = embedding_cosine_similarity(a["effnet_1280"], b["effnet_1280"])
+        weights["effnet"] = 0.25
+
+    # CLAP
+    if a.get("clap_512") and b.get("clap_512"):
+        scores["clap"] = embedding_cosine_similarity(a["clap_512"], b["clap_512"])
+        weights["clap"] = 0.30
+
+    # MERT
+    if a.get("mert_768") and b.get("mert_768"):
+        scores["mert"] = embedding_cosine_similarity(a["mert_768"], b["mert_768"])
+        weights["mert"] = 0.20
+
+    # Mood vector (cosine of mood scores)
+    moods_a = a.get("moods")
+    moods_b = b.get("moods")
+    if moods_a and moods_b:
+        all_keys = set(moods_a.keys()) | set(moods_b.keys())
+        if all_keys:
+            vec_a = [moods_a.get(k, 0.0) for k in all_keys]
+            vec_b = [moods_b.get(k, 0.0) for k in all_keys]
+            va, vb = np.array(vec_a), np.array(vec_b)
+            na, nb = np.linalg.norm(va), np.linalg.norm(vb)
+            if na > 0 and nb > 0:
+                scores["mood"] = float(np.dot(va, vb) / (na * nb))
+                weights["mood"] = 0.10
+
+    # Scalar features
+    scalars_a = a.get("scalars")
+    scalars_b = b.get("scalars")
+    if scalars_a and scalars_b:
+        scores["scalar"] = audio_feature_similarity(scalars_a, scalars_b)
+        weights["scalar"] = 0.10
+
+    if not scores:
+        return 0.5  # neutral when nothing available
+
+    # Normalize weights to sum to 1.0
+    total_w = sum(weights.values())
+    return sum(scores[k] * (weights[k] / total_w) for k in scores)
 
 
 def classification_similarity(

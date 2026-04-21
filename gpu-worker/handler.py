@@ -1,0 +1,305 @@
+"""SmarTaste GPU Worker — Modal serverless function for CLAP + MERT enrichment.
+
+Processes 30-second audio previews and returns:
+- CLAP 512-dim embedding (text-audio shared space for semantic search)
+- MERT 768-dim embedding (music-native for structural similarity)
+
+Usage:
+    modal deploy handler.py          # Deploy to Modal cloud
+    modal run handler.py             # Test locally
+"""
+from __future__ import annotations
+
+import modal
+
+app = modal.App("smartaste-gpu-worker")
+
+# Build image with all dependencies
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("ffmpeg", "libsndfile1")
+    .pip_install(
+        "laion-clap==1.1.6",
+        "transformers>=4.40",
+        "torch>=2.0",
+        "torchaudio>=2.0",
+        "torchvision>=0.15",
+        "numpy",
+        "httpx",
+        "fastapi[standard]",
+        "soundfile",
+        "librosa>=0.10",
+        "audioread",
+    )
+)
+
+
+@app.cls(image=image, gpu="A100", timeout=300, min_containers=0)
+class AudioEnricher:
+    """GPU-accelerated audio enrichment with model caching."""
+
+    @modal.enter()
+    def load_models(self) -> None:
+        """Load models once at container startup (cached across calls)."""
+        import torch
+
+        # PyTorch 2.6+ defaults weights_only=True which breaks CLAP checkpoints
+        # (they contain numpy globals). Patch torch.load to allow unsafe loading.
+        _orig_load = torch.load
+        torch.load = lambda *a, **kw: _orig_load(
+            *a, **{**kw, "weights_only": False},
+        )
+
+        import laion_clap
+        from transformers import AutoModel, Wav2Vec2FeatureExtractor
+
+        # CLAP — music checkpoint (HTSAT-tiny matches the default checkpoint)
+        self.clap_model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-tiny")
+        self.clap_model.load_ckpt()  # Downloads ~600MB on first run, cached after
+
+        # MERT — music understanding transformer
+        self.mert_processor = Wav2Vec2FeatureExtractor.from_pretrained(
+            "m-a-p/MERT-v1-95M", trust_remote_code=True,
+        )
+        self.mert_model = AutoModel.from_pretrained(
+            "m-a-p/MERT-v1-95M", trust_remote_code=True,
+        )
+        self.mert_model.eval()
+        if torch.cuda.is_available():
+            self.mert_model = self.mert_model.cuda()
+
+    def _process_audio_bytes(
+        self, audio_bytes: bytes, models: set | None = None,
+    ) -> dict:
+        """Core enrichment logic: audio bytes → CLAP and/or MERT embeddings.
+
+        `models` restricts which forward passes run. Default = both.
+        Pass {"mert"} to skip the CLAP compute entirely when backfilling
+        MERT-only gaps. Skipped models return None in their slot.
+        """
+        import tempfile
+        from pathlib import Path
+
+        if models is None:
+            models = {"clap", "mert"}
+        want_clap = "clap" in models
+        want_mert = "mert" in models
+
+        if len(audio_bytes) < 1000:
+            return {"error": "Audio too small", "clap_512": None, "mert_768": None}
+
+        with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = Path(tmp.name)
+
+        try:
+            result: dict = {"error": None, "clap_512": None, "mert_768": None}
+
+            if want_clap:
+                try:
+                    embedding = self.clap_model.get_audio_embedding_from_filelist(
+                        [str(tmp_path)], use_tensor=False,
+                    )
+                    result["clap_512"] = [round(float(v), 6) for v in embedding[0]]
+                except Exception as e:
+                    result["error"] = f"CLAP failed: {e}"
+
+            if want_mert:
+                try:
+                    import librosa
+                    import torch
+
+                    audio, sr = librosa.load(str(tmp_path), sr=None, mono=True)
+                    if sr != 24000:
+                        import torchaudio
+                        audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+                        resampler = torchaudio.transforms.Resample(sr, 24000)
+                        audio_tensor = resampler(audio_tensor)
+                        audio = audio_tensor.squeeze(0).numpy()
+
+                    inputs = self.mert_processor(
+                        audio, sampling_rate=24000, return_tensors="pt",
+                    )
+                    if torch.cuda.is_available():
+                        inputs = {k: v.cuda() for k, v in inputs.items()}
+
+                    with torch.no_grad():
+                        outputs = self.mert_model(**inputs, output_hidden_states=True)
+
+                    last_hidden = outputs.hidden_states[-1]
+                    embedding = last_hidden.mean(dim=1).squeeze(0).cpu().numpy()
+                    result["mert_768"] = [round(float(v), 6) for v in embedding]
+                except Exception as e:
+                    if not result["error"]:
+                        result["error"] = f"MERT failed: {e}"
+
+            return result
+
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    @modal.method()
+    def enrich_track(self, preview_url: str) -> dict:
+        """Enrichment from a preview URL (downloads then processes)."""
+        import httpx
+
+        try:
+            resp = httpx.get(preview_url, timeout=30.0, follow_redirects=True)
+            resp.raise_for_status()
+            audio_bytes = resp.content
+        except Exception as e:
+            return {"error": f"Download failed: {e}", "clap_512": None, "mert_768": None}
+
+        return self._process_audio_bytes(audio_bytes)
+
+    @modal.method()
+    def enrich_track_from_bytes(self, audio_b64: str) -> dict:
+        """Enrichment from base64-encoded audio bytes (no download)."""
+        import base64
+
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception as e:
+            return {"error": f"Base64 decode failed: {e}", "clap_512": None, "mert_768": None}
+
+        return self._process_audio_bytes(audio_bytes)
+
+    @modal.method()
+    def encode_text_clap(self, text: str) -> list[float] | None:
+        """Encode a text query to CLAP 512-dim embedding for semantic search."""
+        try:
+            embedding = self.clap_model.get_text_embedding([text], use_tensor=False)
+            return [round(float(v), 6) for v in embedding[0]]
+        except Exception:
+            return None
+
+    @modal.method()
+    def enrich_batch(self, preview_urls: list[str]) -> list[dict]:
+        """Batch enrichment from URLs."""
+        import httpx
+
+        results = []
+        for url in preview_urls:
+            try:
+                resp = httpx.get(url, timeout=30.0, follow_redirects=True)
+                resp.raise_for_status()
+                results.append(self._process_audio_bytes(resp.content))
+            except Exception as e:
+                results.append({"error": f"Download failed: {e}", "clap_512": None, "mert_768": None})
+        return results
+
+    @modal.method()
+    def enrich_batch_from_bytes(
+        self, audio_items: list[str], models: list[str] | None = None,
+    ) -> list[dict]:
+        """Batch enrichment from base64-encoded audio bytes.
+
+        `models` defaults to both CLAP + MERT. Pass ["mert"] to skip
+        CLAP inference when only MERT is missing for a batch.
+        """
+        import base64
+
+        model_set = {m.lower() for m in (models or ["clap", "mert"])}
+        results = []
+        for b64 in audio_items:
+            try:
+                audio_bytes = base64.b64decode(b64)
+                results.append(self._process_audio_bytes(audio_bytes, models=model_set))
+            except Exception as e:
+                results.append({"error": f"Decode failed: {e}", "clap_512": None, "mert_768": None})
+        return results
+
+
+# ── HTTP endpoints for Railway ─────────────────────────────────────────────────
+
+
+def _log_to_backend(
+    stage: str, result: str, detail: str = "", duration_ms: int = 0,
+) -> None:
+    """Fire-and-forget log to Railway backend logs DB."""
+    import os
+
+    backend_url = os.environ.get("BACKEND_URL", "")
+    admin_secret = os.environ.get("ADMIN_SECRET", "")
+    if not backend_url:
+        return
+    try:
+        import httpx
+        httpx.post(
+            f"{backend_url}/api/admin/gpu-log",
+            json={
+                "stage": stage, "result": result,
+                "detail": detail, "duration_ms": duration_ms,
+            },
+            headers={"x-admin-secret": admin_secret},
+            timeout=5.0,
+        )
+    except Exception:
+        pass  # Best-effort logging
+
+
+@app.function(
+    image=image, timeout=600,
+)
+@modal.fastapi_endpoint(method="POST")
+def enrich(data: dict) -> dict:
+    """HTTP endpoint for Railway worker to call.
+
+    Body: {"preview_url": "https://..."} or {"preview_urls": ["..."]}
+    Returns: enrichment result(s)
+    """
+    import time
+
+    enricher = AudioEnricher()
+    start = time.time()
+
+    if "audio_items" in data:
+        # Base64-encoded audio bytes — no URL download needed
+        results = enricher.enrich_batch_from_bytes.remote(
+            data["audio_items"], data.get("models"),
+        )
+        ok = sum(1 for r in results if r.get("clap_512") or r.get("mert_768"))
+        _log_to_backend(
+            "gpu_batch_bytes", f"{ok}/{len(results)}",
+            f"{len(data['audio_items'])} items",
+            int((time.time() - start) * 1000),
+        )
+        return {"results": results}
+    elif "preview_urls" in data:
+        results = enricher.enrich_batch.remote(data["preview_urls"])
+        ok = sum(1 for r in results if r.get("clap_512"))
+        _log_to_backend(
+            "gpu_batch", f"{ok}/{len(results)}",
+            f"{len(data['preview_urls'])} urls",
+            int((time.time() - start) * 1000),
+        )
+        return {"results": results}
+    elif "preview_url" in data:
+        result = enricher.enrich_track.remote(data["preview_url"])
+        _log_to_backend(
+            "gpu_single",
+            "ok" if result.get("clap_512") else "fail",
+            data["preview_url"][:80],
+            int((time.time() - start) * 1000),
+        )
+        return result
+    elif "text" in data:
+        embedding = enricher.encode_text_clap.remote(data["text"])
+        return {"clap_512": embedding}
+    else:
+        return {"error": "Provide preview_url, preview_urls, or text"}
+
+
+@app.function(
+    image=image, timeout=30,
+    secrets=[modal.Secret.from_name("smartaste-secrets")],
+)
+@modal.fastapi_endpoint(method="POST")
+def encode_text(data: dict) -> dict:
+    """HTTP endpoint for text-to-CLAP encoding (for search)."""
+    enricher = AudioEnricher()
+    text = data.get("text", "")
+    if not text:
+        return {"error": "Provide text field"}
+    embedding = enricher.encode_text_clap.remote(text)
+    return {"clap_512": embedding}

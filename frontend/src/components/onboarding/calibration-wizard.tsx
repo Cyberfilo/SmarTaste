@@ -482,7 +482,7 @@ export function CalibrationWizard() {
                   {track.artwork_url ? (
                     <img
                       src={track.artwork_url}
-                      alt=""
+                      alt={`${track.name} by ${track.artist_name}`}
                       className="h-8 w-8 rounded object-cover"
                     />
                   ) : (

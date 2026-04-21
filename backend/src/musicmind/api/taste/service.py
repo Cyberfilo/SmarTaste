@@ -3,10 +3,18 @@
 Supports single-service profiles (spotify, apple_music) and unified profiles
 that merge data from both services with cross-service genre normalization
 and track deduplication.
+
+Auto-rebuild (V 6.387): after returning any cached snapshot, the service
+compares snapshot.computed_at against the max timestamp of centroid-
+affecting sources (audio_embeddings.analyzed_at, audio_features_cache,
+user_calibration). If any source is newer, a background rebuild is
+fired fire-and-forget — the user gets the cached snapshot immediately,
+and the next request sees the refreshed one.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -30,8 +38,7 @@ from musicmind.api.taste.fetch import (
     fetch_spotify_top_tracks,
 )
 from musicmind.db.schema import (
-    listening_history,
-    play_count_proxy,
+    audio_embeddings,
     service_connections,
     song_metadata_cache,
     taste_profile_snapshots,
@@ -44,6 +51,26 @@ from musicmind.security.encryption import EncryptionService
 logger = logging.getLogger(__name__)
 
 STALENESS_HOURS = 24  # Per D-06
+
+# V 6.387 — auto-rebuild dedup. Module-level set tracks which
+# (user_id, service) pairs have an in-flight background rebuild so we don't
+# fan out duplicate work when multiple requests notice the same staleness.
+_IN_FLIGHT_REBUILDS: set[str] = set()
+_REBUILD_LOCK = asyncio.Lock()
+
+
+def _as_utc(dt: datetime | str | None) -> datetime | None:
+    """Normalize to tz-aware UTC datetime; return None on failure."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except (ValueError, TypeError):
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
 
 
 class TasteService:
@@ -93,6 +120,15 @@ class TasteService:
                 engine, user_id=user_id, service_source=resolved_service
             )
             if snapshot is not None:
+                # Even if fresh, check if any centroid-affecting signal has
+                # changed since the snapshot was computed. If so, fire a
+                # background rebuild — user still gets the cached response.
+                await self._maybe_trigger_rebuild(
+                    engine, encryption, settings,
+                    user_id=user_id,
+                    service=resolved_service,
+                    snapshot_computed_at=snapshot.get("computed_at"),
+                )
                 return snapshot
 
             # Return ANY existing snapshot (even stale) — never block the user
@@ -103,6 +139,14 @@ class TasteService:
                 logger.info(
                     "Returning stale profile for user %s (will refresh in background)",
                     user_id,
+                )
+                # Stale by definition → always kick off a background refresh
+                await self._maybe_trigger_rebuild(
+                    engine, encryption, settings,
+                    user_id=user_id,
+                    service=resolved_service,
+                    snapshot_computed_at=stale.get("computed_at"),
+                    force=True,
                 )
                 return stale
 
@@ -227,6 +271,109 @@ class TasteService:
         profile["services_included"] = services_included
         return profile
 
+    @staticmethod
+    async def _profile_needs_rebuild(
+        engine,
+        *,
+        user_id: str,
+        snapshot_computed_at: datetime | str | None,
+    ) -> tuple[bool, str | None]:
+        """Return (needs_rebuild, reason) for auto-rebuild.
+
+        Compares `snapshot_computed_at` against the max timestamp of any
+        centroid-affecting source:
+        - `audio_embeddings.analyzed_at` — new CLAP/MERT/EffNet for this user
+        - `audio_features_cache.analyzed_at` — new scalar features
+        - `user_calibration.created_at` — onboarding calibration changes
+
+        All three are checked in a single query. Fast (<10ms). A ``None``
+        snapshot timestamp always triggers a rebuild.
+        """
+        snapshot_dt = _as_utc(snapshot_computed_at)
+        if snapshot_dt is None:
+            return True, "no snapshot timestamp"
+
+        async with engine.begin() as conn:
+            row = (await conn.execute(sa.text("""
+                SELECT
+                  (SELECT MAX(analyzed_at) FROM audio_embeddings
+                    WHERE user_id = :uid) AS emb_ts,
+                  (SELECT MAX(analyzed_at) FROM audio_features_cache
+                    WHERE user_id = :uid) AS feat_ts,
+                  (SELECT MAX(created_at) FROM user_calibration
+                    WHERE user_id = :uid) AS cal_ts
+            """), {"uid": user_id})).first()
+
+        if row is None:
+            return False, None
+
+        sources = [
+            ("embeddings", row.emb_ts),
+            ("features", row.feat_ts),
+            ("calibration", row.cal_ts),
+        ]
+        for label, ts in sources:
+            ts_utc = _as_utc(ts)
+            if ts_utc is not None and ts_utc > snapshot_dt:
+                return True, f"{label} changed at {ts_utc.isoformat()}"
+
+        return False, None
+
+    async def _maybe_trigger_rebuild(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+        snapshot_computed_at: datetime | str | None,
+        force: bool = False,
+    ) -> None:
+        """Fire background rebuild if sources changed (or always when force=True).
+
+        Idempotent: if a rebuild is already in flight for the same
+        (user_id, service) pair, this is a no-op. Never blocks the caller.
+        """
+        if not force:
+            needs_rebuild, reason = await self._profile_needs_rebuild(
+                engine, user_id=user_id,
+                snapshot_computed_at=snapshot_computed_at,
+            )
+            if not needs_rebuild:
+                return
+            logger.info(
+                "Auto-rebuild for user %s (%s): %s",
+                user_id[:8], service, reason,
+            )
+
+        key = f"{user_id}:{service}"
+        async with _REBUILD_LOCK:
+            if key in _IN_FLIGHT_REBUILDS:
+                return
+            _IN_FLIGHT_REBUILDS.add(key)
+
+        async def _do_rebuild() -> None:
+            try:
+                await self.get_profile(
+                    engine, encryption, settings,
+                    user_id=user_id, service=service, force_refresh=True,
+                )
+                logger.info(
+                    "Auto-rebuild complete for user %s (%s)",
+                    user_id[:8], service,
+                )
+            except Exception:
+                logger.exception(
+                    "Auto-rebuild failed for user %s (%s)",
+                    user_id[:8], service,
+                )
+            finally:
+                async with _REBUILD_LOCK:
+                    _IN_FLIGHT_REBUILDS.discard(key)
+
+        asyncio.create_task(_do_rebuild())
+
     async def _get_any_snapshot(
         self, engine, *, user_id: str, service_source: str
     ) -> dict[str, Any] | None:
@@ -313,6 +460,10 @@ class TasteService:
             "total_songs_analyzed": mapping["total_songs_analyzed"] or 0,
             "listening_hours_estimated": mapping["listening_hours_estimated"] or 0.0,
             "audio_centroid": _pj(mapping.get("audio_centroid"), {}),
+            "embedding_centroid": _pj(mapping.get("embedding_centroid"), None),
+            "clap_centroid": _pj(mapping.get("clap_centroid"), None),
+            "mert_centroid": _pj(mapping.get("mert_centroid"), None),
+            "mood_distribution": _pj(mapping.get("mood_distribution"), None),
         }
 
     async def _fetch_and_cache_data(
@@ -537,78 +688,15 @@ class TasteService:
     async def _cache_history(
         self, engine, *, user_id: str, service: str, history: list[dict]
     ) -> None:
-        """Cache listening history entries and update play count proxy.
+        """No-op: listening_history and play_count_proxy tables were removed.
 
-        Smart delta detection: compares current recently-played list against
-        existing play_count_proxy to detect replays. Songs that reappear
-        across multiple polling snapshots get their seen_count incremented.
+        Previously cached history entries and updated play count proxy.
+        Kept as a stub so callers don't break.
         """
-        # Get existing play count data for delta comparison
-        existing_songs: dict[str, int] = {}
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(
-                    play_count_proxy.c.song_id,
-                    play_count_proxy.c.seen_count,
-                ).where(play_count_proxy.c.user_id == user_id)
-            )
-            for row in result:
-                existing_songs[row.song_id] = row.seen_count
-
-        async with engine.begin() as conn:
-            for entry in history:
-                song_id = entry.get("song_id", "")
-                if not song_id:
-                    continue
-
-                await conn.execute(
-                    listening_history.insert().values(
-                        user_id=user_id,
-                        song_id=song_id,
-                        song_name=entry.get("song_name", ""),
-                        artist_name=entry.get("artist_name", ""),
-                        album_name=entry.get("album_name", ""),
-                        genre_names=json.dumps(entry.get("genre_names", [])),
-                        duration_ms=entry.get("duration_ms"),
-                        service_source=service,
-                    )
-                )
-
-                # Update play count proxy — upsert seen_count
-                existing = await conn.execute(
-                    sa.select(play_count_proxy.c.seen_count).where(
-                        sa.and_(
-                            play_count_proxy.c.song_id == song_id,
-                            play_count_proxy.c.user_id == user_id,
-                        )
-                    )
-                )
-                row = existing.first()
-                now = datetime.now(UTC)
-                if row:
-                    await conn.execute(
-                        play_count_proxy.update()
-                        .where(
-                            sa.and_(
-                                play_count_proxy.c.song_id == song_id,
-                                play_count_proxy.c.user_id == user_id,
-                            )
-                        )
-                        .values(
-                            seen_count=row.seen_count + 1,
-                            last_seen=now,
-                        )
-                    )
-                else:
-                    await conn.execute(
-                        play_count_proxy.insert().values(
-                            song_id=song_id,
-                            user_id=user_id,
-                            seen_count=1,
-                            first_seen=now,
-                            last_seen=now,
-                        )
-                    )
+        logger.debug(
+            "Skipping history cache for user %s (%d entries) — tables removed",
+            user_id, len(history),
+        )
 
     async def _apply_engagement_weights(
         self,
@@ -617,63 +705,13 @@ class TasteService:
         user_id: str,
         songs: list[dict],
     ) -> list[dict]:
-        """Weight songs by observed play frequency from play_count_proxy.
+        """Return songs with uniform weight (1.0 each).
 
-        Songs seen multiple times in recently-played polls are duplicated
-        proportionally. A song seen 5 times gets 5x the profile weight of
-        one seen once. Capped at 10x to prevent a single song from
-        dominating the entire profile.
-
-        Also applies recency boost: songs with last_seen in the past 7 days
-        get an extra 2x multiplier on top of their seen_count.
+        play_count_proxy table was removed. Previously weighted songs by
+        observed play frequency. Now returns the input list unchanged so
+        all songs contribute equally to the profile.
         """
-        catalog_ids = [s.get("catalog_id", "") for s in songs if s.get("catalog_id")]
-        if not catalog_ids:
-            return songs
-
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                sa.select(play_count_proxy).where(
-                    sa.and_(
-                        play_count_proxy.c.user_id == user_id,
-                        play_count_proxy.c.song_id.in_(catalog_ids),
-                    )
-                )
-            )
-            rows = result.fetchall()
-
-        if not rows:
-            return songs
-
-        # Build play count map: catalog_id → (seen_count, last_seen)
-        play_map: dict[str, tuple[int, datetime | None]] = {}
-        for row in rows:
-            play_map[row.song_id] = (row.seen_count, row.last_seen)
-
-        now = datetime.now(UTC)
-        week_ago = now - timedelta(days=7)
-        engaged: list[dict] = []
-
-        for song in songs:
-            cid = song.get("catalog_id", "")
-            play_data = play_map.get(cid)
-
-            if play_data:
-                seen_count, last_seen = play_data
-                multiplier = min(10, seen_count)
-
-                # Recency boost: actively playing in last 7 days
-                if last_seen and last_seen.tzinfo is None:
-                    last_seen = last_seen.replace(tzinfo=UTC)
-                if last_seen and last_seen > week_ago:
-                    multiplier = min(10, multiplier * 2)
-
-                for _ in range(max(1, multiplier)):
-                    engaged.append(song)
-            else:
-                engaged.append(song)
-
-        return engaged
+        return songs
 
     async def _apply_calibration_weights(
         self,
@@ -755,12 +793,17 @@ class TasteService:
         """
         # Load any previously enriched audio features for centroid computation
         audio_features_map: dict[str, dict] = {}
+        embedding_map: dict[str, list[float]] = {}
+        clap_map: dict[str, list[float]] = {}
+        mert_map: dict[str, list[float]] = {}
         try:
-            async with engine.begin() as conn:
-                from musicmind.db.schema import audio_features_cache
+            from musicmind.db.schema import audio_features_cache
 
-                catalog_ids = [s.get("catalog_id", "") for s in songs if s.get("catalog_id")]
-                if catalog_ids:
+            catalog_ids = [
+                s.get("catalog_id", "") for s in songs if s.get("catalog_id")
+            ]
+            if catalog_ids:
+                async with engine.begin() as conn:
                     result = await conn.execute(
                         sa.select(audio_features_cache).where(
                             sa.and_(
@@ -780,8 +823,38 @@ class TasteService:
                                 features[field] = val
                         if features:
                             audio_features_map[row.catalog_id] = features
+
+                async with engine.begin() as conn:
+                    emb_result = await conn.execute(
+                        sa.select(audio_embeddings).where(
+                            sa.and_(
+                                audio_embeddings.c.catalog_id.in_(catalog_ids),
+                                audio_embeddings.c.user_id == user_id,
+                            )
+                        )
+                    )
+                    for row in emb_result:
+                        cid = row.catalog_id
+                        emb = row.embedding
+                        if isinstance(emb, str):
+                            emb = json.loads(emb)
+                        if emb and isinstance(emb, list) and len(emb) >= 128:
+                            embedding_map[cid] = emb
+                        clap = row.clap_embedding
+                        if isinstance(clap, str):
+                            clap = json.loads(clap)
+                        if clap and isinstance(clap, list) and len(clap) > 0:
+                            clap_map[cid] = clap
+                        mert = row.mert_embedding
+                        if isinstance(mert, str):
+                            mert = json.loads(mert)
+                        if mert and isinstance(mert, list) and len(mert) > 0:
+                            mert_map[cid] = mert
         except Exception:
-            logger.warning("Failed to load audio features for centroid, continuing without")
+            logger.warning(
+                "Failed to load audio features/embeddings for centroid, "
+                "continuing without",
+            )
 
         # Apply engagement weights (play count proxy) before profile building
         engaged_songs = await self._apply_engagement_weights(
@@ -793,10 +866,77 @@ class TasteService:
             engine, user_id=user_id, songs=engaged_songs,
         )
 
+        # V 6.388/V 6.389: load mood signal from global_song_cache.
+        # Prefer `mood_scores` (sparse intensity vector) with `mood_tags`
+        # as fallback. Joined per catalog_id AND per ISRC for library
+        # rows that haven't been promoted to global yet.
+        mood_tags_map: dict[str, list[str]] = {}
+        mood_scores_map: dict[str, dict[str, float]] = {}
+        try:
+            from musicmind.db.schema import global_song_cache
+            isrcs = [s.get("isrc") for s in songs if s.get("isrc")]
+            if catalog_ids or isrcs:
+                async with engine.begin() as conn:
+                    by_cid = await conn.execute(
+                        sa.select(
+                            global_song_cache.c.catalog_id,
+                            global_song_cache.c.isrc,
+                            global_song_cache.c.mood_tags,
+                            global_song_cache.c.mood_scores,
+                        ).where(
+                            sa.or_(
+                                global_song_cache.c.catalog_id.in_(catalog_ids)
+                                if catalog_ids else sa.false(),
+                                global_song_cache.c.isrc.in_(isrcs)
+                                if isrcs else sa.false(),
+                            )
+                        )
+                    )
+                    tags_by_isrc: dict[str, list[str]] = {}
+                    scores_by_isrc: dict[str, dict[str, float]] = {}
+                    for row in by_cid:
+                        tags = row.mood_tags
+                        if isinstance(tags, str):
+                            try:
+                                tags = json.loads(tags)
+                            except (ValueError, TypeError):
+                                tags = []
+                        scores = row.mood_scores
+                        if isinstance(scores, str):
+                            try:
+                                scores = json.loads(scores)
+                            except (ValueError, TypeError):
+                                scores = None
+                        if tags and isinstance(tags, list):
+                            mood_tags_map[row.catalog_id] = tags
+                            if row.isrc:
+                                tags_by_isrc[row.isrc] = tags
+                        if scores and isinstance(scores, dict):
+                            mood_scores_map[row.catalog_id] = scores
+                            if row.isrc:
+                                scores_by_isrc[row.isrc] = scores
+                    # ISRC fallback
+                    for s in songs:
+                        cid = s.get("catalog_id", "")
+                        isrc = s.get("isrc")
+                        if cid not in mood_tags_map and isrc and isrc in tags_by_isrc:
+                            mood_tags_map[cid] = tags_by_isrc[isrc]
+                        if cid not in mood_scores_map and isrc and isrc in scores_by_isrc:
+                            mood_scores_map[cid] = scores_by_isrc[isrc]
+        except Exception:
+            logger.warning(
+                "Failed to load mood_tags/scores for profile, continuing without",
+            )
+
         profile = build_taste_profile(
             calibrated_songs, history,
             use_temporal_decay=True,
             audio_features_map=audio_features_map or None,
+            embedding_map=embedding_map or None,
+            clap_map=clap_map or None,
+            mert_map=mert_map or None,
+            mood_tags_map=mood_tags_map or None,
+            mood_scores_map=mood_scores_map or None,
         )
 
         # total_songs_analyzed should reflect unique songs, not amplified duplicates
@@ -824,6 +964,18 @@ class TasteService:
                     total_songs_analyzed=profile["total_songs_analyzed"],
                     listening_hours_estimated=profile["listening_hours_estimated"],
                     audio_centroid=json.dumps(profile.get("audio_centroid", {})),
+                    embedding_centroid=json.dumps(
+                        profile.get("embedding_centroid")
+                    ) if profile.get("embedding_centroid") else None,
+                    clap_centroid=json.dumps(
+                        profile.get("clap_centroid")
+                    ) if profile.get("clap_centroid") else None,
+                    mert_centroid=json.dumps(
+                        profile.get("mert_centroid")
+                    ) if profile.get("mert_centroid") else None,
+                    mood_distribution=json.dumps(
+                        profile.get("mood_distribution")
+                    ) if profile.get("mood_distribution") else None,
                 )
             )
 
