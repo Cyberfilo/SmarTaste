@@ -120,19 +120,20 @@ async def _deezer_discover_artist_ids(
     artist_name: str,
     *,
     max_ids: int = 3,
+    max_retries: int = 2,
 ) -> list[int]:
     """Find all Deezer artist_ids that match `artist_name` exactly.
 
-    Strategy: query `/search?q=<name>&limit=50` (TRACK search), aggregate
-    unique artist_ids where `track.artist.name` matches the query
-    (case-insensitive exact). This surfaces duplicate-id artists that
-    `/search/artist` buries under its nb_fan sort (e.g., Philip on
-    Deezer is split between id=96659 for old catalog and id=361808772
-    for new catalog; the latter has 0 fans and never appears in
-    `/search/artist` top-10, but its tracks do appear in `/search`).
+    V 6.402: retry-on-empty with exponential backoff (1s, 2s). Deezer
+    under rate-limit pressure returns `{"data": []}` silently (not a
+    429), indistinguishable from a genuine no-match at first glance.
+    Two retries absorb cross-phase burst contention; per-artist cost
+    stays bounded (~3 requests worst case) and only pays the penalty
+    when responses are actually empty.
 
-    Returns up to `max_ids` matching ids, ordered by track-count in the
-    sample response (so the primary account comes first).
+    Strategy: `/search?q=<name>&limit=50` (TRACK search), aggregate
+    artist_ids where `track.artist.name` matches exactly. Surfaces
+    dup-id artists that `/search/artist` buries under nb_fan sort.
     """
     from collections import Counter
 
@@ -140,16 +141,30 @@ async def _deezer_discover_artist_ids(
     if not q:
         return []
     target = _norm_name(q)
-    try:
-        resp = await client.get(
-            f"{DEEZER_API}/search",
-            params={"q": q, "limit": 50},
-        )
-        if not resp.is_success:
+
+    tracks: list[dict] = []
+    for attempt in range(max_retries + 1):
+        try:
+            resp = await client.get(
+                f"{DEEZER_API}/search",
+                params={"q": q, "limit": 50},
+            )
+            if not resp.is_success:
+                if resp.status_code in (429, 500, 502, 503) and attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return []
+            tracks = resp.json().get("data") or []
+        except (httpx.HTTPError, ValueError, TypeError):
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+                continue
             return []
-        tracks = resp.json().get("data") or []
-    except (httpx.HTTPError, ValueError, TypeError):
-        return []
+
+        if not tracks and attempt < max_retries:
+            await asyncio.sleep(2 ** attempt)
+            continue
+        break
 
     by_id: Counter[int] = Counter()
     for t in tracks:
@@ -171,26 +186,39 @@ async def _fetch_artist_top_tracks_deezer(
     artist_id: int,
     *,
     limit: int = 100,
+    max_retries: int = 2,
 ) -> list[dict]:
     """Fetch up to `limit` top tracks for a Deezer artist_id.
 
-    Single request to `/artist/{id}/top` — fast and rate-limit-friendly.
-    Trade-off: ISRC is not present on the track objects returned here
-    (Deezer's `/track/{id}` would expose it, but that would be one
-    extra call per track = 100+ calls, defeating the point). Tracks
-    land in global_song_cache with isrc=NULL; the existing
-    `_backfill_isrcs` worker phase resolves them on subsequent cycles.
+    V 6.402: same retry-on-empty-or-5xx pattern as the discovery helper
+    so transient throttling doesn't become permanent `tracks_found=0`
+    state rows. ISRC isn't on `/top` responses; `_backfill_isrcs`
+    worker phase resolves them on later cycles.
     """
-    try:
-        resp = await client.get(
-            f"{DEEZER_API}/artist/{artist_id}/top",
-            params={"limit": limit},
-        )
-        if not resp.is_success:
+    for attempt in range(max_retries + 1):
+        try:
+            resp = await client.get(
+                f"{DEEZER_API}/artist/{artist_id}/top",
+                params={"limit": limit},
+            )
+            if not resp.is_success:
+                if resp.status_code in (429, 500, 502, 503) and attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return []
+            data = resp.json().get("data") or []
+        except (httpx.HTTPError, ValueError, TypeError):
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+                continue
             return []
-        return resp.json().get("data") or []
-    except (httpx.HTTPError, ValueError, TypeError):
-        return []
+
+        if not data and attempt < max_retries:
+            await asyncio.sleep(2 ** attempt)
+            continue
+        return data
+
+    return []
 
 
 async def fetch_artist_full_discography(

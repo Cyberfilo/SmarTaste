@@ -7,6 +7,18 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.402 — 2026-04-21
+
+### Fix: Deezer empty-response-under-throttle was marking good artists as tracks_found=0
+
+V 6.401 shipped savepoints to fix the tx-abort cascade — confirmed working. But next worker cycle landed Vale Pain at `tracks_found=0` anyway. Local probe at the same moment returned the expected 97 tracks, and prod `error_logs` had zero warnings. Diagnosis: Deezer under rate-limit pressure returns a valid `{"data": []}` body (not a 429), indistinguishable from "no such artist" at the first response. Cross-phase burst contention (cobweb + preview URL refresh + ISRC backfill all share the same httpx pool) intermittently triggers this.
+
+Added **retry-on-empty-or-5xx** in both `_deezer_discover_artist_ids` and `_fetch_artist_top_tracks_deezer`: if response is empty OR status is 429/500/502/503, backoff exponentially (1s, 2s) and retry up to 2x. Retry cost only fires on the rate-limit path; healthy lookups pay nothing.
+
+Also cleared the artist_discography_state rows with `tracks_found < 20` one more time so the 3 pinned top_artists (Vale Pain, Nabi, Neima Ezza) re-process under V 6.402's retry-safe paths.
+
+---
+
 ## V 6.401 — 2026-04-21
 
 ### Fix: tx-abort cascade in deepening upserts + 1-song library pollution + retry partial fetches
