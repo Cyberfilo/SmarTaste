@@ -371,6 +371,40 @@ def score_candidate(
     if has_scalar:
         scalar_score = scalar_audio_similarity(user_audio_centroid, audio_features)
 
+    # ── 3a. Tempo-band match (V 6.393) ────────────────────
+    # Psychologically-calibrated tempo-zone match vs raw-BPM euclidean.
+    # A 140-BPM user-library baseline rewards 145-BPM candidates even if
+    # overall scalar distance is moderate, while docking a 95-BPM
+    # candidate that scalar would score as closer on non-tempo axes.
+    tempo_band_score = 0.0
+    user_band_dist = profile.get("tempo_band_distribution")
+    cand_tempo = (audio_features or {}).get("tempo") if audio_features else None
+    has_tempo_band = bool(user_band_dist) and cand_tempo is not None
+    if has_tempo_band:
+        from musicmind.engine.tempo import tempo_band_similarity
+        tempo_band_score = tempo_band_similarity(user_band_dist, cand_tempo)
+
+    # ── 3b. Halftime-feel bonus (V 6.393) ─────────────────
+    # Drill/trap halftime signature: kick-on-1 / snare-on-3 / fast hats
+    # on a 130-160 BPM grid. When the user's library baseline >30%
+    # halftime (check on the scored profile) and the candidate reads
+    # halftime, apply a small additive bonus — NOT a dim, since the
+    # signal is binary-ish and sparsely present. Capped at +0.03.
+    halftime_bonus = 0.0
+    user_halftime_ratio = float(profile.get("halftime_ratio") or 0.0)
+    if user_halftime_ratio >= 0.25 and audio_features:
+        from musicmind.engine.tempo import halftime_feel_score
+        cand_halftime = halftime_feel_score(
+            audio_features.get("tempo"),
+            audio_features.get("beat_strength"),
+            audio_features.get("danceability"),
+        )
+        if cand_halftime >= 0.35:
+            # Scale bonus by min(user_ratio, cand_halftime_score) so a
+            # user whose library is 60% halftime + candidate scoring 0.8
+            # gets the full +0.03; weaker signals on either side fade.
+            halftime_bonus = min(0.03, user_halftime_ratio * cand_halftime * 0.05)
+
     # ── 3b. Mood match (V 6.388 → V 6.389 hybrid) ─────────
     # Cosine similarity between the user's library-aggregated mood
     # distribution and the candidate's mood signal. Prefers the V 6.389
@@ -505,7 +539,10 @@ def score_candidate(
 
     if has_scalar:
         dim_scores["scalar"] = scalar_score
-        dim_weights["scalar"] = w.get("scalar", 0.10)
+        dim_weights["scalar"] = w.get("scalar", 0.06)
+    if has_tempo_band:
+        dim_scores["tempo_band"] = tempo_band_score
+        dim_weights["tempo_band"] = w.get("tempo_band", 0.08)
     if has_mood:
         dim_scores["mood_match"] = mood_score
         dim_weights["mood_match"] = w.get("mood_match", 0.10)
@@ -523,43 +560,33 @@ def score_candidate(
     overall += mood_boost * 0.1
     overall += cal_boost
     overall += recency_boost
+    overall += halftime_bonus  # V 6.393
     overall -= 0.05 * diversity_penalty
     overall -= 0.03 * staleness
 
     overall = max(0.0, min(1.0, overall))
 
-    # ── Build contextual explanation ─────────────────────
-    parts = []
-    if nearest_tracks:
-        nt = nearest_tracks[0]
-        parts.append(
-            f"Similar to {nt.get('name', '?')} by "
-            f"{nt.get('artist_name', '?')}"
-        )
-    if has_clap and clap_score > 0.7:
-        parts.append("sounds like your taste")
-    if has_mert and mert_score > 0.7:
-        parts.append("similar musical structure")
-    if genre_score > 0.5:
-        top_genres = ", ".join(candidate.get("genre_names", [])[:2])
-        parts.append(f"genre match ({top_genres})")
-    if has_scalar and scalar_score > 0.7:
-        parts.append("similar energy/tempo")
-    if artist_match > 0.5:
-        if matched_as == "feat":
-            parts.append(
-                f"features {candidate.get('artist_name', '')}"
-            )
-        else:
-            parts.append(
-                f"you like {candidate.get('artist_name', 'this artist')}"
-            )
-    if cal_boost > 0.1:
-        parts.append("top calibrated artist")
-    if recency_boost > 0:
-        parts.append("new release")
-    if cross_bonus > 0:
-        parts.append(f"found by {strategy_count} strategies")
+    # ── V 6.393: BRECVEMA-channel explanation ─────────────
+    # Juslin & Västfjäll's eight-mechanism taxonomy collapses for scorer
+    # purposes into three interpretable channels: acoustic (brain-stem +
+    # rhythmic entrainment), scene (evaluative conditioning + identity),
+    # and affective (contagion + mood). We surface the top contributing
+    # channels by weighted score — the attribution mirrors the model's
+    # actual decision process instead of hand-tuned thresholds.
+    explanation = _render_brecvema_explanation(
+        candidate=candidate,
+        dim_scores=dim_scores,
+        dim_weights=dim_weights,
+        artist_matched_as=matched_as,
+        nearest_tracks=nearest_tracks,
+        user_band_dist=user_band_dist,
+        cand_tempo=cand_tempo,
+        halftime_bonus=halftime_bonus,
+        recency_boost=recency_boost,
+        cal_boost=cal_boost,
+        cross_bonus=cross_bonus,
+        strategy_count=strategy_count,
+    )
 
     return {
         **candidate,
@@ -570,18 +597,198 @@ def score_candidate(
             "effnet_similarity": round(effnet_score, 3),
             "genre_match": round(genre_score, 3),
             "scalar_similarity": round(scalar_score, 3),
+            "tempo_band_similarity": round(tempo_band_score, 3),
             "mood_match": round(mood_score, 3),
             "artist_match": round(artist_match, 3),
             "calibration_boost": round(cal_boost, 3),
             "recency_boost": round(recency_boost, 3),
+            "halftime_bonus": round(halftime_bonus, 3),
             "diversity_penalty": round(diversity_penalty, 3),
             "staleness": round(staleness, 3),
             "cross_strategy_bonus": round(cross_bonus, 3),
             "discovery_bonus": round(discovery_bonus, 3),
             "mood_boost": round(mood_boost, 3),
         },
-        "_explanation": "; ".join(parts) if parts else "moderate match",
+        "_explanation": explanation,
     }
+
+
+# ── BRECVEMA Explanation Renderer (V 6.393) ──────────────────────────────
+# Maps the seven-dim score breakdown onto Juslin & Västfjäll's psychological
+# channels. Instead of "similar to X; sounds like your taste; genre match,"
+# the output reads "Sonic fit (CLAP 0.86, tempo in your 140-BPM drill zone);
+# Scene affinity (Shiva is your #2 listened artist)." Each channel's
+# contribution to the final score drives its narrative priority — the
+# explanation is literally a sorted view of the scorer's own reasoning.
+
+
+_TEMPO_BAND_LABELS = {
+    "resting": "slow (60-80 BPM)",
+    "walking": "mid-tempo (80-110 BPM)",
+    "brisk": "up-tempo (110-130 BPM)",
+    "fast_motor": "driving (130-160 BPM)",
+    "driven": "fast (160+ BPM)",
+}
+
+
+def _top_user_tempo_band(user_band_dist: dict[str, float] | None) -> str | None:
+    if not user_band_dist:
+        return None
+    top = max(user_band_dist.items(), key=lambda kv: kv[1], default=None)
+    if top and top[1] >= 0.30:
+        return top[0]
+    return None
+
+
+def _render_brecvema_explanation(
+    *,
+    candidate: dict[str, Any],
+    dim_scores: dict[str, float],
+    dim_weights: dict[str, float],
+    artist_matched_as: str,
+    nearest_tracks: list[dict[str, Any]] | None,
+    user_band_dist: dict[str, float] | None,
+    cand_tempo: float | None,
+    halftime_bonus: float,
+    recency_boost: float,
+    cal_boost: float,
+    cross_bonus: float,
+    strategy_count: int,
+) -> str:
+    """Build a 1-3 clause explanation from the top contributing channels.
+
+    Channel = weighted group of dims:
+      • acoustic  := clap + mert + effnet + tempo_band + scalar
+      • scene     := artist + genre
+      • affective := mood_match
+      • identity  := artist_match when matched as 'primary' (self-signalling)
+      • novelty   := cross_bonus + discovery (surfaces when prominent)
+    """
+    # Per-channel weighted contribution to the final score.
+    contrib: dict[str, float] = {
+        "acoustic": sum(
+            dim_scores.get(k, 0.0) * dim_weights.get(k, 0.0)
+            for k in ("clap", "mert", "effnet", "tempo_band", "scalar")
+        ),
+        "scene": sum(
+            dim_scores.get(k, 0.0) * dim_weights.get(k, 0.0)
+            for k in ("genre", "artist")
+        ),
+        "affective": dim_scores.get("mood_match", 0.0)
+                     * dim_weights.get("mood_match", 0.0),
+    }
+    # Sort channels high → low; only speak about ones pulling their weight.
+    ordered = sorted(contrib.items(), key=lambda kv: kv[1], reverse=True)
+
+    clauses: list[str] = []
+
+    for channel, score in ordered[:2]:
+        if score < 0.05:
+            continue
+        clauses.append(
+            _acoustic_clause(
+                candidate=candidate,
+                dim_scores=dim_scores,
+                user_band_dist=user_band_dist,
+                cand_tempo=cand_tempo,
+                halftime_bonus=halftime_bonus,
+                nearest_tracks=nearest_tracks,
+            ) if channel == "acoustic"
+            else _scene_clause(
+                candidate=candidate,
+                dim_scores=dim_scores,
+                matched_as=artist_matched_as,
+            ) if channel == "scene"
+            else _affective_clause(candidate=candidate, dim_scores=dim_scores)
+        )
+
+    # Novelty / recency / calibration appended when they cross a threshold —
+    # they're modulators, not primary reasons.
+    if cal_boost >= 0.05:
+        clauses.append("top calibrated artist")
+    elif recency_boost > 0 and candidate.get("release_date"):
+        clauses.append(f"released {candidate['release_date'][:7]}")
+    if cross_bonus >= 0.05 and strategy_count >= 2:
+        clauses.append(f"matched by {strategy_count} discovery paths")
+
+    clauses = [c for c in clauses if c]
+    if not clauses:
+        return "moderate match"
+    return "; ".join(clauses)
+
+
+def _acoustic_clause(
+    *,
+    candidate: dict[str, Any],
+    dim_scores: dict[str, float],
+    user_band_dist: dict[str, float] | None,
+    cand_tempo: float | None,
+    halftime_bonus: float,
+    nearest_tracks: list[dict[str, Any]] | None,
+) -> str:
+    """Sonic-fit narrative: lead with nearest track when available, then
+    tempo-band + halftime annotations when they're doing real work."""
+    bits: list[str] = []
+
+    if nearest_tracks:
+        nt = nearest_tracks[0]
+        bits.append(
+            f"sounds like {nt.get('name', '?')} by {nt.get('artist_name', '?')}"
+        )
+    elif dim_scores.get("clap", 0) >= 0.7:
+        bits.append("sonic fit with your library")
+
+    top_band = _top_user_tempo_band(user_band_dist)
+    tb_score = dim_scores.get("tempo_band", 0.0)
+    if top_band and tb_score >= 0.5 and cand_tempo:
+        label = _TEMPO_BAND_LABELS.get(top_band, top_band)
+        bits.append(f"{int(round(cand_tempo))} BPM in your {label} zone")
+
+    if halftime_bonus >= 0.015:
+        bits.append("halftime feel you tend to favor")
+
+    if not bits:
+        return ""
+    return bits[0] if len(bits) == 1 else f"{bits[0]} ({', '.join(bits[1:])})"
+
+
+def _scene_clause(
+    *,
+    candidate: dict[str, Any],
+    dim_scores: dict[str, float],
+    matched_as: str,
+) -> str:
+    """Cultural / scene narrative — artist loyalty > genre match."""
+    artist_name = candidate.get("artist_name", "")
+    artist_score = dim_scores.get("artist", 0.0)
+
+    if artist_score >= 0.5:
+        if matched_as == "feat":
+            return f"features an artist you listen to"
+        return f"{artist_name} is in your top artists"
+
+    genre_score = dim_scores.get("genre", 0.0)
+    if genre_score >= 0.4:
+        top_g = ", ".join((candidate.get("genre_names") or [])[:2])
+        if top_g:
+            return f"{top_g} matches your genre footprint"
+
+    return ""
+
+
+def _affective_clause(
+    *,
+    candidate: dict[str, Any],
+    dim_scores: dict[str, float],
+) -> str:
+    """Mood / affective narrative."""
+    mood_score = dim_scores.get("mood_match", 0.0)
+    if mood_score < 0.5:
+        return ""
+    tags = candidate.get("mood_tags") or []
+    if tags:
+        return f"mood fit ({tags[0]})"
+    return "mood fit with your library"
 
 
 def _find_nearest_tracks(

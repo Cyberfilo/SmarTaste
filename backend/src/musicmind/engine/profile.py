@@ -546,6 +546,8 @@ def build_taste_profile(
     listening_hours = round(total_duration_ms / 3_600_000, 1)
 
     audio_centroid: dict[str, float] = {}
+    tempo_band_dist: dict[str, float] | None = None
+    halftime_fraction = 0.0
     if audio_features_map:
         feature_list = [
             audio_features_map[s.get("catalog_id", "")]
@@ -553,6 +555,29 @@ def build_taste_profile(
             if s.get("catalog_id", "") in audio_features_map
         ]
         audio_centroid = build_audio_centroid(feature_list)
+
+        # V 6.393: tempo-band histogram + halftime-feel ratio. Both fall out
+        # of the same scalar feature map we already pass in — no new queries.
+        # Engagement weights reuse feedback_weights when present so heavily-
+        # played tracks dominate the distribution (matches user intuition).
+        from musicmind.engine.tempo import (
+            halftime_ratio,
+            tempo_band_distribution,
+        )
+        bpms = [f.get("tempo") for f in feature_list]
+        bss = [f.get("beat_strength") for f in feature_list]
+        dances = [f.get("danceability") for f in feature_list]
+        eng_weights = None
+        if feedback_weights:
+            eng_weights = [
+                feedback_weights.get(s.get("catalog_id", ""), 1.0)
+                for s in songs
+                if s.get("catalog_id", "") in audio_features_map
+            ]
+        tempo_band_dist = tempo_band_distribution(bpms, weights=eng_weights)
+        halftime_fraction = halftime_ratio(
+            bpms, bss, dances, weights=eng_weights,
+        )
 
     fw = feedback_weights
     embedding_centroid = (
@@ -615,4 +640,8 @@ def build_taste_profile(
         "mert_centroids": mert_centroids,
         "effnet_centroids": effnet_centroids,
         "mood_distribution": mood_distribution or None,
+        # V 6.393: tempo-band psychology + halftime-feel signature.
+        # Drives the tempo_band scoring dim and the halftime tie-breaker.
+        "tempo_band_distribution": tempo_band_dist,
+        "halftime_ratio": halftime_fraction,
     }

@@ -16,13 +16,18 @@ import numpy as np
 
 DEFAULT_WEIGHTS: dict[str, float] = {
     # V 6.388: mood_match added (0.10) as a dedicated affect/valence
-    # signal; CLAP and MERT each lose 0.05 to make room so production-
-    # style neighbors with opposite mood stop tying on similarity.
-    "clap": 0.25,
-    "mert": 0.22,
+    # signal. V 6.393: tempo_band (0.08) — psychologically-calibrated
+    # tempo-zone match replaces the raw-BPM component of scalar.
+    # Scalar drops to 0.06 (remaining energy/dance/acousticness/etc);
+    # tempo_band weight comes from shaving 0.02 off scalar and 0.02
+    # off each of clap/mert (they still dominate but no longer absorb
+    # arousal signal that belongs in a dedicated dim).
+    "clap": 0.23,
+    "mert": 0.20,
     "effnet": 0.13,
     "genre": 0.15,
-    "scalar": 0.10,
+    "scalar": 0.06,
+    "tempo_band": 0.08,
     "mood_match": 0.10,
     "artist": 0.05,
 }
@@ -43,6 +48,7 @@ _BREAKDOWN_MAP: dict[str, str] = {
     "effnet": "effnet_similarity",
     "genre": "genre_match",
     "scalar": "scalar_similarity",
+    "tempo_band": "tempo_band_similarity",
     "mood_match": "mood_match",
     "artist": "artist_match",
     "diversity": "diversity_penalty",
@@ -70,12 +76,13 @@ def compute_context_weights(
 
     Returns normalized weights summing to 1.0.
     """
-    # ── Base weights ──────────────────────────────────────
-    w_clap = 0.25
-    w_mert = 0.22
+    # ── Base weights (V 6.393: tempo_band added) ──────────
+    w_clap = 0.23
+    w_mert = 0.20
     w_effnet = 0.13
     w_genre = 0.15
-    w_scalar = 0.10
+    w_scalar = 0.06
+    w_tempo_band = 0.08
     w_mood = 0.10
     w_artist = 0.05
 
@@ -123,17 +130,30 @@ def compute_context_weights(
         w_genre += redistribute * 0.5
         w_scalar += redistribute * 0.5
 
+    # V 6.393: no tempo-band distribution (pre-6.393 profiles) → fold weight
+    # back into scalar (the band dim is just a psychologically-shaped tempo
+    # component, so scalar is the natural fallback).
+    has_tempo_band = bool(profile.get("tempo_band_distribution"))
+    if not has_tempo_band:
+        redistribute = w_tempo_band
+        w_tempo_band = 0.0
+        w_scalar += redistribute
+
     # Mood active (the separate mood filter, not mood_match dimension):
     # CLAP holistic vibe + scalar become dominant
     if mood_active:
         w_clap = max(w_clap, 0.35)
         w_scalar = max(w_scalar, 0.20)
         remaining = 1.0 - w_clap - w_scalar
-        other = w_mert + w_effnet + w_genre + w_mood + w_artist
+        other = (
+            w_mert + w_effnet + w_genre
+            + w_tempo_band + w_mood + w_artist
+        )
         ratio = remaining / other if other > 0 else 1.0
         w_mert *= ratio
         w_effnet *= ratio
         w_genre *= ratio
+        w_tempo_band *= ratio
         w_mood *= ratio
         w_artist *= ratio
 
@@ -143,6 +163,7 @@ def compute_context_weights(
         "effnet": w_effnet,
         "genre": w_genre,
         "scalar": w_scalar,
+        "tempo_band": w_tempo_band,
         "mood_match": w_mood,
         "artist": w_artist,
     })

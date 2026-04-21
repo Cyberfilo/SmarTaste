@@ -68,6 +68,9 @@ DIMENSION_LABELS: dict[str, str] = {
     "audio_similarity": "audio similarity",
     "genre_match": "genre match",
     "artist_match": "artist affinity",
+    "tempo_band_similarity": "tempo zone match",
+    "mood_match": "mood fit",
+    "halftime_bonus": "halftime feel",
 }
 
 _taste_service = TasteService()

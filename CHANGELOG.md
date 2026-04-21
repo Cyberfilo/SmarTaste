@@ -7,6 +7,22 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.393 — 2026-04-21
+
+### Psychology research integration — Tier A: tempo bands + halftime feel + BRECVEMA explanations
+
+Three content-based scorer upgrades drawn from the music-psychology literature review (see `/Users/filippomattiamenghi/Downloads/music-pshycology-research.md`). All use data we already compute — no new enrichment work.
+
+**Tempo-band dimension (§2.1, §9.3 item 3)** — the research is unanimous that tempo is the single strongest predictor of arousal response, but that raw BPM euclidean is the wrong similarity function. Tempo groups psychologically into five zones anchored on bodily entrainment: `resting` (60-80), `walking` (80-110), `brisk` (110-130), `fast_motor` (130-160), `driven` (160+). New module `engine/tempo.py` computes a soft Gaussian-membership vector across these bands. Profiles now carry `tempo_band_distribution` (engagement-weighted histogram over the user's library); candidates are scored via `tempo_band_similarity` (dot-product match against the user's distribution). Added as a dedicated scorer dim (default weight 0.08) — `scalar` drops from 0.10 to 0.06 since tempo is no longer in it, and `clap` / `mert` each lose 0.02 to make room. Total still sums to 1.0.
+
+**Halftime-feel detection (§2.1 + §2.2)** — drill and trap's kick-on-1 / snare-on-3 / double-time hi-hats on a 130-160 BPM grid create a body-pulse vs surface-activity dissociation the scorer previously couldn't see. `halftime_feel_score(tempo, beat_strength, danceability)` combines three signals that co-vary with the feel: tempo Gaussian peaked at 142 BPM, beat_strength > 0.35 (audible pulse), danceability in a 0.45-0.80 sweet spot (groove with suspended motion, not peak-dance). Profiles carry `halftime_ratio` (weighted fraction of library scoring ≥0.35). When a user's library is >25% halftime *and* a candidate reads halftime, an additive bonus up to +0.03 fires. Specifically unlocks Italian drill / trap / UK drill discrimination for listeners whose top plays live in that pocket.
+
+**BRECVEMA-channel explanations (§8.2, §9.5)** — Juslin & Västfjäll's eight mechanisms collapse into three operational channels for a content-based scorer: `acoustic` (CLAP + MERT + EffNet + tempo_band + scalar), `scene` (artist + genre), `affective` (mood_match). The new `_render_brecvema_explanation` renderer computes each channel's weighted contribution and speaks about the top two that pull ≥5% of the final score. Language is concrete: "sounds like X by Y (142 BPM in your driving zone, halftime feel you tend to favor); Shiva is in your top artists". Replaces the prior threshold-based paste-up ("sounds like your taste; similar musical structure; genre match") with attribution that mirrors the scorer's actual decision.
+
+Profile schema additions: `tempo_band_distribution` (dict), `halftime_ratio` (float). Scorer breakdown additions: `tempo_band_similarity`, `halftime_bonus`. No breaking changes — graceful fallback when fields are absent on pre-6.393 profiles.
+
+---
+
 ## V 6.392 — 2026-04-21
 
 ### Logs DB: reset on deploy + skip 200 OK noise
