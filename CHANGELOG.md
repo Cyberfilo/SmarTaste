@@ -7,6 +7,28 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.391 — 2026-04-21
+
+### Proactive dead-link check + artwork backfill + global preview cache
+
+Post-merge investigation of prod showed **1614/2480 (65%) cached Deezer preview URLs were expired** (`hdnea=exp=` tokens decoded to 2–4 days in the past). Enrichment had been effectively stalled for days — every cycle attempted audio downloads, hit 403s, and wasted the round-trip before reactively re-resolving one URL at a time. With `min_batch=15` the GPU never fired.
+
+**Dead-link check (`_preview_url_is_fresh`)** in `engine/enrichment/orchestrator.py` parses the `exp=` token server-side with a 60 s clock-skew grace. URLs without the token (iTunes, etc.) are treated as stable. `_download_preview` short-circuits to `None` on stale input so callers refresh BEFORE the HTTP call instead of after the 403.
+
+**Audio-bytes backfill** now runs in both `_download_all_previews` (library / `song_metadata_cache`) and a new `_download_all_previews_global` (discovery / `global_song_cache` — where the 1614 stale rows lived and were previously unreachable). Pre-flight freshness check → proactive Deezer re-resolve by ISRC/search → write fresh URL back to the source table → download + cache bytes. Still falls back to reactive refresh if a URL dies before its claimed expiry.
+
+**Artwork backfill** is a new worker phase between ISRC backfill and audio-bytes backfill. New `artwork_cache` table (migration `028_add_artwork_cache`) stores image bytes keyed by `catalog_id`, shared between SMC and GSC. Apple `{w}x{h}bb.jpg` templates are resolved to 640×640 at fetch time; sizes clamped to 500 B–5 MB sanity range. No TTL cleanup needed (artwork URLs don't sign).
+
+**New worker phase order** (per cycle + both startup drains):
+1. ISRC backfill
+2. **Artwork backfill + caching** (new)
+3. **Audio-bytes backfill + URL refresh** (extended — now covers GSC)
+4. Essentia → EffNet → GPU → mood (unchanged)
+
+Schema touches: +`artwork_cache` table (5 cols). No breaking changes.
+
+---
+
 ## V 6.390 — 2026-04-20
 
 ### Fix: "Similar to X" cited library tracks the user didn't remember

@@ -597,6 +597,27 @@ preview_audio_cache = sa.Table(
     ),
 )
 
+# ── Artwork Cache ───────────────────────────────────────────────────────────
+# Caches raw artwork image bytes keyed by catalog_id. Populated by the
+# worker's artwork_backfill phase (between ISRC backfill and audio-bytes
+# backfill). Artwork URLs are stable (no signed-exp token) so rows live
+# until the track is purged; no TTL cleanup needed.
+
+artwork_cache = sa.Table(
+    "artwork_cache",
+    metadata,
+    sa.Column("catalog_id", sa.Text, primary_key=True),
+    sa.Column("image_data", sa.LargeBinary, nullable=False),
+    sa.Column("content_type", sa.Text, server_default="image/jpeg"),
+    sa.Column("source_url", sa.Text, nullable=True),
+    sa.Column(
+        "downloaded_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 # Per-user discovery candidate pool — populated by the worker, consumed by
 # the recommendations API. The four discover_* strategies (similar_artist,
 # genre_adjacent, editorial, chart) used to run live on every recommendation

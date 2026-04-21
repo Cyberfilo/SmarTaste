@@ -722,7 +722,35 @@ async def _mark_preview_enrichment_complete(
         logger.debug("Preview cache mark-complete failed for %s", catalog_id)
 
 
+_EXP_TOKEN_RE = None  # lazy-compiled regex for hdnea=exp=<ts>
+
+
+def _preview_url_is_fresh(url: str | None) -> bool:
+    """True if URL has no signed-exp token, or the exp is still in the future.
+
+    Deezer preview CDN URLs carry `hdnea=exp=<unix_ts>` and 403 after
+    expiry (~7 days). iTunes and other non-signed URLs have no exp
+    token and are treated as stable. 60s clock-skew grace.
+    """
+    if not url:
+        return False
+    global _EXP_TOKEN_RE
+    if _EXP_TOKEN_RE is None:
+        import re
+        _EXP_TOKEN_RE = re.compile(r"exp=(\d+)")
+    m = _EXP_TOKEN_RE.search(url)
+    if not m:
+        return True
+    import time
+    try:
+        return int(m.group(1)) > (time.time() + 60)
+    except (TypeError, ValueError):
+        return True
+
+
 async def _download_preview(url: str) -> bytes | None:
+    if not _preview_url_is_fresh(url):
+        return None
     import httpx
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
@@ -732,6 +760,81 @@ async def _download_preview(url: str) -> bytes | None:
             return content if len(content) > 1000 else None
     except Exception:
         return None
+
+
+# ── Artwork Download + Cache ────────────────────────────────────────────────
+
+
+def _resolve_artwork_url(url_or_template: str | None, size: int = 640) -> str | None:
+    """Fill an Apple `{w}x{h}bb.jpg` template with a concrete size.
+
+    Stable URLs (no `{w}`) pass through; None-ish passes through as None.
+    """
+    if not url_or_template:
+        return None
+    if "{w}" in url_or_template or "{h}" in url_or_template:
+        return (
+            url_or_template
+            .replace("{w}", str(size))
+            .replace("{h}", str(size))
+            .replace("{f}", "jpg")
+        )
+    return url_or_template
+
+
+async def _download_artwork(url: str) -> tuple[bytes, str] | None:
+    """Fetch artwork bytes. Returns (data, content_type) or None.
+
+    Sanity-clamps to 500B–5MB; returns the response content-type header
+    (defaults to image/jpeg) so callers can round-trip it on serve.
+    """
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.content
+            if not (500 < len(data) < 5_000_000):
+                return None
+            ctype = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+            return data, ctype
+    except Exception:
+        return None
+
+
+async def _cache_artwork(
+    engine: Any,
+    catalog_id: str,
+    image_data: bytes,
+    source_url: str,
+    content_type: str = "image/jpeg",
+) -> None:
+    """Upsert artwork bytes keyed by catalog_id."""
+    from musicmind.db.schema import artwork_cache as ac
+
+    try:
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            existing = await conn.execute(
+                sa.select(ac.c.catalog_id).where(ac.c.catalog_id == catalog_id)
+            )
+            if existing.first():
+                await conn.execute(
+                    sa.update(ac).where(ac.c.catalog_id == catalog_id).values(
+                        image_data=image_data, source_url=source_url,
+                        content_type=content_type, downloaded_at=now,
+                    )
+                )
+            else:
+                await conn.execute(
+                    ac.insert().values(
+                        catalog_id=catalog_id, image_data=image_data,
+                        source_url=source_url, content_type=content_type,
+                        downloaded_at=now,
+                    )
+                )
+    except Exception:
+        logger.debug("Artwork cache write failed for %s", catalog_id)
 
 
 async def _load_features_batch(

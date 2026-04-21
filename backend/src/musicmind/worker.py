@@ -277,7 +277,24 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d ISRC backfill failed", cycle)
 
-        # ── Phase 2: Download + cache preview audio ────────────────
+        # ── Phase 1b: Artwork backfill + caching (V 6.391) ─────────
+        await _set_status(
+            engine, "artwork_backfill", "Caching missing artwork",
+            cycle=cycle,
+        )
+        try:
+            art_cached = await _download_all_artwork(engine, limit=100)
+            if art_cached > 0:
+                logger.info(
+                    "Cycle %d: cached %d artwork images", cycle, art_cached,
+                )
+        except Exception:
+            logger.exception("Cycle %d artwork backfill failed", cycle)
+
+        # ── Phase 2: Audio-bytes backfill + URL refresh (V 6.391) ──
+        # Proactive dead-link check on preview URLs (parses hdnea=exp=)
+        # refreshes stale Deezer URLs before the 403, then caches bytes.
+        # Covers both library (SMC) and global (GSC) tables.
         await _set_status(
             engine, "audio_download", "Downloading missing previews",
             cycle=cycle,
@@ -286,10 +303,24 @@ async def main() -> None:
             downloaded = await _download_all_previews(engine, limit=100)
             if downloaded > 0:
                 logger.info(
-                    "Cycle %d: downloaded %d previews", cycle, downloaded,
+                    "Cycle %d: downloaded %d library previews",
+                    cycle, downloaded,
                 )
         except Exception:
             logger.exception("Cycle %d audio download failed", cycle)
+        try:
+            downloaded_g = await _download_all_previews_global(
+                engine, limit=100,
+            )
+            if downloaded_g > 0:
+                logger.info(
+                    "Cycle %d: downloaded %d global previews",
+                    cycle, downloaded_g,
+                )
+        except Exception:
+            logger.exception(
+                "Cycle %d global audio download failed", cycle,
+            )
 
         # ── Phase 3: Essentia/ONNX enrichment (CPU) ────────────────
         await _set_status(
@@ -574,11 +605,13 @@ async def _cleanup_preview_cache(engine) -> int:
 
 
 async def _download_all_previews(engine, *, limit: int = 0) -> int:
-    """Download and cache preview audio for tracks missing cached bytes.
+    """Download and cache preview audio for library tracks missing cached bytes.
 
-    For tracks with expired Deezer CDN URLs (403), refreshes via Deezer
-    ISRC/search lookup. Cached bytes are used by Essentia (CPU) and
-    Modal GPU (bytes-based), eliminating URL expiry failures entirely.
+    For tracks whose cached preview_url is past its `hdnea=exp=` expiry,
+    proactively refreshes via Deezer ISRC/search lookup BEFORE attempting
+    download (saves the 403 round-trip). Cached bytes are used by
+    Essentia (CPU) and Modal GPU (bytes-based), eliminating URL expiry
+    failures entirely.
     """
     import asyncio
 
@@ -589,9 +622,9 @@ async def _download_all_previews(engine, *, limit: int = 0) -> int:
     from musicmind.engine.enrichment.orchestrator import (
         _cache_preview_audio,
         _download_preview,
+        _preview_url_is_fresh,
     )
 
-    # Find tracks that have no cached audio bytes
     async with engine.begin() as conn:
         cached_ids = sa.select(
             preview_audio_cache.c.catalog_id,
@@ -618,51 +651,70 @@ async def _download_all_previews(engine, *, limit: int = 0) -> int:
     if not rows:
         return 0
 
-    logger.info("Downloading previews for %d tracks", len(rows))
+    logger.info("Downloading previews for %d library tracks", len(rows))
 
     downloaded = 0
     sem = asyncio.Semaphore(15)
 
+    async def _refresh_deezer(row) -> str | None:
+        try:
+            from musicmind.engine.enrichment.deezer import search_preview_url
+            return await search_preview_url(
+                name=row.name or "",
+                artist_name=row.artist_name or "",
+                isrc=row.isrc or None,
+            )
+        except Exception:
+            return None
+
     async def _dl_one(row) -> bool:
         async with sem:
-            audio = await _download_preview(row.preview_url)
+            url = row.preview_url
+            refreshed = False
 
-            # Expired Deezer URL? Refresh via ISRC/search
-            if audio is None and "dzcdn.net" in (row.preview_url or ""):
+            # Proactive dead-link check: refresh BEFORE the HTTP 403 round-trip
+            if not _preview_url_is_fresh(url):
+                fresh = await _refresh_deezer(row)
+                if fresh:
+                    url = fresh
+                    refreshed = True
+
+            audio = await _download_preview(url)
+
+            # Reactive fallback: Deezer URL died earlier than its exp claimed
+            if audio is None and not refreshed and "dzcdn.net" in (url or ""):
+                fresh = await _refresh_deezer(row)
+                if fresh and fresh != url:
+                    url = fresh
+                    refreshed = True
+                    audio = await _download_preview(url)
+
+            if audio is None:
+                return False
+
+            if refreshed:
                 try:
-                    from musicmind.engine.enrichment.deezer import (
-                        search_preview_url,
-                    )
-                    fresh = await search_preview_url(
-                        name=row.name or "",
-                        artist_name=row.artist_name or "",
-                        isrc=row.isrc or None,
-                    )
-                    if fresh:
-                        audio = await _download_preview(fresh)
-                        if audio:
-                            # Update the cached URL in DB
-                            async with engine.begin() as conn:
-                                await conn.execute(
-                                    sa.update(song_metadata_cache)
-                                    .where(sa.and_(
-                                        song_metadata_cache.c.catalog_id
-                                        == row.catalog_id,
-                                        song_metadata_cache.c.user_id
-                                        == row.user_id,
-                                    ))
-                                    .values(preview_url=fresh)
-                                )
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            sa.update(song_metadata_cache)
+                            .where(sa.and_(
+                                song_metadata_cache.c.catalog_id
+                                == row.catalog_id,
+                                song_metadata_cache.c.user_id
+                                == row.user_id,
+                            ))
+                            .values(preview_url=url)
+                        )
                 except Exception:
-                    pass
+                    logger.debug(
+                        "SMC preview_url refresh write failed for %s",
+                        row.catalog_id,
+                    )
 
-            if audio:
-                await _cache_preview_audio(
-                    engine, row.catalog_id, audio,
-                    row.preview_url or "",
-                )
-                return True
-            return False
+            await _cache_preview_audio(
+                engine, row.catalog_id, audio, url or "",
+            )
+            return True
 
     for i in range(0, len(rows), 50):
         batch = rows[i:i + 50]
@@ -676,6 +728,227 @@ async def _download_all_previews(engine, *, limit: int = 0) -> int:
             logger.info(
                 "Audio download %d/%d: %d cached",
                 min(i + 50, len(rows)), len(rows), ok,
+            )
+
+    return downloaded
+
+
+async def _download_all_previews_global(engine, *, limit: int = 0) -> int:
+    """Same as _download_all_previews but for global_song_cache rows.
+
+    Songs discovered through cobweb expansion live in GSC and never hit
+    SMC. Their preview URLs were the 1614/2480 (65%) stale-cache culprits
+    that stalled GPU enrichment for 4+ days. Dead-link check is proactive.
+    """
+    import asyncio
+
+    from musicmind.db.schema import (
+        global_song_cache,
+        preview_audio_cache,
+    )
+    from musicmind.engine.enrichment.orchestrator import (
+        _cache_preview_audio,
+        _download_preview,
+        _preview_url_is_fresh,
+    )
+
+    async with engine.begin() as conn:
+        cached_ids = sa.select(
+            preview_audio_cache.c.catalog_id,
+        ).correlate(None)
+        q = sa.select(
+            global_song_cache.c.catalog_id,
+            global_song_cache.c.name,
+            global_song_cache.c.artist_name,
+            global_song_cache.c.isrc,
+            global_song_cache.c.preview_url,
+        ).where(
+            sa.and_(
+                global_song_cache.c.catalog_id.notin_(cached_ids),
+                global_song_cache.c.preview_url.isnot(None),
+                global_song_cache.c.preview_url != "",
+            )
+        )
+        if limit > 0:
+            q = q.limit(limit)
+        result = await conn.execute(q)
+        rows = result.fetchall()
+
+    if not rows:
+        return 0
+
+    logger.info("Downloading previews for %d global tracks", len(rows))
+
+    downloaded = 0
+    sem = asyncio.Semaphore(15)
+
+    async def _refresh_deezer(row) -> str | None:
+        try:
+            from musicmind.engine.enrichment.deezer import search_preview_url
+            return await search_preview_url(
+                name=row.name or "",
+                artist_name=row.artist_name or "",
+                isrc=row.isrc or None,
+            )
+        except Exception:
+            return None
+
+    async def _dl_one(row) -> bool:
+        async with sem:
+            url = row.preview_url
+            refreshed = False
+
+            if not _preview_url_is_fresh(url):
+                fresh = await _refresh_deezer(row)
+                if fresh:
+                    url = fresh
+                    refreshed = True
+
+            audio = await _download_preview(url)
+
+            if audio is None and not refreshed and "dzcdn.net" in (url or ""):
+                fresh = await _refresh_deezer(row)
+                if fresh and fresh != url:
+                    url = fresh
+                    refreshed = True
+                    audio = await _download_preview(url)
+
+            if audio is None:
+                return False
+
+            if refreshed:
+                try:
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            sa.update(global_song_cache)
+                            .where(
+                                global_song_cache.c.catalog_id
+                                == row.catalog_id,
+                            )
+                            .values(preview_url=url)
+                        )
+                except Exception:
+                    logger.debug(
+                        "GSC preview_url refresh write failed for %s",
+                        row.catalog_id,
+                    )
+
+            await _cache_preview_audio(
+                engine, row.catalog_id, audio, url or "",
+            )
+            return True
+
+    for i in range(0, len(rows), 50):
+        batch = rows[i:i + 50]
+        results = await asyncio.gather(
+            *[_dl_one(r) for r in batch],
+            return_exceptions=True,
+        )
+        ok = sum(1 for r in results if r is True)
+        downloaded += ok
+        if len(rows) > 50:
+            logger.info(
+                "Global audio download %d/%d: %d cached",
+                min(i + 50, len(rows)), len(rows), ok,
+            )
+
+    return downloaded
+
+
+# ── Artwork Backfill ──────────────────────────────────────────────────────
+
+
+async def _download_all_artwork(engine, *, limit: int = 0) -> int:
+    """Download and cache artwork bytes for library + global tracks.
+
+    Keys cache by catalog_id (shared between SMC and GSC). Prefers SMC's
+    artwork_url_template (Apple sized), falls back to GSC's stable
+    artwork_url. Silently skips tracks already cached.
+    """
+    import asyncio
+
+    from musicmind.db.schema import (
+        artwork_cache,
+        global_song_cache,
+        song_metadata_cache,
+    )
+    from musicmind.engine.enrichment.orchestrator import (
+        _cache_artwork,
+        _download_artwork,
+        _resolve_artwork_url,
+    )
+
+    async with engine.begin() as conn:
+        cached_ids = sa.select(artwork_cache.c.catalog_id).correlate(None)
+
+        smc_q = sa.select(
+            song_metadata_cache.c.catalog_id,
+            song_metadata_cache.c.artwork_url_template.label("url"),
+        ).where(
+            sa.and_(
+                song_metadata_cache.c.catalog_id.notin_(cached_ids),
+                song_metadata_cache.c.artwork_url_template.isnot(None),
+                song_metadata_cache.c.artwork_url_template != "",
+            )
+        )
+        gsc_q = sa.select(
+            global_song_cache.c.catalog_id,
+            global_song_cache.c.artwork_url.label("url"),
+        ).where(
+            sa.and_(
+                global_song_cache.c.catalog_id.notin_(cached_ids),
+                global_song_cache.c.artwork_url.isnot(None),
+                global_song_cache.c.artwork_url != "",
+            )
+        )
+
+        smc_rows = (await conn.execute(smc_q)).fetchall()
+        gsc_rows = (await conn.execute(gsc_q)).fetchall()
+
+    # De-dupe by catalog_id (library wins; Apple templates are higher quality)
+    by_id: dict[str, str] = {}
+    for r in smc_rows:
+        if r.url:
+            by_id[r.catalog_id] = r.url
+    for r in gsc_rows:
+        if r.catalog_id not in by_id and r.url:
+            by_id[r.catalog_id] = r.url
+
+    items = list(by_id.items())
+    if limit > 0:
+        items = items[:limit]
+    if not items:
+        return 0
+
+    logger.info("Downloading artwork for %d tracks", len(items))
+
+    downloaded = 0
+    sem = asyncio.Semaphore(15)
+
+    async def _dl_one(catalog_id: str, raw_url: str) -> bool:
+        async with sem:
+            url = _resolve_artwork_url(raw_url, size=640)
+            if not url:
+                return False
+            result = await _download_artwork(url)
+            if not result:
+                return False
+            data, ctype = result
+            await _cache_artwork(engine, catalog_id, data, url, ctype)
+            return True
+
+    for i in range(0, len(items), 50):
+        batch = items[i:i + 50]
+        results = await asyncio.gather(
+            *[_dl_one(cid, u) for cid, u in batch],
+            return_exceptions=True,
+        )
+        ok = sum(1 for r in results if r is True)
+        downloaded += ok
+        if len(items) > 50:
+            logger.info(
+                "Artwork download %d/%d: %d cached",
+                min(i + 50, len(items)), len(items), ok,
             )
 
     return downloaded
@@ -1689,7 +1962,7 @@ async def _drain_user_linked(
     remain (or no progress is made — permanent failures).
     """
     totals: dict[str, int] = {
-        "isrc": 0, "previews": 0,
+        "isrc": 0, "artwork": 0, "previews": 0,
         "essentia": 0, "effnet": 0, "gpu": 0,
     }
 
@@ -1704,6 +1977,10 @@ async def _drain_user_linked(
         isrc = await _backfill_isrcs(engine, batch_limit=500)
         totals["isrc"] += isrc
         progress += isrc
+
+        art = await _download_all_artwork(engine)
+        totals["artwork"] += art
+        progress += art
 
         prev = await _download_all_previews(engine)
         totals["previews"] += prev
@@ -1723,9 +2000,9 @@ async def _drain_user_linked(
 
         remaining = await _count_user_linked_gaps(engine)
         logger.info(
-            "User drain pass %d: +%d isrc, +%d prev, +%d ess, +%d eff, "
-            "+%d gpu  (%d user gaps remain)",
-            it + 1, isrc, prev, ess, effnet, gpu, remaining,
+            "User drain pass %d: +%d isrc, +%d art, +%d prev, +%d ess, "
+            "+%d eff, +%d gpu  (%d user gaps remain)",
+            it + 1, isrc, art, prev, ess, effnet, gpu, remaining,
         )
 
         if remaining == 0:
@@ -1755,7 +2032,10 @@ async def _drain_discovered(
     """Loop ISRC → Essentia (via _enrich_global_songs) → GPU (with URL
     fallback per V 6.367) until no global gaps remain.
     """
-    totals: dict[str, int] = {"isrc": 0, "essentia": 0, "gpu": 0}
+    totals: dict[str, int] = {
+        "isrc": 0, "artwork": 0, "previews": 0,
+        "essentia": 0, "gpu": 0,
+    }
 
     for it in range(max_iterations):
         await _set_status(
@@ -1768,6 +2048,18 @@ async def _drain_discovered(
         isrc = await _backfill_isrcs(engine, batch_limit=500)
         totals["isrc"] += isrc
         progress += isrc
+
+        art = await _download_all_artwork(engine)
+        totals["artwork"] += art
+        progress += art
+
+        # V 6.391: GSC preview URLs were the 1614/2480 stale-cache
+        # culprits. Refreshing them here before Essentia/GPU run means
+        # the enrichment pipeline downstream doesn't waste HTTP calls
+        # hitting expired Deezer CDN URLs.
+        prev_g = await _download_all_previews_global(engine)
+        totals["previews"] += prev_g
+        progress += prev_g
 
         ess = await _enrich_global_songs(engine, settings)
         totals["essentia"] += ess
@@ -1789,9 +2081,9 @@ async def _drain_discovered(
 
         remaining = await _count_global_gaps(engine)
         logger.info(
-            "Discovered drain pass %d: +%d isrc, +%d ess, +%d gpu  "
-            "(%d global gaps remain)",
-            it + 1, isrc, ess, gpu, remaining,
+            "Discovered drain pass %d: +%d isrc, +%d art, +%d prev, "
+            "+%d ess, +%d gpu  (%d global gaps remain)",
+            it + 1, isrc, art, prev_g, ess, gpu, remaining,
         )
 
         if remaining == 0:
