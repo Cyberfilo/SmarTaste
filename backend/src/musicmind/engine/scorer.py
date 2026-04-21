@@ -889,13 +889,68 @@ def rank_candidates(
 
     # Step 2: Greedy re-rank — DPP-style diversity + Steck calibration (V 6.386)
     # Falls back to legacy metadata MMR for candidates without CLAP.
+    # V 6.394: discovery_disposition + taste_shape modulate diversity weight,
+    # DPP kernel bandwidth, Steck calibration weight, and the Wundt stretch
+    # target that actively rewards the "calibrated-novelty" distance band.
     from musicmind.engine.similarity import song_similarity
 
     w = weights or DEFAULT_WEIGHTS
-    diversity_weight = w.get("diversity", 0.10)
+    diversity_weight_base = w.get("diversity", 0.10)
     target_genre_dist = _build_user_genre_distribution(
         profile.get("genre_vector"),
     )
+
+    # ── V 6.394: personality-adaptive re-rank params ──────────────────
+    # Disposition ∈ [0,1]; default 0.3 means a moderate explorer profile.
+    disposition = float(profile.get("discovery_disposition") or 0.30)
+    disposition = max(0.0, min(1.0, disposition))
+    taste_info = profile.get("taste_shape") or {}
+    shape = (
+        taste_info.get("shape") if isinstance(taste_info, dict) else "mixed"
+    ) or "mixed"
+
+    # Diversity weight: explorers pay more for diversity (+50% at disp=1.0),
+    # exploiters pay less (−30% at disp=0.0). Range roughly [0.07, 0.15].
+    diversity_weight = diversity_weight_base * (0.7 + disposition * 0.8)
+
+    # DPP kernel bandwidth: wider for explorers (accepts more distant
+    # already-selected tracks), narrower for exploiters (cluster tight).
+    dpp_sigma = _DPP_SIGMA * (0.85 + disposition * 0.4)
+
+    # Steck calibration weight: univores want depth in their favorite
+    # genres — don't force spread; omnivores expect genre breadth;
+    # mixed keeps the default. Applied multiplicatively.
+    cal_scale = {"univore": 0.5, "mixed": 1.0, "omnivore": 1.2}.get(
+        shape, 1.0,
+    )
+    cal_weight_eff = _CALIBRATION_WEIGHT * cal_scale
+
+    # Wundt stretch target — CLAP distance from centroid the scorer
+    # actively wants the rec slate to occupy. 0.15 = near centroid (safe);
+    # 0.50 = firmly outside the comfort zone (adventurous). The stretch
+    # bonus is a gaussian peaked on this target (σ=0.15) scaled to ±0.025.
+    stretch_target = 0.15 + disposition * 0.35
+    stretch_bonus_weight = 0.025
+    stretch_sigma = 0.15
+
+    def _wundt_stretch(cand_clap: list[float] | None) -> float:
+        """Bonus for occupying the user's calibrated-novelty distance band."""
+        if not cand_clap or not user_clap_centroid:
+            return 0.0
+        cand_vec = np.asarray(cand_clap, dtype=np.float32)
+        ctr_vec = np.asarray(user_clap_centroid, dtype=np.float32)
+        cn = float(np.linalg.norm(cand_vec))
+        xn = float(np.linalg.norm(ctr_vec))
+        if cn == 0 or xn == 0:
+            return 0.0
+        sim = float(np.dot(cand_vec, ctr_vec) / (cn * xn))
+        sim = max(-1.0, min(1.0, sim))
+        distance = 1.0 - sim  # cosine distance
+        peak = math.exp(
+            -((distance - stretch_target) ** 2) / (2.0 * stretch_sigma ** 2)
+        )
+        return stretch_bonus_weight * peak
+
     selected: list[dict[str, Any]] = []
     remaining = list(base_scored)
     running_genre_counts: dict[str, float] = defaultdict(float)
@@ -907,6 +962,7 @@ def rank_candidates(
         best_score = -1.0
         best_div_penalty = 0.0
         best_cal_penalty = 0.0
+        best_stretch = 0.0
 
         for i, c in enumerate(remaining):
             base_score = c["_score"]
@@ -918,6 +974,7 @@ def rank_candidates(
             # candidate or all of the already-selected tracks.
             dpp_penalty = _dpp_diversity_penalty(
                 c_clap, base_score, selected, cmap,
+                sigma=dpp_sigma,
             ) if selected else None
 
             if dpp_penalty is not None:
@@ -936,10 +993,15 @@ def rank_candidates(
                 target_genre_dist,
             )
 
+            # V 6.394: Wundt-curve stretch bonus — explicit tolerance-calibrated
+            # novelty injection. Peaks at (disposition-scaled) CLAP distance.
+            stretch = _wundt_stretch(c_clap)
+
             adjusted = (
                 base_score
                 - diversity_weight * diversity_penalty
-                - _CALIBRATION_WEIGHT * cal_penalty
+                - cal_weight_eff * cal_penalty
+                + stretch
             )
             adjusted = max(0.0, min(1.0, adjusted))
 
@@ -948,11 +1010,13 @@ def rank_candidates(
                 best_idx = i
                 best_div_penalty = diversity_penalty
                 best_cal_penalty = cal_penalty
+                best_stretch = stretch
 
         best = remaining.pop(best_idx)
         best["_score"] = round(best_score, 3)
         best["_breakdown"]["diversity_penalty"] = round(best_div_penalty, 3)
         best["_breakdown"]["calibration_kl"] = round(best_cal_penalty, 4)
+        best["_breakdown"]["wundt_stretch"] = round(best_stretch, 4)
         selected.append(best)
 
         # Update running genre distribution with the chosen track.

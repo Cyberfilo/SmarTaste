@@ -342,6 +342,149 @@ def compute_familiarity_score(genre_vector: dict[str, float]) -> float:
     return round(entropy / max_entropy, 3)
 
 
+# ── Discovery disposition + taste shape (V 6.394) ──────────────────────────
+# Discovery disposition and taste shape are two psychological scalars derived
+# entirely from the user's existing library + history — no new data needed.
+#
+# Discovery disposition (0–1): how much of the listener's recent library growth
+# comes from newly-encountered artists. Calibrates the Wundt-curve stretch
+# budget — conservatives get recs near the centroid, explorers get pushed
+# outward. Research: §7.6 (Anderson et al. 2020), §3.2 (Berlyne / Wundt).
+#
+# Taste shape (univore/mixed/omnivore): derived from Gini on per-artist play
+# concentration. Univore user wants depth in their top-5 artists; omnivore
+# wants breadth across scenes. Research: §7.7 (Peterson & Kern 1996).
+
+
+def compute_discovery_disposition(
+    songs: list[dict[str, Any]],
+    *,
+    recent_window_days: int = 30,
+) -> float:
+    """Fraction of last-N-days library additions that introduce new artists.
+
+    Intuition: if you added 100 tracks in the last 30 days and 40 of them
+    were from artists you had zero prior tracks from, your disposition is
+    0.40. Pure exploiters score near 0 (re-adding from the same artists);
+    pure explorers score near 1.0 (every new add is a new artist).
+
+    Falls back to a neutral 0.30 when `date_added_to_library` is missing
+    on enough rows to make the window unusable.
+    """
+    if not songs:
+        return 0.30
+
+    now = datetime.now(tz=UTC)
+    cutoff_seconds = recent_window_days * 86400
+
+    artists_before: set[str] = set()
+    recent_tracks: list[tuple[str, datetime]] = []
+    usable_dates = 0
+
+    for s in songs:
+        raw = s.get("date_added_to_library")
+        if not raw:
+            continue
+        usable_dates += 1
+        try:
+            if isinstance(raw, str):
+                ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            else:
+                ts = raw
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            continue
+
+        age = (now - ts).total_seconds()
+        primary_artists = parse_artists(s.get("artist_name", ""))
+        primary = primary_artists[0][0].lower() if primary_artists else ""
+        if not primary:
+            continue
+
+        if age > cutoff_seconds:
+            artists_before.add(primary)
+        else:
+            recent_tracks.append((primary, ts))
+
+    if not recent_tracks or usable_dates < 10:
+        # Library lacks date metadata → we can't judge; return neutral prior.
+        return 0.30
+
+    new_artist_tracks = sum(
+        1 for (a, _) in recent_tracks if a not in artists_before
+    )
+    return round(new_artist_tracks / len(recent_tracks), 3)
+
+
+def _gini(values: list[float]) -> float:
+    """Gini coefficient on a list of non-negative values.
+
+    0 = perfectly equal (omnivore), 1 = fully concentrated (univore).
+    """
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    cum_sum = 0.0
+    weighted_sum = 0.0
+    for i, v in enumerate(sorted_vals, start=1):
+        cum_sum += v
+        weighted_sum += i * v
+    if cum_sum == 0:
+        return 0.0
+    return (2 * weighted_sum) / (n * cum_sum) - (n + 1) / n
+
+
+def compute_taste_shape(
+    songs: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify the listener as univore / mixed / omnivore.
+
+    Combines a per-artist play count (from history + library) into a Gini
+    coefficient. Thresholds picked so a user with ~80% of plays on their
+    top-3 artists scores univore; a user with plays spread evenly across
+    20+ artists scores omnivore.
+
+    Returns a dict with:
+      - shape: "univore" | "mixed" | "omnivore"
+      - gini: float (0–1)
+      - top_artist_share: float — fraction of plays on the #1 artist
+    """
+    play_counts: Counter[str] = Counter()
+
+    for s in songs:
+        parsed = parse_artists(s.get("artist_name", ""))
+        if parsed:
+            play_counts[parsed[0][0].lower()] += 1
+
+    for h in history:
+        parsed = parse_artists(h.get("artist_name", ""))
+        if parsed:
+            play_counts[parsed[0][0].lower()] += 2  # recent play = 2x library
+
+    if len(play_counts) < 3:
+        return {"shape": "mixed", "gini": 0.0, "top_artist_share": 0.0}
+
+    values = list(play_counts.values())
+    gini = round(_gini([float(v) for v in values]), 3)
+    total = sum(values)
+    top_share = round(max(values) / total, 3) if total else 0.0
+
+    # Thresholds calibrated on typical music libraries: classical Gini
+    # spread goes 0 (uniform) → 0.5 (moderate skew) → 0.8 (heavy skew).
+    # Combined with top_artist_share >25% for the univore trigger.
+    if gini >= 0.55 and top_share >= 0.15:
+        shape = "univore"
+    elif gini <= 0.35:
+        shape = "omnivore"
+    else:
+        shape = "mixed"
+
+    return {"shape": shape, "gini": gini, "top_artist_share": top_share}
+
+
 def build_audio_centroid(
     audio_features_list: list[dict[str, float]],
     engagement_weights: list[float] | None = None,
@@ -644,4 +787,9 @@ def build_taste_profile(
         # Drives the tempo_band scoring dim and the halftime tie-breaker.
         "tempo_band_distribution": tempo_band_dist,
         "halftime_ratio": halftime_fraction,
+        # V 6.394: psychological dispositions — explorer vs. exploiter
+        # (Wundt-curve stretch budget) and univore vs. omnivore (depth
+        # vs. breadth in candidate selection + Steck calibration).
+        "discovery_disposition": compute_discovery_disposition(songs),
+        "taste_shape": compute_taste_shape(songs, history),
     }

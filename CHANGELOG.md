@@ -7,6 +7,34 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.394 — 2026-04-21
+
+### Psychology research integration — Tier B: discovery disposition + taste shape + Wundt stretch
+
+Three *personality-adaptive* layers that sit on top of the V 6.393 content-based scorer. Both scalars are derived from existing library + history data; no new enrichment or schema work.
+
+**Discovery disposition (§7.6, §3.2)** — per-user scalar ∈ [0, 1] measuring the fraction of last-30-day library additions that introduce previously-unseen artists. Pure exploiters (every new add from an existing favorite) score ≈0; pure explorers (every new add is a new artist) score ≈1. Falls back to 0.30 when `date_added_to_library` is missing on too many rows to judge. Plumbed onto `profile["discovery_disposition"]`.
+
+**Taste shape (§7.7)** — univore / mixed / omnivore classification built from a Gini coefficient over per-artist play counts (library weight 1×, history weight 2× per plays-are-stronger-than-adds). Thresholds calibrated so a user with ~80% of plays on their top-3 artists lands in `univore`; evenly spread across 20+ artists lands in `omnivore`. Profile carries `taste_shape: {shape, gini, top_artist_share}`.
+
+**Wundt-curve stretch target (§9.6)** — the re-ranker now actively rewards candidates whose CLAP distance from the user centroid falls in a disposition-calibrated band. Stretch target = `0.15 + disposition × 0.35` (conservatives ≈0.15 near-centroid, explorers ≈0.50 firmly outside comfort zone). Gaussian bonus (σ=0.15, peak ±0.025) peaks on that target — candidates too similar OR too alien both lose points. Implements the research's "principled novelty" directive: novelty is a *specific distance*, not "as diverse as possible."
+
+**Re-rank modulation by disposition + shape:**
+- `diversity_weight` scales 0.7× (exploiter) → 1.5× (explorer) of base
+- DPP kernel sigma widens 0.85× → 1.25× with disposition (explorers tolerate more-similar already-selected tracks)
+- Steck calibration weight × 0.5 for univores (don't force genre breadth on a deep-niche listener), × 1.2 for omnivores (keep them spread), × 1.0 for mixed
+
+Breakdown additions: `wundt_stretch` per track. No breaking changes — pre-6.394 profiles get sensible defaults (disposition=0.30, shape="mixed").
+
+**Combined effect (Tier A + Tier B):** a 15-year-old Milanese user whose library is 60% halftime drill and concentrated on 4 artists (Shiva, Capo Plaza, Baby Gang, Artie 5ive) gets:
+- Tempo-band dim rewarding 130-160 BPM candidates (fast_motor zone)
+- Halftime bonus +0.02-0.03 on drill-signature candidates
+- BRECVEMA explanation: "sounds like Parigi by Shiva (145 BPM in your driving zone, halftime feel you tend to favor); Baby Gang is in your top artists"
+- Univore taste shape → softer genre-calibration penalty (doesn't force spread away from Italian hip-hop)
+- Moderate disposition (0.4) → stretch target ≈0.29 — prefers candidates *slightly* outside the centroid, not hugging it
+
+---
+
 ## V 6.393 — 2026-04-21
 
 ### Psychology research integration — Tier A: tempo bands + halftime feel + BRECVEMA explanations
