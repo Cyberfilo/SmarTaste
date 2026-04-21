@@ -7,6 +7,32 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.399 — 2026-04-21
+
+### Deezer deepening rewrite — track-search + duplicate-artist merging + throttle
+
+V 6.396 used `/search/artist` → `/artist/{id}/albums` → `/album/{id}` (100+ requests per artist). Outcome on prod: 5 of the first 15 library artists returned 0 tracks — Philip, Nabi, Vale Pain, Neima Ezza, and two multi-artist groupings. Two root causes identified via local API probing:
+
+**1. Rate limiting**: 5 artists × 100+ requests per cycle = 500+ requests in a burst → Deezer throttles → later artists' `_deezer_search_artist_id` silently returns None (no HTTP error, just empty response) → 0 tracks recorded.
+
+**2. Duplicate artist_ids**: your Philip exists on Deezer as TWO entries — `id=96659` (4,901 fans, 114 albums incl. "Dalla Zona") and `id=361808772` (0 fans, 13 albums incl. "LA VIA È BELLA"). `/search/artist` sorts by nb_fan so the second id never appears in top-10 results — but its tracks DO appear in `/search` (track search) under the "Philip" query. Old algorithm picked id=96659 and missed the entire "LA VIA È BELLA" catalog.
+
+**New `fetch_artist_full_discography`** (complete rewrite, ~4 requests per artist):
+1. `/search?q=<name>&limit=50` → aggregate all artist_ids whose tracks surface with an exact-name match (normalized lowercase+trim). Handles dup-ids automatically.
+2. `/artist/{id}/top?limit=100` for each matched id (up to 3 ids, ordered by track-count in sample) → up to 300 tracks per artist in 3 requests.
+3. Merge + dedupe by `(title, album)` pair. ISRCs are omitted from `/top` responses; existing `_backfill_isrcs` worker phase fills them on subsequent cycles.
+
+**`_deepen_library_artists` hardening:**
+- Query filter: `WHERE smc.artist_name !~* '(,| & | x | feat\.?| ft\.?| featuring| presents| pres\.)'` — skips multi-artist groupings ("167 Gang, Simba La Rue & F.T. Kings") that Deezer can't resolve as an entity.
+- Per-cycle budget dropped 5 → 3. With the new 3-4 requests/artist baseline that's 9-12 req/cycle — well under Deezer's short-term burst cap.
+- 250ms `asyncio.sleep` between artists within a cycle.
+
+**One-shot prod cleanup**: deleted 7 rows from `artist_discography_state` where `tracks_found=0 AND last_error IS NULL` (the 5 broken solo artists + 2 multi-artist-grouping non-entities). They'll retry on the next cycle under the new algorithm.
+
+**Local verification**: re-running the fetcher on Philip, Shiva, Nabi, Vale Pain, Neima Ezza, Artie 5ive after V 6.399 code returns (37, 100, 50, 97, 62, 99) tracks respectively — Philip correctly merges id=96659 + id=361808772; the four other previously-failed artists now succeed.
+
+---
+
 ## V 6.398 — 2026-04-21
 
 ### Diagnostic: expose resolved GPU endpoint at worker startup + admin API

@@ -472,8 +472,13 @@ async def main() -> None:
             try:
                 global_gaps_now = await _count_global_gaps(engine)
                 if global_gaps_now <= 50:
+                    # V 6.399: budget dropped 5 → 3 per cycle. The new
+                    # Deezer fetcher does 3-4 requests per artist; 3×4
+                    # = 12 req/cycle stays comfortably under the
+                    # short-term burst cap even if cobweb shares the
+                    # HTTP pool.
                     deepened = await _deepen_library_artists(
-                        engine, settings, limit=5,
+                        engine, settings, limit=3,
                     )
                     if deepened > 0:
                         logger.info(
@@ -2443,14 +2448,14 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
 
     async with engine.begin() as conn:
         # Distinct library artists NOT yet deepened.
-        # V 6.397: order by MAX calibration weight across ALL users'
-        # calibration entries DESC so rank-#1 artists get their full
-        # catalogue first. `item_id` in user_calibration is already the
-        # lowercased artist name (confirmed against prod), so it aligns
-        # directly with LOWER(TRIM(smc.artist_name)). Alphabetical is
-        # the tie-breaker for artists without any calibration entry.
+        # V 6.397: order by MAX calibration weight DESC. V 6.399: SKIP
+        # multi-artist groupings ("Artist A, Artist B & C", "X feat. Y",
+        # "X ft Y") — Deezer's artist search doesn't index those as an
+        # entity, and the primary-artist parsing is already handled by
+        # the cobweb for feat-discovery. Matching each segment-joiner
+        # keeps us focused on solo-billed catalog entries.
         result = await conn.execute(
-            sa.text("""
+            sa.text(r"""
                 SELECT
                   smc_norm AS artist_name_norm,
                   artist_name
@@ -2468,6 +2473,7 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
                     AND LOWER(TRIM(smc.artist_name)) NOT IN (
                       SELECT artist_name_norm FROM artist_discography_state
                     )
+                    AND smc.artist_name !~* '(,| & | x | feat\.?| ft\.?| featuring| presents| pres\.)'
                   GROUP BY LOWER(TRIM(smc.artist_name))
                 ) ranked
                 ORDER BY cal_weight DESC, artist_name_norm
@@ -2489,7 +2495,12 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
 
     deepened_count = 0
     async with httpx.AsyncClient(timeout=15.0) as client:
-        for norm, artist_name in candidates:
+        for idx, (norm, artist_name) in enumerate(candidates):
+            # V 6.399: 250ms spacing between artists keeps us well under
+            # Deezer's short-term burst cap. Each call inside is already
+            # throttled (250ms between the 1-3 /top requests per artist).
+            if idx > 0:
+                await asyncio.sleep(0.25)
             try:
                 tracks = await fetch_artist_full_discography(
                     artist_name, limit=500, client=client,
