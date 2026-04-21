@@ -7,6 +7,19 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.400 — 2026-04-21
+
+### Fix: artist-deepening gate was blocked by permanent-failure residue
+
+V 6.396 gated the deepening phase on `_count_global_gaps <= 50` to prevent starving primary enrichment. In practice the gap sum bottomed out at 51 (5 GPU-eligible + 46 Essentia-unreachable tracks — mostly permanently-failed preview URLs that will never resolve). Off by 1, deepening never ran in the main loop.
+
+- Threshold 50 → 200. Allows normal permanent-failure residue while still gating on real congestion. Self-bounded at 3 artists/cycle + 250ms throttle, so elevating this doesn't risk pipeline starvation.
+- Deferral log elevated debug → info so the gate decision is visible without enabling debug logging.
+
+No other changes. Diagnostic patch.
+
+---
+
 ## V 6.399 — 2026-04-21
 
 ### Deezer deepening rewrite — track-search + duplicate-artist merging + throttle

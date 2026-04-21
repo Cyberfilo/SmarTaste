@@ -462,21 +462,22 @@ async def main() -> None:
 
             # ── Phase 3: Deepen library-artist discographies (V 6.396) ──
             # After the per-user enrichment AND the cobweb expansion
-            # have both drained, walk each library artist's full catalog
-            # (Apple/Spotify via album-iteration → Deezer fallback) and
-            # populate GSC. Bounded to 5 artists/cycle to keep API load
-            # light; skips already-deepened ones via
-            # artist_discography_state. Runs only when global gaps are
-            # down to permanent-failure residue (threshold 50) so we
-            # don't starve primary enrichment.
+            # have both drained, walk each library artist's full
+            # catalog via Deezer track-search + /top endpoints and
+            # populate GSC. Self-bounded to 3 artists/cycle and
+            # rate-limit-safe (V 6.399); skips already-deepened ones
+            # via artist_discography_state.
+            #
+            # V 6.400: threshold 50 → 200. The original 50 assumed
+            # ess_gap would drain to near-zero, but ~46 permanently-
+            # failed tracks (unreachable Deezer URLs) kept total at 51,
+            # blocking deepening indefinitely. 200 allows normal
+            # permanent-failure residue while still gating on
+            # legitimate pipeline congestion. Deferral logged at info
+            # so the gate is visible, not debug.
             try:
                 global_gaps_now = await _count_global_gaps(engine)
-                if global_gaps_now <= 50:
-                    # V 6.399: budget dropped 5 → 3 per cycle. The new
-                    # Deezer fetcher does 3-4 requests per artist; 3×4
-                    # = 12 req/cycle stays comfortably under the
-                    # short-term burst cap even if cobweb shares the
-                    # HTTP pool.
+                if global_gaps_now <= 200:
                     deepened = await _deepen_library_artists(
                         engine, settings, limit=3,
                     )
@@ -486,9 +487,9 @@ async def main() -> None:
                             "(discography fetched)", cycle, deepened,
                         )
                 else:
-                    logger.debug(
-                        "Cycle %d: %d global gaps remain, "
-                        "deferring artist-deepening",
+                    logger.info(
+                        "Cycle %d: %d global gaps remain (threshold "
+                        "200) — deferring artist-deepening",
                         cycle, global_gaps_now,
                     )
             except Exception:
