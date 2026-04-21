@@ -221,47 +221,87 @@ async def _fetch_artist_top_tracks_deezer(
     return []
 
 
+async def _fetch_json_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict | None = None,
+    max_retries: int = 2,
+) -> dict | None:
+    """GET a Deezer endpoint with retry on 429/5xx or empty `data`."""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = await client.get(url, params=params or {})
+            if not resp.is_success:
+                if resp.status_code in (429, 500, 502, 503) and attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return None
+            data = resp.json()
+        except (httpx.HTTPError, ValueError, TypeError):
+            if attempt < max_retries:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            return None
+
+        # Retry on empty `data` array only if we still have attempts
+        arr = data.get("data") if isinstance(data, dict) else None
+        if isinstance(arr, list) and not arr and attempt < max_retries:
+            await asyncio.sleep(2 ** attempt)
+            continue
+        return data
+    return None
+
+
 async def fetch_artist_full_discography(
     artist_name: str,
     *,
     limit: int = 500,
     client: httpx.AsyncClient | None = None,
 ) -> list[dict]:
-    """Deezer-only full-discography fallback (no auth, no user context).
+    """Deezer-only full-discography fetcher via album-walk.
 
-    V 6.399: complete rewrite. Prior version walked `/search/artist` →
-    `/artist/{id}/albums` → `/album/{id}` = 100+ requests per artist,
-    which tripped rate limiting AND missed duplicate artist_ids. New
-    algorithm:
-      1. `/search?q=<name>&limit=50` (TRACK search) → aggregate all
-         artist_ids whose tracks surface with an exact-matching artist
-         name. Handles the duplicate-id case (Philip at 96659 AND
-         361808772 both get found).
-      2. For each matched artist_id (up to 3), `/artist/{id}/top?
-         limit=100` → up to 100 tracks per id in 1 request each.
-      3. Merge + dedupe by (title, album) pair. ISRCs are missing —
-         the worker's `_backfill_isrcs` phase fills them later.
+    V 6.403: reverted from the `/top` strategy (V 6.399) after discovery
+    that `/top` returns geo-biased partial results — a US-region client
+    (Railway) querying Italian rap gets ~10-20 tracks while the same
+    query from Italy returns 97. `/top` is popularity-ranked; album-walk
+    enumerates the full catalogue independent of ranking signals.
 
-    Total: ~4 requests per artist instead of 100+. Rate limit safe,
-    and catches dup-id artists that the old /search/artist approach
-    missed entirely.
+    Algorithm:
+      1. `/search?q=<name>` → aggregate matching artist_ids (dup-id safe).
+      2. For each matched id: `/artist/{id}/albums` paginated →
+         `/album/{id}` per album → tracks with ISRCs inline.
+      3. Throttle 200ms between album fetches. Retry-on-empty-or-5xx.
+      4. Dedupe by ISRC (authoritative) or (title, album) pair.
+
+    Cost per artist: 1 search + 1 album-list + N album-details. For a
+    typical Italian rapper with 30 albums, ~32 requests. With 200ms
+    throttle that's ~7 seconds per artist. With per-cycle budget of 1
+    artist, processes 1 artist/cycle = ~60/hour — fine for a ~90-artist
+    library.
     """
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(timeout=15.0)
 
     collected: list[dict] = []
+    seen_isrcs: set[str] = set()
     seen_keys: set[tuple[str, str]] = set()
 
     def _push(track: dict) -> bool:
-        """Returns True if we still need more, False if limit hit."""
+        isrc = (track.get("isrc") or "").strip()
+        if isrc and isrc in seen_isrcs:
+            return len(collected) < limit
         key = (
             (track.get("name") or "").strip().lower(),
             (track.get("album_name") or "").strip().lower(),
         )
-        if key in seen_keys:
+        if not isrc and key in seen_keys:
             return len(collected) < limit
-        seen_keys.add(key)
+        if isrc:
+            seen_isrcs.add(isrc)
+        else:
+            seen_keys.add(key)
         collected.append(track)
         return len(collected) < limit
 
@@ -275,35 +315,66 @@ async def fetch_artist_full_discography(
         for artist_id in artist_ids:
             if len(collected) >= limit:
                 break
-            tracks = await _fetch_artist_top_tracks_deezer(
-                client, artist_id, limit=100,
-            )
-            await asyncio.sleep(0.25)  # throttle between ids
 
-            for t in tracks:
-                album = t.get("album") or {}
-                canon = {
-                    "catalog_id": f"dz:{t.get('id')}",
-                    "isrc": "",  # not on /top; backfill fills later
-                    "name": t.get("title") or "",
-                    "artist_name": (t.get("artist") or {}).get(
-                        "name"
-                    ) or artist_name,
-                    "album_name": album.get("title") or "",
-                    "duration_ms": int(t.get("duration") or 0) * 1000,
-                    "release_date": "",
-                    "preview_url": t.get("preview") or "",
-                    "artwork_url": (
-                        album.get("cover_xl")
-                        or album.get("cover_big")
-                        or album.get("cover_medium")
+            # Page through albums
+            offset = 0
+            page_size = 100
+            while len(collected) < limit:
+                albums_payload = await _fetch_json_with_retry(
+                    client, f"{DEEZER_API}/artist/{artist_id}/albums",
+                    params={"limit": page_size, "index": offset},
+                )
+                await asyncio.sleep(0.2)
+                if not albums_payload:
+                    break
+                albums = albums_payload.get("data") or []
+                if not albums:
+                    break
+
+                for album in albums:
+                    if len(collected) >= limit:
+                        break
+                    album_id = album.get("id")
+                    if not album_id:
+                        continue
+                    album_payload = await _fetch_json_with_retry(
+                        client, f"{DEEZER_API}/album/{album_id}",
+                    )
+                    await asyncio.sleep(0.2)
+                    if not album_payload:
+                        continue
+                    tracks = (album_payload.get("tracks") or {}).get("data") or []
+                    album_artwork = (
+                        album_payload.get("cover_xl")
+                        or album_payload.get("cover_big")
+                        or album_payload.get("cover_medium")
                         or ""
-                    ),
-                    "genre_names": [],
-                    "service_source": "deezer",
-                }
-                if not _push(canon):
-                    return collected[:limit]
+                    )
+                    release_date = album_payload.get("release_date") or ""
+                    album_title = album_payload.get("title") or ""
+
+                    for t in tracks:
+                        canon = {
+                            "catalog_id": f"dz:{t.get('id')}",
+                            "isrc": (t.get("isrc") or "").strip(),
+                            "name": t.get("title") or "",
+                            "artist_name": (t.get("artist") or {}).get(
+                                "name"
+                            ) or artist_name,
+                            "album_name": album_title,
+                            "duration_ms": int(t.get("duration") or 0) * 1000,
+                            "release_date": release_date,
+                            "preview_url": t.get("preview") or "",
+                            "artwork_url": album_artwork,
+                            "genre_names": [],
+                            "service_source": "deezer",
+                        }
+                        if not _push(canon):
+                            return collected[:limit]
+
+                if not albums_payload.get("next"):
+                    break
+                offset += len(albums)
     finally:
         if own_client:
             await client.aclose()

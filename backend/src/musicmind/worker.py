@@ -60,6 +60,17 @@ _fail_cycle_counter: int = 0
 _FAIL_MAX_RETRIES = 3
 _FAIL_RESET_CYCLES = 50
 
+# ── V 6.403: Download Failure Tracking ───────────────────────────────────
+# Preview / artwork downloads retry every cycle for rows with
+# `preview_url IS NOT NULL AND NOT in cached_ids`. If a URL is
+# permanently dead (404 forever), it'd hit Deezer / Apple every cycle
+# indefinitely. Process-local counter: after 3 consecutive failures,
+# skip the catalog_id until worker restart. Resets on boot so fixes
+# to upstream data (fresh URLs pushed by deepening) get retried.
+_preview_dl_failures: dict[str, int] = {}
+_artwork_dl_failures: dict[str, int] = {}
+_DL_MAX_FAILURES = 3
+
 
 # ── Worker Status Heartbeat ──────────────────────────────────────────────
 
@@ -478,14 +489,12 @@ async def main() -> None:
             try:
                 global_gaps_now = await _count_global_gaps(engine)
                 if global_gaps_now <= 200:
-                    # V 6.401: budget 3 → 2 per cycle. Lower concurrency
-                    # reduces the chance that a parallel Deezer burst
-                    # trips rate limiting mid-fetch (the root cause we
-                    # suspected behind some earlier partial-fetches,
-                    # now confirmed to be tx-abort cascade — but the
-                    # safer burst rate is worth keeping as defense).
+                    # V 6.403: budget 2 → 1 per cycle. Album-walk costs
+                    # ~30 requests per artist (vs /top's ~4), so a
+                    # single artist consumes most of a cycle's budget
+                    # before the cobweb/essentia/gpu phases need it.
                     deepened = await _deepen_library_artists(
-                        engine, settings, limit=2,
+                        engine, settings, limit=1,
                     )
                     if deepened > 0:
                         logger.info(
@@ -755,6 +764,12 @@ async def _download_all_previews(engine, *, limit: int = 0) -> int:
 
     async def _dl_one(row) -> bool:
         async with sem:
+            cid = row.catalog_id
+            # V 6.403: skip tracks past the failure threshold so we
+            # don't hammer dead URLs every cycle. Resets on restart.
+            if _preview_dl_failures.get(cid, 0) >= _DL_MAX_FAILURES:
+                return False
+
             url = row.preview_url
             refreshed = False
 
@@ -776,7 +791,19 @@ async def _download_all_previews(engine, *, limit: int = 0) -> int:
                     audio = await _download_preview(url)
 
             if audio is None:
+                _preview_dl_failures[cid] = (
+                    _preview_dl_failures.get(cid, 0) + 1
+                )
+                if _preview_dl_failures[cid] == _DL_MAX_FAILURES:
+                    logger.info(
+                        "Preview download: %s permanently-failed after "
+                        "%d attempts (skipping until restart)",
+                        cid, _DL_MAX_FAILURES,
+                    )
                 return False
+
+            # Clear counter on success — track is alive again
+            _preview_dl_failures.pop(cid, None)
 
             if refreshed:
                 try:
@@ -785,7 +812,7 @@ async def _download_all_previews(engine, *, limit: int = 0) -> int:
                             sa.update(song_metadata_cache)
                             .where(sa.and_(
                                 song_metadata_cache.c.catalog_id
-                                == row.catalog_id,
+                                == cid,
                                 song_metadata_cache.c.user_id
                                 == row.user_id,
                             ))
@@ -793,12 +820,11 @@ async def _download_all_previews(engine, *, limit: int = 0) -> int:
                         )
                 except Exception:
                     logger.debug(
-                        "SMC preview_url refresh write failed for %s",
-                        row.catalog_id,
+                        "SMC preview_url refresh write failed for %s", cid,
                     )
 
             await _cache_preview_audio(
-                engine, row.catalog_id, audio, url or "",
+                engine, cid, audio, url or "",
             )
             return True
 
@@ -881,6 +907,12 @@ async def _download_all_previews_global(engine, *, limit: int = 0) -> int:
 
     async def _dl_one(row) -> bool:
         async with sem:
+            cid = row.catalog_id
+            # V 6.403: skip past-threshold-failures (shared counter
+            # with library previews since catalog_id is global).
+            if _preview_dl_failures.get(cid, 0) >= _DL_MAX_FAILURES:
+                return False
+
             url = row.preview_url
             refreshed = False
 
@@ -900,7 +932,18 @@ async def _download_all_previews_global(engine, *, limit: int = 0) -> int:
                     audio = await _download_preview(url)
 
             if audio is None:
+                _preview_dl_failures[cid] = (
+                    _preview_dl_failures.get(cid, 0) + 1
+                )
+                if _preview_dl_failures[cid] == _DL_MAX_FAILURES:
+                    logger.info(
+                        "Global preview download: %s permanently-failed "
+                        "after %d attempts (skipping until restart)",
+                        cid, _DL_MAX_FAILURES,
+                    )
                 return False
+
+            _preview_dl_failures.pop(cid, None)
 
             if refreshed:
                 try:
@@ -908,19 +951,17 @@ async def _download_all_previews_global(engine, *, limit: int = 0) -> int:
                         await conn.execute(
                             sa.update(global_song_cache)
                             .where(
-                                global_song_cache.c.catalog_id
-                                == row.catalog_id,
+                                global_song_cache.c.catalog_id == cid,
                             )
                             .values(preview_url=url)
                         )
                 except Exception:
                     logger.debug(
-                        "GSC preview_url refresh write failed for %s",
-                        row.catalog_id,
+                        "GSC preview_url refresh write failed for %s", cid,
                     )
 
             await _cache_preview_audio(
-                engine, row.catalog_id, audio, url or "",
+                engine, cid, audio, url or "",
             )
             return True
 
@@ -1013,12 +1054,25 @@ async def _download_all_artwork(engine, *, limit: int = 0) -> int:
 
     async def _dl_one(catalog_id: str, raw_url: str) -> bool:
         async with sem:
+            # V 6.403: skip past-threshold-failures.
+            if _artwork_dl_failures.get(catalog_id, 0) >= _DL_MAX_FAILURES:
+                return False
             url = _resolve_artwork_url(raw_url, size=640)
             if not url:
                 return False
             result = await _download_artwork(url)
             if not result:
+                _artwork_dl_failures[catalog_id] = (
+                    _artwork_dl_failures.get(catalog_id, 0) + 1
+                )
+                if _artwork_dl_failures[catalog_id] == _DL_MAX_FAILURES:
+                    logger.info(
+                        "Artwork download: %s permanently-failed after "
+                        "%d attempts (skipping until restart)",
+                        catalog_id, _DL_MAX_FAILURES,
+                    )
                 return False
+            _artwork_dl_failures.pop(catalog_id, None)
             data, ctype = result
             await _cache_artwork(engine, catalog_id, data, url, ctype)
             return True

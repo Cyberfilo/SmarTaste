@@ -7,6 +7,22 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.403 — 2026-04-21
+
+### Fix: Deezer `/top` was geo-biased + download-retry-forever eliminated
+
+Two issues from the same session:
+
+**1. `/top` returns partial catalogs to US-region clients.** V 6.399 rewrote deepening to use `/artist/{id}/top?limit=100` (1 req instead of 100 per artist). Prod got 10 Vale Pain tracks while local got 97 — confirmed via 10× concurrent local probe that always returned 97. Deezer's `/top` is popularity-ranked and the ranking algorithm produces different slices for different geographies. Italian rap queried from Railway's US datacenter gets a thinner slice than the same query from Italy. Reverted to album-walk (`/artist/{id}/albums` → `/album/{id}`) which enumerates the full catalogue regardless of ranking signals, AND gives us ISRCs inline (saves a follow-up ISRC-backfill round). New `_fetch_json_with_retry` helper wraps all Deezer album-walk calls with retry-on-429-5xx-or-empty + exponential backoff. Cost per artist: ~30 requests, ~7s with 200ms per-album throttle. Per-cycle limit dropped 2→1 to keep cycle duration reasonable.
+
+**2. Preview + artwork downloads retried forever for dead URLs.** Every cycle re-queried the same permanently-failed tracks — over a day that's ~2000 wasted Deezer/CDN requests. Added process-local failure counters (`_preview_dl_failures`, `_artwork_dl_failures`, `_DL_MAX_FAILURES=3`). After 3 consecutive failures on a catalog_id, the track is skipped until worker restart. Resets on boot so fresh URLs pushed by deepening re-enter the rotation.
+
+One-shot prod cleanup: `DELETE FROM artist_discography_state WHERE tracks_found < 30` — clears low-count rows (including Vale Pain=11, Nabi=11, Neima Ezza=16) so V 6.403's album-walk reprocesses them. Expect each to jump to 30-100+ tracks under the new fetcher.
+
+**Diagnostic trail**: V 6.396 original album-walk → V 6.399 switched to `/top` (wrong, dropped ISRCs + partial geo-response) → V 6.402 retry-on-empty (didn't help, Deezer returns partial not empty) → V 6.403 back to album-walk (right answer all along).
+
+---
+
 ## V 6.402 — 2026-04-21
 
 ### Fix: Deezer empty-response-under-throttle was marking good artists as tracks_found=0
