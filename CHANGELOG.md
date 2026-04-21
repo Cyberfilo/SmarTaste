@@ -7,6 +7,31 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.398 — 2026-04-21
+
+### Diagnostic: expose resolved GPU endpoint at worker startup + admin API
+
+User reported requests still hitting `cyberfilo--smartaste-gpu-worker-enrich.modal.run` despite setting `MUSICMIND_GPU_MODE=LOCAL`. The old worker startup log only printed `modal=True/False` — no way to tell if the LOCAL→local_gpu_endpoint_url swap actually fired.
+
+**Worker startup log** now prints `gpu_mode=<CLOUD|LOCAL>` + `gpu_endpoint=<full URL>`. Also emits an explicit WARNING when `gpu_mode=LOCAL` is set but `MUSICMIND_LOCAL_GPU_ENDPOINT_URL` is missing (swap can't fire, falls back to Modal), or when gpu_mode is LOCAL but the active endpoint still matches Modal (env var name/case mismatch).
+
+**New admin endpoint** `GET /api/admin/gpu-config` returns the backend's resolved view:
+```json
+{
+  "gpu_mode": "LOCAL",
+  "resolved_endpoint": "https://...",
+  "local_gpu_endpoint_url": "https://...",
+  "swap_fired": true,
+  "misconfigured": null
+}
+```
+
+Backend and worker are separate Railway services with independent env vars — a common pitfall is setting `MUSICMIND_GPU_MODE=LOCAL` on one but not the other. The endpoint reports the backend's view; the worker reports its own via the startup log line. Both need to agree.
+
+No behavioral change — diagnostic-only.
+
+---
+
 ## V 6.397 — 2026-04-21
 
 ### Calibration artist rank drives scoring boost + deepening priority

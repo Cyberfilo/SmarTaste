@@ -133,12 +133,37 @@ async def main() -> None:
 
     # Log enrichment capability at startup
     from musicmind.engine.audio.essentia_extractor import is_essentia_available, is_onnx_available
+    _gpu_mode = (getattr(settings, "gpu_mode", "CLOUD") or "CLOUD").upper()
+    _modal_url = getattr(settings, "modal_endpoint_url", None)
+    _local_url = getattr(settings, "local_gpu_endpoint_url", None)
     logger.info(
-        "Worker started: poll=%ds, max_songs=%d, essentia=%s, onnx=%s, modal=%s",
+        "Worker started: poll=%ds, max_songs=%d, essentia=%s, onnx=%s, "
+        "gpu_mode=%s, gpu_endpoint=%s",
         POLL_INTERVAL, MAX_COBWEB_SONGS,
         is_essentia_available(), is_onnx_available(),
-        bool(getattr(settings, "modal_endpoint_url", None)),
+        _gpu_mode,
+        _modal_url or "(none)",
     )
+    # V 6.398: surface misconfigurations explicitly so the user doesn't have
+    # to guess why requests are still hitting Modal when LOCAL was intended.
+    if _gpu_mode == "LOCAL" and not _local_url:
+        logger.warning(
+            "gpu_mode=LOCAL but MUSICMIND_LOCAL_GPU_ENDPOINT_URL is not set — "
+            "falling back to Modal (modal_endpoint_url=%s)",
+            _modal_url,
+        )
+    elif _gpu_mode == "LOCAL" and _modal_url != _local_url:
+        logger.warning(
+            "gpu_mode=LOCAL swap did NOT fire: active=%s local=%s — check "
+            "that MUSICMIND_GPU_MODE is exactly 'LOCAL' (case-insensitive) "
+            "in the worker service env",
+            _modal_url, _local_url,
+        )
+    elif _gpu_mode == "LOCAL":
+        logger.info(
+            "gpu_mode=LOCAL: requests routed to %s (local tunnel)",
+            _local_url,
+        )
 
     # Ensure worker_status row exists
     try:

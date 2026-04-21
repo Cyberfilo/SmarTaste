@@ -73,6 +73,45 @@ async def require_admin(request: Request) -> None:
     )
 
 
+@router.get("/gpu-config")
+async def admin_gpu_config(
+    request: Request,
+    _admin: dict = Depends(require_admin),
+) -> dict:
+    """V 6.398: resolved GPU endpoint config as the backend currently sees it.
+
+    Useful when the worker keeps hitting Modal despite `MUSICMIND_GPU_MODE=LOCAL`
+    being set — this reveals what the backend settings object actually contains
+    post-swap, so you can tell env-var misconfigurations from code bugs.
+    (Backend and worker are separate Railway services with independent env;
+    this endpoint reports the BACKEND's view. Worker reports its own via
+    startup logs in `musicmind.worker: Worker started: ...`.)
+    """
+    settings = request.app.state.settings
+    gpu_mode = (getattr(settings, "gpu_mode", "CLOUD") or "CLOUD").upper()
+    modal_url = getattr(settings, "modal_endpoint_url", None)
+    local_url = getattr(settings, "local_gpu_endpoint_url", None)
+    swap_fired = gpu_mode == "LOCAL" and modal_url == local_url
+
+    misconfigured = None
+    if gpu_mode == "LOCAL" and not local_url:
+        misconfigured = (
+            "gpu_mode=LOCAL but MUSICMIND_LOCAL_GPU_ENDPOINT_URL is not set"
+        )
+    elif gpu_mode == "LOCAL" and modal_url != local_url:
+        misconfigured = (
+            "gpu_mode=LOCAL but swap did not fire — check env var name/case"
+        )
+
+    return {
+        "gpu_mode": gpu_mode,
+        "resolved_endpoint": modal_url,
+        "local_gpu_endpoint_url": local_url,
+        "swap_fired": swap_fired,
+        "misconfigured": misconfigured,
+    }
+
+
 @router.get("/logs")
 async def get_logs(
     limit: int = 100,
