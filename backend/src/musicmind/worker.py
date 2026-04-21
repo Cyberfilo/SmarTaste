@@ -367,6 +367,23 @@ async def main() -> None:
         except Exception:
             logger.exception("Cycle %d GPU backfill failed", cycle)
 
+        # ── Phase 5a: Global Essentia/EffNet (V 6.395) ──────────────
+        # 284 GSC tracks lack AEG rows entirely — they need Essentia and
+        # EffNet before they can become GPU candidates. Previously this
+        # only ran during cobweb expansion (gated on user_work_remaining
+        # == 0) or startup drain (which declared "permanent failure"
+        # after 1 pass on stale URLs). Now it drains every cycle
+        # alongside the GPU pass so new discovery work isn't stranded.
+        try:
+            global_ess = await _enrich_global_songs(engine, settings)
+            if global_ess > 0:
+                logger.info(
+                    "Cycle %d: global Essentia enriched %d tracks",
+                    cycle, global_ess,
+                )
+        except Exception:
+            logger.exception("Cycle %d global Essentia failed", cycle)
+
         # ── Phase 5b: Global GPU backfill (CLAP/MERT for discography) ──
         # V 6.379: bring the V 6.374 download-first + mert-only-split
         # backfiller into the main-loop so new global gaps drain every
@@ -2908,9 +2925,18 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         logger.debug("Global GPU backfill skipped: no modal_endpoint_url")
         return 0
 
+    # V 6.395: JOIN global_song_cache at source to exclude orphan AEG
+    # rows (isrc with no GSC match — no reachable catalog_id / preview).
+    # Pre-fix, 167/184 "eligible" rows on prod were orphans, inflating the
+    # count and masking the actual 13-item pool that sat below min_batch=15.
     async with engine.begin() as conn:
         rows_both = (await conn.execute(
-            sa.select(audio_embeddings_global.c.isrc).where(
+            sa.select(audio_embeddings_global.c.isrc).select_from(
+                audio_embeddings_global.join(
+                    global_song_cache,
+                    audio_embeddings_global.c.isrc == global_song_cache.c.isrc,
+                )
+            ).where(
                 sa.and_(
                     audio_embeddings_global.c.clap_embedding.is_(None),
                     audio_embeddings_global.c.embedding.isnot(None),
@@ -2918,7 +2944,12 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
             )
         )).fetchall()
         rows_mert_only = (await conn.execute(
-            sa.select(audio_embeddings_global.c.isrc).where(
+            sa.select(audio_embeddings_global.c.isrc).select_from(
+                audio_embeddings_global.join(
+                    global_song_cache,
+                    audio_embeddings_global.c.isrc == global_song_cache.c.isrc,
+                )
+            ).where(
                 sa.and_(
                     audio_embeddings_global.c.clap_embedding.isnot(None),
                     audio_embeddings_global.c.mert_embedding.is_(None),
@@ -2931,7 +2962,8 @@ async def _backfill_gpu_embeddings_global(engine, settings) -> int:
         return 0
 
     logger.info(
-        "Global GPU backfill: %d need both, %d need MERT-only",
+        "Global GPU backfill: %d need both, %d need MERT-only "
+        "(GSC-joined — orphans excluded)",
         len(rows_both), len(rows_mert_only),
     )
 

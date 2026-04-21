@@ -7,6 +7,26 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.395 — 2026-04-21
+
+### Fix: GPU backfill was stalling indefinitely on orphan AEG rows + stalled cobweb gate
+
+Prod diagnostic showed 184 tracks reported as "eligible for GPU backfill" but 167 were orphan `audio_embeddings_global` rows with no corresponding `global_song_cache` entry — the resolver silently skips them (no catalog_id → no URL, no cache). Actual actionable pool was 17 tracks, of which only 13 had cached bytes that `_get_cached_audio` would serve. Below `GPU_MIN_BATCH=15` indefinitely → GPU never fired. Zero global GPU embeddings stored in the last 4+ days despite 301 visible gaps.
+
+**Three fixes:**
+
+1. **`_backfill_gpu_embeddings_global` now JOINs `global_song_cache`** on `isrc` at query time. Orphan AEG rows are excluded at source so the `rows_both` / `rows_mert_only` counts match what the resolver can actually act on.
+
+2. **`GPU_MIN_BATCH` dropped 15 → 8.** The 15-floor assumed URL freshness + un-polluted queries. Post-fix both assumptions hold, but 8 is still a well-amortised cold-start batch (A100 decode + CLAP + MERT) and unblocks the steady-state drain for a catalog this size. Revisit when the catalog grows past ~10 k tracks.
+
+3. **Added main-loop global Essentia phase (5a)** — 284 GSC tracks had no AEG row at all and needed Essentia/EffNet before they could become GPU candidates. Previously `_enrich_global_songs` only ran during cobweb expansion (gated on `user_work_remaining == 0`) or the startup drain (which declared "permanent failures" after a single pass with stale URLs). Now it runs every cycle between library-GPU backfill (phase 5) and global-GPU backfill (phase 5b), so new discovery work isn't stranded.
+
+**One-shot cleanup (executed inline on prod)**: `DELETE FROM audio_embeddings_global WHERE isrc NOT IN (SELECT isrc FROM global_song_cache ...)` removed 167 orphan rows. Post-deletion, AEG is 2,070 rows and `eligible_for_gpu_both` drops from 184 → 17 (the true number).
+
+No schema change. No breaking change. Cobweb gate (`user_work_remaining > 0` blocks cobweb) left as-is for this patch — worth revisiting as a "softer gate" after observing whether the main-loop global-Essentia phase drains the backlog cleanly.
+
+---
+
 ## V 6.394 — 2026-04-21
 
 ### Psychology research integration — Tier B: discovery disposition + taste shape + Wundt stretch

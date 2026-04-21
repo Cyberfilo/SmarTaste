@@ -25,10 +25,14 @@ GPU_MAX_CONCURRENT = 3
 
 # If fewer than this are pending, defer to the next worker cycle where
 # more tracks will likely be available to batch with. A100 cold-start + audio
-# decode dominate wall time for small batches; raising the floor from 3 → 15
-# amortises those fixed costs across meaningfully larger groups, at the cost
-# of higher latency for the last few straggler tracks in a run.
-GPU_MIN_BATCH = 15
+# decode dominate wall time for small batches.
+#
+# V 6.395: dropped from 15 → 8. The 15-floor assumed URL freshness + an
+# un-polluted backfill query; in practice 65% of URLs were expired AND the
+# AEG query was picking up orphan rows (isrc not in GSC), so the actionable
+# pool was consistently ~13 — below 15 indefinitely → never fired. 8 still
+# amortises cold-start well while unblocking steady-state drain.
+GPU_MIN_BATCH = 8
 
 
 async def enrich_via_gpu(
