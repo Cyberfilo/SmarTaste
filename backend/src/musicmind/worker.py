@@ -2417,21 +2417,35 @@ async def _deepen_library_artists(engine, settings, *, limit: int = 5) -> int:
     from datetime import UTC, datetime
 
     async with engine.begin() as conn:
-        # Distinct library artists NOT yet deepened. Normalize to
-        # lower+trim for cross-service matching and consistent keys.
-        deepened_keys = sa.select(ads.c.artist_name_norm).correlate(None)
+        # Distinct library artists NOT yet deepened.
+        # V 6.397: order by MAX calibration weight across ALL users'
+        # calibration entries DESC so rank-#1 artists get their full
+        # catalogue first. `item_id` in user_calibration is already the
+        # lowercased artist name (confirmed against prod), so it aligns
+        # directly with LOWER(TRIM(smc.artist_name)). Alphabetical is
+        # the tie-breaker for artists without any calibration entry.
         result = await conn.execute(
             sa.text("""
-                SELECT DISTINCT
-                  LOWER(TRIM(artist_name)) AS artist_name_norm,
+                SELECT
+                  smc_norm AS artist_name_norm,
                   artist_name
-                FROM song_metadata_cache
-                WHERE artist_name IS NOT NULL
-                  AND LENGTH(TRIM(artist_name)) > 0
-                  AND LOWER(TRIM(artist_name)) NOT IN (
-                    SELECT artist_name_norm FROM artist_discography_state
-                  )
-                ORDER BY LOWER(TRIM(artist_name))
+                FROM (
+                  SELECT
+                    LOWER(TRIM(smc.artist_name)) AS smc_norm,
+                    MIN(smc.artist_name) AS artist_name,
+                    COALESCE(MAX(uc.weight), 0.0) AS cal_weight
+                  FROM song_metadata_cache smc
+                  LEFT JOIN user_calibration uc
+                    ON uc.item_id = LOWER(TRIM(smc.artist_name))
+                    AND uc.calibration_type IN ('top_artist', 'artist_rank')
+                  WHERE smc.artist_name IS NOT NULL
+                    AND LENGTH(TRIM(smc.artist_name)) > 0
+                    AND LOWER(TRIM(smc.artist_name)) NOT IN (
+                      SELECT artist_name_norm FROM artist_discography_state
+                    )
+                  GROUP BY LOWER(TRIM(smc.artist_name))
+                ) ranked
+                ORDER BY cal_weight DESC, artist_name_norm
                 LIMIT :lim
             """),
             {"lim": limit},

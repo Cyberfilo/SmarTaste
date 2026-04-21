@@ -7,6 +7,26 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.397 — 2026-04-21
+
+### Calibration artist rank drives scoring boost + deepening priority
+
+The onboarding wizard's ranked-artist step already stores decreasing weights by position (pinned top_artist=5.0, artist_rank #1=3.0, #10=1.2, tail=1.0), but the scorer was collapsing the range into a near-flat `min(0.20, weight * 0.03)` boost — 0.03 to 0.15, with rank #1 only marginally beating rank #10. And the new `_deepen_library_artists` phase (V 6.396) was picking candidates alphabetically, ignoring rank entirely.
+
+**Scorer cal_boost rescaled** to `min(0.25, weight * 0.05)`:
+- Pinned `top_artist` (w=5): 0.25 boost (was 0.15)
+- Rank #1 (w=3.0): 0.15 (was 0.09)
+- Rank #5 (w=2.2): 0.11 (was 0.07)
+- Tail (w=1.0): 0.05 (was 0.03)
+
+Now a rank #1 artist's tracks beat rank #10's tracks by a meaningful 10pt rather than a rounding-error 2pt. Still gated on `genre_score >= 0.15` to prevent cross-genre calibration bleed.
+
+**Deepening phase now orders by max calibration weight** across ALL users' `user_calibration` rows — so if any user ranked an artist #1, that artist's full discography gets pulled before any unranked artist. Query LEFT JOINs `user_calibration ON item_id = LOWER(TRIM(artist_name))` (confirmed `item_id` on prod is already lowercased name) and sorts `cal_weight DESC, artist_name_norm` (alphabetical tie-break). Rank changes have immediate effect on subsequent cycles.
+
+Scorer cal_boost cap unchanged at +0.25 combined (other boosts still apply). Cobweb artist-ordering already respects `priority DESC` but doesn't consult calibration — a candidate follow-up once we see whether the scorer + deepening rank changes give the desired behavior.
+
+---
+
 ## V 6.396 — 2026-04-21
 
 ### Artist discography deepening — 100% library-artist catalog coverage via Deezer

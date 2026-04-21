@@ -494,12 +494,23 @@ def score_candidate(
     # ── 8. Mood boost (set by filter_candidates_by_mood) ──
     mood_boost = candidate.get("_mood_boost", 0.0)
 
-    # ── 9. Calibration boost ──────────────────────────────
+    # ── 9. Calibration boost (V 6.397: rank-sensitive) ────
+    # Calibration rows carry decreasing weights by wizard rank:
+    #   top_artist pinned → 5.0
+    #   artist_rank #1    → 3.0
+    #   artist_rank #10   → 1.2
+    #   artist_rank tail  → 1.0
+    # Prior scaling `min(0.20, w*0.03)` flattened this to a 0.03-0.15
+    # range — too narrow to differentiate rank #1 from rank #10. Bumped
+    # to `min(0.25, w*0.05)` so the boost gradient is:
+    #   pinned (w=5) → 0.25, rank #1 (w=3) → 0.15, rank #5 (w=2.2) →
+    #   0.11, tail (w=1) → 0.05. Rank position now meaningfully shapes
+    #   the recommendation surface.
     cal_boost = 0.0
     if calibration_artists:
         cal_weight = calibration_artists.get(artist_name, 0.0)
         if cal_weight > 0:
-            cal_boost = min(0.20, cal_weight * 0.03)
+            cal_boost = min(0.25, cal_weight * 0.05)
             if genre_score < 0.15:
                 cal_boost = 0.0
 
