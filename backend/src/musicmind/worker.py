@@ -514,7 +514,7 @@ async def main() -> None:
                           AND g.isrc <> '__NO_ISRC__'
                           AND NOT EXISTS (
                             SELECT 1 FROM audio_features_global afg
-                            WHERE afg.isrc = g.isrc AND afg.energy IS NOT NULL
+                            WHERE afg.isrc = g.isrc
                           )
                     """))).scalar() or 0
                     needs_gpu_clap = (await conn.execute(sa.text("""
@@ -2097,12 +2097,17 @@ async def _count_global_gaps(engine) -> int:
               AND embedding IS NOT NULL
         """))).scalar() or 0
 
+        # V 6.405: exclude tracks with ANY AFG row (matches what
+        # _enrich_global_songs actually selects). Previously used
+        # `energy IS NOT NULL` which counted permanent-failure
+        # markers as "needs work", keeping the gap count artificially
+        # high — gate stayed closed forever with a nonzero residue.
         ess_gap = (await conn.execute(sa.text("""
             SELECT count(*) FROM global_song_cache g
             WHERE g.isrc IS NOT NULL AND g.isrc <> '' AND g.isrc <> '__NO_ISRC__'
               AND NOT EXISTS (
                 SELECT 1 FROM audio_features_global afg
-                WHERE afg.isrc = g.isrc AND afg.energy IS NOT NULL
+                WHERE afg.isrc = g.isrc
               )
         """))).scalar() or 0
 
