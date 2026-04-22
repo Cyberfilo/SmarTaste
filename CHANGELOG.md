@@ -7,6 +7,24 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.405 — 2026-04-22
+
+### Fix: global-enrichment failure markers were writing to the wrong table
+
+User noticed the same 14 tracks being attempted every cycle with 100% failure rate, while 50 total were gap-counted and 800+ were "missing" overall. DB diagnosis showed:
+- 14 "truly un-attempted" tracks (no AFG row at all) — the ones in the loop
+- 36 already had AFG rows with energy=NULL (correctly excluded)
+- 32 had `__NO_ISRC__` sentinel (correctly excluded)
+- Total GSC minus real_enriched = ~1571, but almost all are properly-marked or upstream-gated
+
+Root cause: `_mark_permanently_failed` (called from `_enrich_global_songs` after 3 strikes) writes to `audio_features_cache` — the per-user table. But global-enrichment gap queries check `audio_features_global` (ISRC-keyed). The marker went to the wrong place, so the 14 stayed in the pool and looped forever.
+
+Added `_mark_globally_failed(engine, isrc)` that writes to `audio_features_global` with `feature_source={"_status": "permanently_failed", "_reason": "global_enrichment_error_exceeded_retries"}`. Called from both failure paths in `_enrich_global_songs` (per-track `failed_ids` and batch-wide exception) using a new `cid_to_isrc` map built at candidate-selection time.
+
+Also ran one-shot prod SQL to immediately mark the currently-stuck tracks older than 6h as permanently-failed (unblocks the pipeline without waiting for 3 cycles × 14 tracks to accumulate failures under the new code).
+
+---
+
 ## V 6.404 — 2026-04-21
 
 ### Fix: artist-deepening gate now waits for pipeline drain, not just total-gap sum

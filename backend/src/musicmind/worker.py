@@ -286,6 +286,24 @@ async def main() -> None:
         cycle += 1
         start = time.monotonic()
 
+        # V 6.405: DB liveness pre-check. If Postgres is unreachable
+        # (connection refused, timeout, recovery-mode, etc.), skip the
+        # entire cycle and sleep 30s instead of cascading the error
+        # through every phase. Prior behavior crashed the cycle on a
+        # single SELECT with an unhandled OSError traceback for each
+        # phase that used engine.begin(); this keeps the worker alive
+        # and recovers automatically once the DB accepts connections.
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(sa.text("SELECT 1"))
+        except Exception as exc:
+            logger.warning(
+                "Cycle %d: DB unreachable (%s: %s), sleeping 30s",
+                cycle, type(exc).__name__, str(exc)[:120],
+            )
+            await asyncio.sleep(30)
+            continue
+
         # Reset failure cache periodically to allow retries after code fixes
         global _fail_cycle_counter
         _fail_cycle_counter += 1
@@ -2300,6 +2318,46 @@ async def _mark_permanently_failed(engine, catalog_id: str, user_id: str) -> Non
         )
 
 
+async def _mark_globally_failed(engine, isrc: str) -> None:
+    """V 6.405: insert a permanently_failed marker into audio_features_global.
+
+    Global enrichment keys by ISRC, not (catalog_id, user_id). The
+    prior per-user marker (_mark_permanently_failed writes to
+    audio_features_cache) was going to the WRONG table — global
+    enrichment gap queries check audio_features_global. Without this
+    marker in AFG, tracks that failed 3x in _enrich_global_songs
+    stayed in the needs_essentia pool forever and got re-attempted
+    every cycle. This was the "same 14 songs being requested every
+    cycle" pattern the user observed.
+
+    The AFG row is inserted with feature_source containing the
+    'permanently_failed' sentinel; both _count_global_gaps and
+    _enrich_global_songs exclude via NOT EXISTS / energy IS NOT NULL
+    filters.
+    """
+    if not isrc or isrc in ("", "__NO_ISRC__"):
+        return
+    feature_source = json.dumps({
+        "_status": "permanently_failed",
+        "_reason": "global_enrichment_error_exceeded_retries",
+    })
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text(
+                "INSERT INTO audio_features_global (isrc, feature_source)"
+                " VALUES (:isrc, :fs)"
+                " ON CONFLICT (isrc) DO UPDATE SET feature_source = :fs"
+            ), {"isrc": isrc, "fs": feature_source})
+        logger.info(
+            "Marked ISRC %s as globally permanently failed after %d retries",
+            isrc, _FAIL_MAX_RETRIES,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to mark ISRC %s as globally failed", isrc, exc_info=True,
+        )
+
+
 # ── Library Gap Fill (priority enrichment) ──────────────────────────────
 
 
@@ -2748,6 +2806,11 @@ async def _enrich_global_songs(engine, settings) -> int:
 
     tracks = []
     global_user = "__global__"
+    # V 6.405: also build catalog_id → isrc map so we can write the
+    # permanent-failure marker to the correct table (audio_features_global
+    # is ISRC-keyed; the prior code wrote to audio_features_cache which
+    # the global gap query doesn't consult).
+    cid_to_isrc: dict[str, str] = {}
     for row in rows:
         fail_key = f"{row.catalog_id}:{global_user}"
         if _failed_tracks.get(fail_key, 0) >= _FAIL_MAX_RETRIES:
@@ -2768,6 +2831,8 @@ async def _enrich_global_songs(engine, settings) -> int:
             "genre_names": genres,
             "preview_url": getattr(row, "preview_url", "") or "",
         })
+        if row.isrc:
+            cid_to_isrc[row.catalog_id] = row.isrc
 
     skipped_count = len(rows) - len(tracks)
     if skipped_count > 0:
@@ -2789,12 +2854,17 @@ async def _enrich_global_songs(engine, settings) -> int:
             modal_endpoint_url=getattr(settings, "modal_endpoint_url", None),
         )
 
-        # Track per-track failures and mark permanently failed
+        # V 6.405: on per-track failures past max retries, write BOTH the
+        # per-user marker (legacy) AND the global ISRC marker — the
+        # latter is what actually excludes the track from future cycles.
         for cid in r.get("failed_ids", []):
             fail_key = f"{cid}:{global_user}"
             _failed_tracks[fail_key] = _failed_tracks.get(fail_key, 0) + 1
             if _failed_tracks[fail_key] >= _FAIL_MAX_RETRIES:
                 await _mark_permanently_failed(engine, cid, global_user)
+                isrc = cid_to_isrc.get(cid)
+                if isrc:
+                    await _mark_globally_failed(engine, isrc)
 
         return r.get("essentia", 0)
     except Exception:
@@ -2809,6 +2879,9 @@ async def _enrich_global_songs(engine, settings) -> int:
                     await _mark_permanently_failed(
                         engine, t["catalog_id"], global_user,
                     )
+                    isrc = cid_to_isrc.get(t["catalog_id"])
+                    if isrc:
+                        await _mark_globally_failed(engine, isrc)
                 except Exception:
                     pass
         logger.debug(
