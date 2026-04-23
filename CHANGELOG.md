@@ -7,6 +7,38 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.450 — 2026-04-23
+
+### Feature: playlist chat UI with song-mention autocomplete (Phase 6a)
+
+Frontend for the whole playlist-chat flow the backend was built for over V 6.420/6.430/6.440/6.441. Replaces the auto-generated suggestions block on the playlist detail page with an interactive chat-driven one.
+
+**New component**: `components/playlists/playlist-brief-chat.tsx`
+- Freeform brief textarea ("What kind of vibe are you building?")
+- Debounced song autocomplete (200ms) hitting `/api/search/songs` with enrichment rendered inline (genres · mood · tempo · energy)
+- Each selected song becomes an **artwork "character" chip** above the textarea with: artwork image, name + artist, role toggle (**like / target / avoid**), and an optional "why I like this" note
+- Submit → `POST /api/playlists/{id}/brief` (brief + mentioned songs with per-song role + reason)
+- Loading state: "Synthesizing…" while gpt-5.4 builds the target_vector
+- Target summary panel: restates what the AI understood + chips for mood/tempo/energy/valence
+- Suggestions grid: `GET /recommendations?brief_id=<id>&apple_only=true`, each card shows title + artist + explanation + relevance score + an "+ Apple" button (**stubbed — MusicKit JS wiring is Phase 6b**)
+
+**New hooks** (`hooks/use-playlists.ts`):
+- `useSongAutocomplete(q, {service, limit})` — 60s stale
+- `useCreateBrief()` — mutation; invalidates the brief history query on success
+- `usePlaylistRecommendations` — now accepts `{briefId, enabled, limit}` so the same hook powers both auto and brief-scoped fetches
+
+**New types** (`types/api.ts`): `SongAutocompleteItem`, `BriefMentionedSong`, `BriefTargetVector`, `BriefResponse`, `PlaylistRecsResponse` (with optional `brief` + `playlist_signal` blocks).
+
+**Playlist detail page**: the old auto-recommendations block is gone; replaced by `<PlaylistBriefChat>`. Every new suggestion set is explicitly tied to a brief.
+
+**Still stubbed** (lands in 6b):
+- The "+ Apple" button is disabled. The add-to-Apple-Music flow needs MusicKit JS loaded globally, user auth via `MusicKit.getInstance().authorize()`, and the `POST /v1/me/library/playlists/{id}/tracks` catalog call.
+- No free-flowing "@mention" inline autocomplete inside the textarea itself — the current model is an explicit "Mention a reference song" button that opens a search input below the brief. Inline @-mention can be upgraded later.
+
+**Bug fix in the same commit**: the debouncer hook was accidentally written with `useMemo` instead of `useEffect`; the cleanup closure was being returned as the memoized value instead of being run on unmount/dep-change, leaking timers. Switched to `useEffect`.
+
+---
+
 ## V 6.441 — 2026-04-23
 
 ### Feature: gpt-5.4 target-vector synthesis for playlist briefs (5b)

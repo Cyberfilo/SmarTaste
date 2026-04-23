@@ -357,6 +357,100 @@ export interface PlaylistTracksResponse {
   total: number;
 }
 
+// ── Song autocomplete (V 6.420) ─────────────────────────
+
+export interface SongEnrichment {
+  mood_tags: string[];
+  tempo: number | null;
+  energy: number | null;
+  valence: number | null;
+  danceability: number | null;
+}
+
+export interface SongAutocompleteItem {
+  catalog_id: string;
+  isrc: string | null;
+  name: string;
+  artist_name: string;
+  album_name: string;
+  genre_names: string[];
+  artwork_url: string;
+  preview_url: string;
+  service_source: string;
+  enrichment: SongEnrichment;
+}
+
+export interface SongAutocompleteResponse {
+  query: string;
+  results: SongAutocompleteItem[];
+  total: number;
+}
+
+// ── Playlist brief (V 6.440 / 6.441) ────────────────────
+
+export interface BriefMentionedSong {
+  catalog_id: string;
+  isrc?: string | null;
+  role: "referenced" | "target_example" | "anti_example";
+  reason_text?: string | null;
+}
+
+export interface BriefTargetVector {
+  summary: string;
+  mood_tags: string[];
+  tempo_target: number | null;
+  tempo_min: number | null;
+  tempo_max: number | null;
+  energy_target: number | null;
+  valence_target: number | null;
+  danceability_target: number | null;
+  genre_emphasis: string[];
+  avoid_tags: string[];
+}
+
+export interface BriefResponse {
+  id: string;
+  playlist_id: string;
+  service: string;
+  brief_text: string;
+  mentioned_songs: BriefMentionedSong[];
+  target_vector: BriefTargetVector | null;
+  synthesis_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlaylistRecItem {
+  catalog_id: string;
+  name: string;
+  artist_name: string;
+  album_name: string;
+  artwork_url: string;
+  preview_url?: string;
+  score: number;
+  explanation: string;
+  genre_names: string[];
+  service_source?: string;
+  isrc?: string | null;
+}
+
+export interface PlaylistRecsResponse {
+  items: PlaylistRecItem[];
+  total: number;
+  blend?: { playlist: number; user: number };
+  brief?: {
+    brief_id: string;
+    applied: boolean;
+    target_vector: BriefTargetVector | null;
+  } | null;
+  playlist_signal?: {
+    tracks_used: number;
+    clap_from_n: number;
+    mert_from_n: number;
+    audio_from_n: number;
+  };
+}
+
 // ── Common ───────────────────────────────────────────────
 
 export type Period = "month" | "6months" | "alltime";
