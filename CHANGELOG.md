@@ -7,6 +7,32 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.430 — 2026-04-23
+
+### Feature: playlist-scoped recommendations with 0.8/0.2 centroid blending
+
+Rewrote `PlaylistService.get_playlist_recommendations` so that `/api/playlists/{id}/recommendations` actually behaves like "recommendations for this playlist" instead of "full personal recs, re-scored against playlist genres". The new scoring blends the playlist's own sonic signal with the user's broader taste — 80/20 in favor of the playlist.
+
+**Blend** (playlist × 0.8 + user × 0.2) happens in 4 vector spaces simultaneously:
+- `genre_vector` — tag distribution with expanded parent-genre tails (0.3× weight)
+- `audio_centroid` — scalar means of tempo, energy, valence, danceability, acousticness, brightness
+- `clap_centroid` — L2-normalized mean of 512-dim CLAP embeddings
+- `mert_centroid` — L2-normalized mean of 768-dim MERT embeddings
+
+All four are loaded from the global caches (`audio_embeddings_global`, `audio_features_global`) via ISRC, so the blend works even for playlist tracks the current user has never personally enriched.
+
+**Candidate source**: `recommendation_candidates` (worker-populated) via `RecommendationService._load_candidates_from_db`. No fresh discovery call — avoids the 22-second `/api/recommendations` burn that the old implementation triggered by calling `get_recommendations(limit=limit*3)` up-front.
+
+**Apple-only filter**: new `apple_only` query param (default `True`). Matches the product decision that the add-to-playlist action is currently Apple-only. Set `?apple_only=false` to include Spotify candidates too.
+
+**Response shape** now includes `blend` + `playlist_signal` metadata so the UI can show things like "based on 40/50 playlist tracks with enrichment".
+
+Fallback behaviour: if the playlist has no tracks with CLAP/MERT embeddings yet, the blend degrades to genre + audio_centroid only. If the user has no taste profile yet (fresh signup), it falls back to 100% playlist.
+
+This is step 1 of the playlist rework — Phase 4 of the 6-phase plan. Steps 5–6 (chat brief + autocomplete UI) land next.
+
+---
+
 ## V 6.420 — 2026-04-23
 
 ### Feature: text song autocomplete endpoint (`GET /api/search/songs`)

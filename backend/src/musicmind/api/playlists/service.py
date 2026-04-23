@@ -196,93 +196,265 @@ class PlaylistService:
         service: str,
         playlist_id: str,
         limit: int = 10,
+        apple_only: bool = True,
     ) -> dict:
-        """Get recommendations based on a specific playlist's songs.
+        """V 6.430 — playlist-scoped recommendations with centroid blending.
 
-        Builds a mini taste profile from the playlist's genres and artists,
-        then uses the recommendation engine to score candidates.
+        Scoring = **playlist centroid ×0.8 + user taste centroid ×0.2**. The
+        playlist's own songs dominate the signal; the user's broader taste
+        provides a small tiebreaker so suggestions feel "like this playlist,
+        by someone who also likes what I like."
+
+        Blended in 4 vector spaces:
+          - genre_vector (tag distribution)
+          - audio_centroid (tempo/energy/valence scalars)
+          - clap_centroid (512-dim semantic audio-text)
+          - mert_centroid (768-dim musical structure)
+
+        Candidates come from `recommendation_candidates` (worker-populated),
+        not a fresh discovery call — no ×22-second burn. Apple-only filter
+        enforced by default per V 6.430 ("apple music only now" user spec).
         """
-        from collections import Counter
+        import numpy as np
 
-        from musicmind.engine.profile import build_genre_vector, expand_genres
+        from musicmind.api.recommendations.service import RecommendationService
+        from musicmind.api.taste.service import TasteService
+        from musicmind.db.schema import (
+            audio_embeddings_global,
+            audio_features_global,
+        )
+        from musicmind.engine.profile import expand_genres
         from musicmind.engine.scorer import rank_candidates
 
-        # Fetch playlist tracks
+        from collections import Counter
+
+        PLAYLIST_W = 0.8
+        USER_W = 0.2
+
+        # ── 1. Playlist tracks ────────────────────────────────────────
         tracks = await self.get_playlist_tracks(
             engine, encryption, settings,
             user_id=user_id, service=service, playlist_id=playlist_id,
         )
-
         if not tracks:
-            return {"items": [], "total": 0}
+            return {"items": [], "total": 0, "blend": {"playlist": PLAYLIST_W, "user": USER_W}}
 
-        # Build mini genre vector from playlist songs
+        track_ids = {t.get("catalog_id") for t in tracks if t.get("catalog_id")}
+        isrcs = [t.get("isrc") for t in tracks if t.get("isrc")]
+
+        # ── 2. Playlist genre vector + top artists ────────────────────
         genre_counter: Counter[str] = Counter()
         artist_counter: Counter[str] = Counter()
         for t in tracks:
-            for g in t.get("genre_names", []):
+            for g in t.get("genre_names", []) or []:
                 genre_counter[g] += 1
-            for eg in expand_genres(t.get("genre_names", [])):
+            for eg in expand_genres(t.get("genre_names", []) or []):
                 genre_counter[eg] += 0.3
             artist_name = t.get("artist_name", "")
             if artist_name:
                 artist_counter[artist_name] += 1
-
-        total_genre = sum(genre_counter.values())
-        genre_vector = (
-            {g: c / total_genre for g, c in genre_counter.items()}
-            if total_genre > 0 else {}
+        total_g = sum(genre_counter.values())
+        playlist_genre_vector: dict[str, float] = (
+            {g: c / total_g for g, c in genre_counter.items()}
+            if total_g > 0 else {}
         )
-
         max_artist = max(artist_counter.values()) if artist_counter else 1
-        top_artists = [
+        playlist_top_artists = [
             {"name": name, "score": count / max_artist, "song_count": count}
             for name, count in artist_counter.most_common(20)
         ]
 
-        playlist_profile = {
-            "genre_vector": genre_vector,
-            "top_artists": top_artists,
+        # ── 3. Playlist CLAP/MERT/audio centroids via ISRC ────────────
+        playlist_clap: list[float] | None = None
+        playlist_mert: list[float] | None = None
+        playlist_audio: dict[str, float] = {}
+
+        if isrcs:
+            async with engine.begin() as conn:
+                emb_rows = (await conn.execute(
+                    sa.select(
+                        audio_embeddings_global.c.clap_embedding,
+                        audio_embeddings_global.c.mert_embedding,
+                    ).where(audio_embeddings_global.c.isrc.in_(isrcs))
+                )).fetchall()
+                afg_rows = (await conn.execute(
+                    sa.select(
+                        audio_features_global.c.tempo,
+                        audio_features_global.c.energy,
+                        audio_features_global.c.valence_proxy,
+                        audio_features_global.c.danceability,
+                        audio_features_global.c.acousticness,
+                        audio_features_global.c.brightness,
+                    ).where(audio_features_global.c.isrc.in_(isrcs))
+                )).fetchall()
+
+            def _mean_normed(embs: list[list[float]]) -> list[float] | None:
+                if not embs:
+                    return None
+                arr = np.mean(np.array(embs, dtype=np.float32), axis=0)
+                n = float(np.linalg.norm(arr))
+                return (arr / n).tolist() if n > 0 else arr.tolist()
+
+            clap_embs = [
+                r.clap_embedding for r in emb_rows
+                if r.clap_embedding
+                and isinstance(r.clap_embedding, list)
+                and len(r.clap_embedding) > 10
+            ]
+            mert_embs = [
+                r.mert_embedding for r in emb_rows
+                if r.mert_embedding
+                and isinstance(r.mert_embedding, list)
+                and len(r.mert_embedding) > 10
+            ]
+            playlist_clap = _mean_normed(clap_embs)
+            playlist_mert = _mean_normed(mert_embs)
+
+            feat_acc: dict[str, list[float]] = {
+                k: [] for k in
+                ("tempo", "energy", "valence_proxy", "danceability",
+                 "acousticness", "brightness")
+            }
+            for r in afg_rows:
+                for k in feat_acc:
+                    v = getattr(r, k, None)
+                    if v is not None:
+                        feat_acc[k].append(float(v))
+            playlist_audio = {
+                k: float(np.mean(v)) for k, v in feat_acc.items() if v
+            }
+
+        # ── 4. User taste profile (for the 0.2 blend tail) ────────────
+        ts = TasteService()
+        try:
+            user_profile = await ts.get_profile(
+                engine, encryption, settings, user_id=user_id,
+            )
+        except Exception:
+            user_profile = {}
+
+        user_clap = user_profile.get("clap_centroid")
+        user_mert = user_profile.get("mert_centroid")
+        user_audio = user_profile.get("audio_centroid") or {}
+        user_genre = user_profile.get("genre_vector") or {}
+
+        # ── 5. Blend centroids (playlist 0.8 / user 0.2) ──────────────
+        def blend_vec(
+            a: list[float] | None, b: list[float] | None,
+        ) -> list[float] | None:
+            if a is None and b is None:
+                return None
+            if a is None:
+                return b
+            if b is None:
+                return a
+            arr_a = np.array(a, dtype=np.float32)
+            arr_b = np.array(b, dtype=np.float32)
+            if arr_a.shape != arr_b.shape:
+                return a  # fall back to playlist-only when dims mismatch
+            mixed = PLAYLIST_W * arr_a + USER_W * arr_b
+            n = float(np.linalg.norm(mixed))
+            return (mixed / n).tolist() if n > 0 else mixed.tolist()
+
+        blended_clap = blend_vec(playlist_clap, user_clap)
+        blended_mert = blend_vec(playlist_mert, user_mert)
+
+        blended_genre: dict[str, float] = {}
+        for g in set(playlist_genre_vector) | set(user_genre):
+            blended_genre[g] = (
+                PLAYLIST_W * playlist_genre_vector.get(g, 0.0)
+                + USER_W * user_genre.get(g, 0.0)
+            )
+
+        blended_audio: dict[str, float] = {}
+        for k in set(playlist_audio) | set(user_audio):
+            a = playlist_audio.get(k)
+            b = user_audio.get(k)
+            if a is None:
+                blended_audio[k] = float(b) if b is not None else 0.0
+            elif b is None:
+                blended_audio[k] = a
+            else:
+                blended_audio[k] = PLAYLIST_W * a + USER_W * float(b)
+
+        blended_profile = {
+            "genre_vector": blended_genre,
+            "audio_centroid": blended_audio,
+            "top_artists": playlist_top_artists,
             "release_year_distribution": {},
             "familiarity_score": 0.5,
         }
 
-        # Use the existing recommendation service to discover candidates
-        from musicmind.api.recommendations.service import RecommendationService
-
+        # ── 6. Candidate pool + filters ───────────────────────────────
         rec_svc = RecommendationService()
-        try:
-            full_result = await rec_svc.get_recommendations(
-                engine, encryption, settings,
-                user_id=user_id, limit=limit * 3,  # Fetch more to filter
-            )
-        except Exception:
-            return {"items": [], "total": 0}
-
-        # Re-score candidates against the playlist profile
-        candidates = []
-        for item in full_result.get("items", []):
-            # Skip songs already in the playlist
-            if item.get("catalog_id") in {t.get("catalog_id") for t in tracks}:
-                continue
-            candidates.append(item)
-
+        candidates = await rec_svc._load_candidates_from_db(
+            engine, user_id=user_id, strategy="all",
+        )
+        candidates = [c for c in candidates if c.get("catalog_id") not in track_ids]
+        candidates = await rec_svc._filter_library_songs(
+            engine, candidates, user_id=user_id,
+        )
+        if apple_only:
+            candidates = [
+                c for c in candidates
+                if (c.get("service_source") or "").lower()
+                in ("apple_music", "apple")
+            ]
         if not candidates:
-            return {"items": [], "total": 0}
+            return {"items": [], "total": 0, "blend": {"playlist": PLAYLIST_W, "user": USER_W}}
 
-        ranked = rank_candidates(candidates, playlist_profile, count=limit)
+        # ── 7. Load candidate enrichment ──────────────────────────────
+        clap_map, mert_map, embedding_map = await rec_svc._load_embeddings(
+            engine, candidates, user_id=user_id,
+        )
+        audio_features_map = await rec_svc._load_audio_features(
+            engine, candidates, user_id=user_id,
+        )
 
-        items = []
-        for r in ranked:
-            items.append({
+        # ── 8. Score with blended centroids ───────────────────────────
+        ranked = rank_candidates(
+            candidates, blended_profile, count=limit,
+            audio_features_map=audio_features_map,
+            user_audio_centroid=blended_audio,
+            embedding_map=embedding_map or None,
+            clap_map=clap_map or None,
+            user_clap_centroid=blended_clap,
+            mert_map=mert_map or None,
+            user_mert_centroid=blended_mert,
+        )
+
+        items = [
+            {
                 "catalog_id": r.get("catalog_id", ""),
                 "name": r.get("name", ""),
                 "artist_name": r.get("artist_name", ""),
                 "album_name": r.get("album_name", ""),
                 "artwork_url": r.get("artwork_url", ""),
+                "preview_url": r.get("preview_url", ""),
                 "score": r.get("_score", 0.0),
                 "explanation": r.get("_explanation", ""),
                 "genre_names": r.get("genre_names", []),
-            })
+                "service_source": r.get("service_source", ""),
+                "isrc": r.get("isrc"),
+            }
+            for r in ranked
+        ]
 
-        return {"items": items, "total": len(items)}
+        return {
+            "items": items,
+            "total": len(items),
+            "blend": {"playlist": PLAYLIST_W, "user": USER_W},
+            "playlist_signal": {
+                "tracks_used": len(tracks),
+                "clap_from_n": len(clap_embs) if isrcs else 0,
+                "mert_from_n": len(mert_embs) if isrcs else 0,
+                "audio_from_n": (
+                    max(
+                        (len(v) for v in (
+                            feat_acc if isrcs else {"_": []}
+                        ).values()),
+                        default=0,
+                    )
+                ),
+            },
+        }

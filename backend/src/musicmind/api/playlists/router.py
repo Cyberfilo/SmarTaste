@@ -112,12 +112,19 @@ async def get_playlist_recommendations(
     playlist_id: str,
     service: str = Query(description="Service: spotify or apple_music"),
     limit: int = Query(default=10, ge=1, le=30),
+    apple_only: bool = Query(
+        default=True,
+        description="Filter candidates to Apple Music (V 6.430 default).",
+    ),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """Get recommendations based on a specific playlist's songs.
+    """V 6.430 — playlist-scoped recommendations with 0.8/0.2 blending.
 
-    Builds a mini taste profile from the playlist's tracks only, then
-    runs discovery + scoring against that profile instead of the overall one.
+    Scoring = playlist centroid ×0.8 + user taste ×0.2 across genre,
+    audio traits, CLAP, and MERT spaces. Candidates are pulled from the
+    worker-populated pool (no 22s fresh-discovery re-run). `apple_only`
+    filter is on by default because the add-to-playlist action is
+    currently Apple-only.
     """
     try:
         result = await playlist_service.get_playlist_recommendations(
@@ -128,6 +135,7 @@ async def get_playlist_recommendations(
             service=service,
             playlist_id=playlist_id,
             limit=limit,
+            apple_only=apple_only,
         )
     except ValueError as exc:
         raise HTTPException(
