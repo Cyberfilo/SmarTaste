@@ -199,6 +199,7 @@ class PlaylistService:
     async def create_brief(
         self,
         engine,
+        settings,
         *,
         user_id: str,
         playlist_id: str,
@@ -206,14 +207,20 @@ class PlaylistService:
         brief_text: str,
         mentioned_songs: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Persist a new playlist brief + the songs the user mentioned.
+        """Persist a new playlist brief + synthesize its target_vector.
 
-        target_vector stays NULL here — a follow-up commit (5b) adds the
-        gpt-5.4 synthesis that turns brief_text + mentioned songs'
-        enrichment into an audio-trait + mood target vector. Separating
-        storage from synthesis lets the frontend build against a stable
-        endpoint while synthesis is iterated.
+        V 6.441 (5b): after persisting the brief, call gpt-5.4 to turn
+        `brief_text + mentioned songs' enrichment` into a structured audio-
+        trait + mood target. The target vector is stored on the brief row
+        and consumed by `get_playlist_recommendations(brief_id=...)`.
+
+        Synthesis failures degrade gracefully — the brief is still
+        persisted with `target_vector=NULL` and `synthesis_error=<msg>`.
         """
+        from musicmind.api.playlists.brief_synthesis import (
+            synthesize_target_vector,
+        )
+
         brief_id = str(_uuid7())
         now = datetime.now(UTC)
 
@@ -249,16 +256,42 @@ class PlaylistService:
                     )
                 )
 
+        target_vector: dict[str, Any] | None = None
+        synthesis_error: str | None = None
+        api_key = getattr(settings, "openai_api_key", None)
+        if not api_key:
+            synthesis_error = "MUSICMIND_OPENAI_API_KEY not configured"
+        else:
+            target_vector, synthesis_error = await synthesize_target_vector(
+                engine,
+                api_key=api_key,
+                brief_text=brief_text,
+                mentioned_songs=mentioned_songs,
+            )
+
+        # Persist whichever of (target_vector | synthesis_error) we ended up with.
+        now2 = datetime.now(UTC)
+        async with engine.begin() as conn:
+            await conn.execute(
+                playlist_briefs.update()
+                .where(playlist_briefs.c.id == brief_id)
+                .values(
+                    target_vector=target_vector,
+                    synthesis_error=synthesis_error,
+                    updated_at=now2,
+                )
+            )
+
         return {
             "id": brief_id,
             "playlist_id": playlist_id,
             "service": service,
             "brief_text": brief_text,
             "mentioned_songs": mentioned_songs,
-            "target_vector": None,
-            "synthesis_error": None,
+            "target_vector": target_vector,
+            "synthesis_error": synthesis_error,
             "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
+            "updated_at": now2.isoformat(),
         }
 
     async def list_briefs(
@@ -327,6 +360,7 @@ class PlaylistService:
         playlist_id: str,
         limit: int = 10,
         apple_only: bool = True,
+        brief_id: str | None = None,
     ) -> dict:
         """V 6.430 — playlist-scoped recommendations with centroid blending.
 
@@ -507,6 +541,42 @@ class PlaylistService:
             else:
                 blended_audio[k] = PLAYLIST_W * a + USER_W * float(b)
 
+        # ── 5b. Optional brief-driven target-vector overrides ─────────
+        target_vector: dict[str, Any] | None = None
+        if brief_id:
+            async with engine.begin() as conn:
+                brow = (await conn.execute(
+                    sa.select(
+                        playlist_briefs.c.target_vector,
+                    ).where(
+                        sa.and_(
+                            playlist_briefs.c.id == brief_id,
+                            playlist_briefs.c.user_id == user_id,
+                            playlist_briefs.c.playlist_id == playlist_id,
+                        )
+                    )
+                )).first()
+            if brow and brow.target_vector:
+                target_vector = brow.target_vector
+                # Audio scalar targets: override blended_audio where set.
+                tv_map = {
+                    "tempo": "tempo_target",
+                    "energy": "energy_target",
+                    "valence_proxy": "valence_target",
+                    "danceability": "danceability_target",
+                }
+                for feat_key, tv_key in tv_map.items():
+                    tval = target_vector.get(tv_key)
+                    if tval is not None:
+                        blended_audio[feat_key] = float(tval)
+                # Emphasized genres get a floor weight in blended_genre so
+                # the scorer rewards them even if the user's profile and
+                # playlist don't already emphasize them.
+                for g in target_vector.get("genre_emphasis", []) or []:
+                    if isinstance(g, str) and g:
+                        gl = g.lower()
+                        blended_genre[gl] = max(blended_genre.get(gl, 0.0), 0.25)
+
         blended_profile = {
             "genre_vector": blended_genre,
             "audio_centroid": blended_audio,
@@ -574,6 +644,11 @@ class PlaylistService:
             "items": items,
             "total": len(items),
             "blend": {"playlist": PLAYLIST_W, "user": USER_W},
+            "brief": {
+                "brief_id": brief_id,
+                "applied": target_vector is not None,
+                "target_vector": target_vector,
+            } if brief_id else None,
             "playlist_signal": {
                 "tracks_used": len(tracks),
                 "clap_from_n": len(clap_embs) if isrcs else 0,

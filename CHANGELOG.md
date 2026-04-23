@@ -7,6 +7,34 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.441 — 2026-04-23
+
+### Feature: gpt-5.4 target-vector synthesis for playlist briefs (5b)
+
+The brief is no longer just freeform text sitting in a column — `POST /api/playlists/{id}/brief` now synthesizes a structured `target_vector` via gpt-5.4 and stores it on the brief. Subsequent `GET /api/playlists/{id}/recommendations?brief_id=<id>` consumes that target vector during scoring.
+
+**New module** `api/playlists/brief_synthesis.py`:
+- Joins each mentioned song (by `catalog_id` / `isrc`) against `global_song_cache` + `audio_features_global` to pull live enrichment (genres, mood_tags, tempo, energy, valence, danceability) regardless of whether the current user ever listened to that song.
+- Builds a user prompt that lists each reference song with inline `[genres=... moods=... tempo=118bpm energy=0.72 …]` tags + any per-song "why I like it" reason the user supplied.
+- Calls gpt-5.4 with a strict JSON schema (mood_tags drawn from the 12-tag taxonomy + tempo target/min/max + energy/valence/danceability targets + genre_emphasis + avoid_tags + one-sentence summary).
+- 30s timeout. Graceful degradation: on any failure (import / network / schema / parse) the brief is still persisted, `target_vector=NULL`, `synthesis_error=<hint>` recorded.
+
+**Scoring integration** (`get_playlist_recommendations`):
+- New `brief_id` query param. If present, loads the brief's `target_vector` and applies two overrides on top of the existing 0.8/0.2 playlist/user centroid blend:
+  1. Audio scalar targets (`tempo_target`, `energy_target`, `valence_target`, `danceability_target`) override `blended_audio` where set.
+  2. Each entry in `genre_emphasis` gets a floor weight of 0.25 in `blended_genre` — rewards the emphasized genre even if the playlist and user profile don't already feature it.
+- `mood_tags` from the target vector are intentionally NOT used as a hard filter yet — the current candidate pool is small enough that heavy mood filtering would starve results. Future iteration can reintroduce as a soft score bonus via `filter_candidates_by_mood`.
+- Response `brief` block echoes `{brief_id, applied, target_vector}` so the UI can show "used your brief: <summary>".
+
+Chain of a typical end-user interaction:
+1. `POST /api/playlists/42/brief` → `{brief_id, target_vector: {...}}` (~5-10s)
+2. `GET /api/playlists/42/recommendations?brief_id=<brief_id>&apple_only=true&limit=20` → `{items, brief: {applied: true, ...}}`
+3. UI shows the suggestions + an "Add to playlist" button per item.
+
+This unblocks Phase 6 (frontend chat UI).
+
+---
+
 ## V 6.440 — 2026-04-23
 
 ### Feature: playlist brief endpoint + DB schema for chat-driven target data

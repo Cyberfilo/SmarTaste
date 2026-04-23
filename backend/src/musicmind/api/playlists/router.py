@@ -118,15 +118,23 @@ async def get_playlist_recommendations(
         default=True,
         description="Filter candidates to Apple Music (V 6.430 default).",
     ),
+    brief_id: str | None = Query(
+        default=None,
+        description="Consult the target_vector of this brief (V 6.441).",
+    ),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
-    """V 6.430 — playlist-scoped recommendations with 0.8/0.2 blending.
+    """V 6.430/6.441 — playlist-scoped recommendations with 0.8/0.2 blending.
 
     Scoring = playlist centroid ×0.8 + user taste ×0.2 across genre,
-    audio traits, CLAP, and MERT spaces. Candidates are pulled from the
-    worker-populated pool (no 22s fresh-discovery re-run). `apple_only`
-    filter is on by default because the add-to-playlist action is
-    currently Apple-only.
+    audio traits, CLAP, and MERT spaces. If `brief_id` is supplied, the
+    brief's synthesized target_vector overrides audio scalar targets
+    (tempo, energy, valence, danceability) and boosts `genre_emphasis`
+    in the blended genre vector.
+
+    Candidates are pulled from the worker-populated pool (no 22s fresh-
+    discovery re-run). `apple_only` filter is on by default because the
+    add-to-playlist action is currently Apple-only.
     """
     try:
         result = await playlist_service.get_playlist_recommendations(
@@ -138,6 +146,7 @@ async def get_playlist_recommendations(
             playlist_id=playlist_id,
             limit=limit,
             apple_only=apple_only,
+            brief_id=brief_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -181,6 +190,7 @@ async def create_playlist_brief(
     try:
         created = await playlist_service.create_brief(
             request.app.state.engine,
+            request.app.state.settings,
             user_id=current_user["user_id"],
             playlist_id=playlist_id,
             service=body.service.lower(),
