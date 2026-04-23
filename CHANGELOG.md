@@ -7,6 +7,30 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.410 — 2026-04-23
+
+### Feature: BYOK removed — chat uses the globally-configured OpenAI key
+
+Chat previously required each user to supply their own Anthropic or OpenAI API key, encrypted in the `user_api_keys` table. With Friends-of-Filippo as the target audience, that friction doesn't make sense — every user pays nothing, the operator pays the OpenAI bill. And as a side effect, the quota outage on 2026-04-22 masked as "chat broken for everyone" rather than a single operator alert.
+
+**Backend changes**:
+- Deleted `api/claude/` and `api/openai/` BYOK manager modules (7 files, ~500 LOC).
+- Deleted `api/chat/providers/claude.py`. Only OpenAI is supported going forward; `OpenAIProvider.MODEL` bumped `gpt-4o → gpt-5.4`.
+- `ChatService.send_message` now reads `settings.openai_api_key` (from `MUSICMIND_OPENAI_API_KEY`); no per-user key lookup, no provider branching.
+- `SendMessageRequest.model` field dropped from the chat schema.
+- Alembic migration `030_drop_user_api_keys.py` drops the `user_api_keys` table. Schema model definition removed from `db/schema.py`.
+
+**Frontend changes**:
+- Deleted `byok-key-manager.tsx`, `openai-key-manager.tsx`, `model-selector.tsx`, `use-claude-key.ts`, `use-openai-key.ts`.
+- Settings page now only shows Service Connections + Calibration.
+- Chat interface: no model selector header, no "no API key" gating state, no `selectedModel` state or localStorage round-trip. `ChatInterface` prop `hasApiKey` removed.
+- `StreamChatParams.model` dropped from `lib/sse.ts`.
+
+**Env vars**:
+- `MUSICMIND_OPENAI_API_KEY` is now required for chat (it was already required for mood classification; the chat path just now uses the same key).
+
+---
+
 ## V 6.405 — 2026-04-22
 
 ### Fix: global-enrichment failure markers were writing to the wrong table

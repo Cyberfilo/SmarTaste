@@ -1,7 +1,8 @@
 """Abstract base class for LLM provider implementations.
 
-Defines the LLMProvider interface that both ClaudeProvider and OpenAIProvider
-implement, yielding identical SSE event dicts for the chat service.
+Defines the LLMProvider interface that OpenAIProvider implements, yielding
+SSE event dicts for the chat service. Retained as a base class so future
+providers can slot in without touching ChatService.
 """
 
 from __future__ import annotations

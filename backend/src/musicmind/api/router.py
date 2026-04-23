@@ -8,9 +8,7 @@ from musicmind.api.admin.router import dashboard_router
 from musicmind.api.admin.router import router as admin_router
 from musicmind.api.calibration.router import router as calibration_router
 from musicmind.api.chat.router import router as chat_router
-from musicmind.api.claude.router import router as claude_router
 from musicmind.api.health import router as health_router
-from musicmind.api.openai.router import router as openai_router
 from musicmind.api.playlists.router import router as playlists_router
 from musicmind.api.recommendations.router import router as recommendations_router
 from musicmind.api.search.router import router as search_router
@@ -28,8 +26,6 @@ api_router.include_router(dashboard_router)
 api_router.include_router(auth_router)
 api_router.include_router(calibration_router)
 api_router.include_router(services_router)
-api_router.include_router(claude_router)
-api_router.include_router(openai_router)
 api_router.include_router(chat_router)
 api_router.include_router(taste_router)
 api_router.include_router(stats_router)

@@ -12,14 +12,11 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { ArrowUp, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-import { MODEL_OPTIONS } from "@/components/settings/model-selector";
-
 interface ChatInputProps {
   onSend: (text: string) => void;
   onCancel: () => void;
   isStreaming: boolean;
   disabled?: boolean;
-  selectedModel?: string;
 }
 
 export function ChatInput({
@@ -27,7 +24,6 @@ export function ChatInput({
   onCancel,
   isStreaming,
   disabled = false,
-  selectedModel,
 }: ChatInputProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -66,10 +62,6 @@ export function ChatInput({
 
   const canSend = text.trim().length > 0 && !isStreaming && !disabled;
 
-  const modelLabel = selectedModel
-    ? MODEL_OPTIONS.find((m) => m.id === selectedModel)?.name
-    : undefined;
-
   return (
     <div className="border-t border-border bg-card px-4 pb-[env(safe-area-inset-bottom,0.5rem)] pt-3">
       <div className="mx-auto flex max-w-3xl items-end gap-2">
@@ -105,11 +97,6 @@ export function ChatInput({
           </Button>
         )}
       </div>
-      {modelLabel && (
-        <p className="mx-auto max-w-3xl mt-1.5 text-[10px] text-muted-foreground/50 text-center">
-          Powered by {modelLabel}
-        </p>
-      )}
     </div>
   );
 }

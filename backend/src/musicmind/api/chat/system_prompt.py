@@ -1,7 +1,7 @@
-"""Shared system prompt builder for all LLM providers.
+"""System prompt builder for the OpenAI chat provider.
 
 Constructs the system prompt with user context (connected services, taste summary,
-available tools) used by both ClaudeProvider and OpenAIProvider.
+available tools).
 """
 
 from __future__ import annotations

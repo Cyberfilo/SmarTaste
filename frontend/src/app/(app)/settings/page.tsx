@@ -4,9 +4,6 @@ import { useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ServiceConnections } from "@/components/settings/service-connections";
-import { BYOKKeyManager } from "@/components/settings/byok-key-manager";
-import { ModelSelector } from "@/components/settings/model-selector";
-import { OpenAIKeyManager } from "@/components/settings/openai-key-manager";
 import { CalibrationManager } from "@/components/settings/calibration-manager";
 import { useCalibrationStatus } from "@/hooks/use-calibration";
 
@@ -33,7 +30,6 @@ export default function SettingsPage() {
       });
     }
     if (service && connStatus) {
-      // Clean the URL without causing a navigation
       window.history.replaceState({}, "", "/settings");
     }
   }, [searchParams, calibrationStatus, router]);
@@ -43,14 +39,11 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Manage your music services and AI configuration
+          Manage your connected music services
         </p>
       </div>
       <ServiceConnections />
       <CalibrationManager />
-      <BYOKKeyManager />
-      <ModelSelector />
-      <OpenAIKeyManager />
     </div>
   );
 }

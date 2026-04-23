@@ -4,8 +4,8 @@
  * Chat page -- AI conversation interface.
  *
  * Full-height page rendering the ChatInterface component.
- * Key status checking is handled internally by ChatInterface
- * based on the currently selected model (Claude or OpenAI).
+ * Always routes through the operator-provided OpenAI key
+ * (MUSICMIND_OPENAI_API_KEY) on the backend.
  */
 
 import { ChatInterface } from "@/components/chat/chat-interface";

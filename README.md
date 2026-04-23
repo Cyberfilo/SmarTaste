@@ -22,7 +22,7 @@
 | **6-Dim Recommendations** | CLAP + MERT + EffNet embeddings + genre cosine + scalar audio + artist affinity — context-adaptive weights shift per user |
 | **4-Stage Enrichment** | Automatic pipeline: Essentia (CPU) scalar features + EffNet embeddings, Modal GPU (CLAP + MERT), Deezer preview fallback, OpenAI captions |
 | **Taste Calibration** | 3-step onboarding wizard: pick playlists, rank artists (drag-to-reorder), pick favorite songs — compensates for Apple Music's missing play counts |
-| **AI Chat** | Ask Claude or GPT about your taste, get recommendations by description, explore music conversationally (BYOK — bring your own API key) |
+| **AI Chat** | Ask GPT about your taste, get recommendations by description, explore music conversationally — powered by the operator-provided OpenAI key (no BYOK) |
 | **Playlists** | Browse your real Apple Music / Spotify playlists with per-playlist recommendations |
 | **Listening Timeline** | Chronological song view with date labels |
 | **Multi-Service** | Connect Spotify and/or Apple Music — unified profiles with ISRC dedup and genre normalization |
@@ -111,7 +111,7 @@ Shared by both indexer and worker. Each stage checks cache before making API cal
 | 1 | **Essentia (CPU, Railway)** | 11 scalar features (tempo, energy, danceability, etc.) + 1280-dim EffNet ONNX embedding + classifier heads (mood, genre, acousticness) | Free |
 | 2 | **Modal GPU (serverless A100)** | 512-dim CLAP embedding (semantic audio-text) + 768-dim MERT embedding (musical structure) | ~$0.018/track |
 | 3 | **Deezer (fallback)** | Preview URL resolution via ISRC lookup, BPM from track metadata | Free |
-| opt | **OpenAI** | AI-generated track captions from extracted features | BYOK |
+| opt | **OpenAI** | AI-generated track captions, mood classification, chat (shared operator key) | operator-paid |
 
 Global ISRC cache (`audio_features_global`, `audio_embeddings_global`): features enriched once per song, shared across all users. ISRC backfill via Deezer + MusicBrainz free APIs.
 
@@ -348,7 +348,7 @@ smartaste/
 |-------|-------------|
 | **Frontend** | Next.js 16 &middot; React 19 &middot; TypeScript &middot; Tailwind CSS 4 &middot; shadcn/ui &middot; TanStack Query &middot; Zustand &middot; Recharts &middot; Sora + DM Sans |
 | **Backend** | Python 3.11+ &middot; FastAPI &middot; SQLAlchemy Core &middot; asyncpg &middot; Alembic &middot; Pydantic &middot; bcrypt &middot; PyJWT &middot; Fernet |
-| **AI** | Anthropic SDK &middot; OpenAI SDK (BYOK) &middot; sentence-transformers (MiniLM-L6-v2 for lyrics) |
+| **AI** | OpenAI SDK (shared operator key) &middot; sentence-transformers (MiniLM-L6-v2 for lyrics) |
 | **Music APIs** | Spotify Web API (OAuth PKCE) &middot; Apple Music API (MusicKit JS + ES256 JWT) |
 | **Enrichment** | Deezer (free) &middot; ReccoBeats (free) &middot; Last.fm (free) &middot; MusicBrainz (free) &middot; Genius (free) &middot; SoundStat (paid) &middot; AcousticBrainz (bulk) |
 | **Infrastructure** | PostgreSQL 16 &middot; Docker Compose &middot; Vercel (frontend) &middot; Railway (backend + worker + admin + 2x Postgres + NocoDB) &middot; uv + npm |
@@ -359,7 +359,7 @@ smartaste/
 cd backend && uv run python -m pytest tests/ -v
 ```
 
-92 tests covering: auth, service connections, BYOK keys, taste profiles, stats, recommendations, multi-service unification, Claude/OpenAI chat, genre normalization, track deduplication, audio pipeline, scoring dimensions.
+Tests cover: auth, service connections, taste profiles, stats, recommendations, multi-service unification, OpenAI chat, genre normalization, track deduplication, audio pipeline, scoring dimensions.
 
 ## License
 

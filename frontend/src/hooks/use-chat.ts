@@ -1,9 +1,8 @@
 /**
  * Chat state management hook with SSE streaming.
  *
- * Uses Zustand (not TanStack Query) because chat is stateful, interactive
- * state -- not cacheable server state. Manages messages, streaming state,
- * active tool indicators, and error display.
+ * V 6.410 — BYOK removed. Chat always uses the globally-configured OpenAI
+ * key on the backend; no per-user key state or model selection.
  */
 
 import { create } from "zustand";
@@ -44,11 +43,9 @@ interface ChatState {
   isStreaming: boolean;
   activeTools: ActiveTool[];
   error: string | null;
-  selectedModel: string;
 
   // Actions
   sendMessage: (text: string) => void;
-  setSelectedModel: (model: string) => void;
   loadConversation: (id: string) => Promise<void>;
   newConversation: () => void;
   cancelStream: () => void;
@@ -57,24 +54,10 @@ interface ChatState {
 
 // ── Error code to user-friendly message mapping ────────
 
-/** Map provider model ID to the backend provider name ("claude" or "openai"). */
-function modelToProvider(model: string): string {
-  if (model.startsWith("gpt")) return "openai";
-  return "claude";
-}
-
 function mapErrorCode(code: string, fallback: string): string {
   switch (code) {
-    case "key_expired":
-      return "Your API key has expired. Update it in Settings.";
     case "rate_limited":
       return "Rate limit reached. Please wait a moment.";
-    case "insufficient_balance":
-      return "Insufficient account balance. Check your provider dashboard.";
-    case "openai_key_missing":
-      return "Your OpenAI API key is missing. Add it in Settings.";
-    case "claude_key_missing":
-      return "Your Claude API key is missing. Add it in Settings.";
     case "internal":
     default:
       return fallback || "Something went wrong. Please try again.";
@@ -83,30 +66,16 @@ function mapErrorCode(code: string, fallback: string): string {
 
 // ── Zustand store ──────────────────────────────────────
 
-function getInitialModel(): string {
-  if (typeof window === "undefined") return "claude";
-  return localStorage.getItem("musicmind-preferred-model") || "claude";
-}
-
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   conversationId: null,
   isStreaming: false,
   activeTools: [],
   error: null,
-  selectedModel: getInitialModel(),
-
-  setSelectedModel: (model: string) => {
-    set({ selectedModel: model });
-    if (typeof window !== "undefined") {
-      localStorage.setItem("musicmind-preferred-model", model);
-    }
-  },
 
   sendMessage: (text: string) => {
-    const { conversationId, selectedModel } = get();
+    const { conversationId } = get();
 
-    // Append user message immediately
     const userMessage: ChatMessage = { role: "user", content: text };
     set((state) => ({
       messages: [...state.messages, userMessage],
@@ -115,7 +84,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeTools: [],
     }));
 
-    // Create placeholder assistant message for streaming text deltas
     set((state) => ({
       messages: [...state.messages, { role: "assistant", content: "" }],
     }));
@@ -124,13 +92,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       {
         conversationId: conversationId ?? undefined,
         message: text,
-        model: modelToProvider(selectedModel),
       },
       {
         onTextDelta: (delta: string) => {
           set((state) => {
             const msgs = [...state.messages];
-            // Find the last assistant message and append delta
             for (let i = msgs.length - 1; i >= 0; i--) {
               if (msgs[i].role === "assistant") {
                 msgs[i] = { ...msgs[i], content: msgs[i].content + delta };

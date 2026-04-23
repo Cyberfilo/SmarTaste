@@ -18,7 +18,7 @@ from musicmind.api.chat.tool_converter import to_openai_functions
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gpt-4o"
+MODEL = "gpt-5.4"
 
 
 class OpenAIProvider(LLMProvider):
@@ -184,12 +184,13 @@ class OpenAIProvider(LLMProvider):
                     break
 
         except openai.AuthenticationError:
+            logger.exception("OpenAI authentication failed — check MUSICMIND_OPENAI_API_KEY")
             yield {
                 "event": "error",
                 "data": {
                     "message": (
-                        "OpenAI API key invalid. "
-                        "Please update your key in settings."
+                        "Chat is temporarily unavailable. "
+                        "Please try again shortly."
                     )
                 },
             }
@@ -198,7 +199,7 @@ class OpenAIProvider(LLMProvider):
                 "event": "error",
                 "data": {
                     "message": (
-                        "OpenAI rate limit reached. "
+                        "Rate limit reached. "
                         "Please wait a moment and try again."
                     )
                 },

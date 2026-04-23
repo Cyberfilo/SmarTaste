@@ -16,13 +16,6 @@ class SendMessageRequest(BaseModel):
         min_length=1,
         description="User message text to send to the LLM",
     )
-    model: str | None = Field(
-        default=None,
-        description=(
-            "LLM model override: 'claude' or 'openai'. "
-            "If None, uses user's preferred model or defaults to 'claude'."
-        ),
-    )
 
 
 class MessageItem(BaseModel):

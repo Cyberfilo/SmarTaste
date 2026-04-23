@@ -1,8 +1,7 @@
-"""ChatService: dispatches to LLM providers with SmarTaste tools.
+"""ChatService: dispatches user messages to OpenAI with SmarTaste tools.
 
-Sends user messages to the selected LLM provider (Claude or OpenAI) with
-SmarTaste tool definitions, streams responses as SSE events, manages
-context windows, and persists conversations to the database.
+V 6.410 — BYOK removed. Chat always uses the global `settings.openai_api_key`
+(MUSICMIND_OPENAI_API_KEY). Claude support dropped.
 """
 
 from __future__ import annotations
@@ -16,8 +15,6 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from musicmind.api.chat.providers.base import LLMProvider
-from musicmind.api.chat.providers.claude import ClaudeProvider
 from musicmind.api.chat.providers.openai import OpenAIProvider
 from musicmind.api.chat.system_prompt import build_system_prompt
 from musicmind.api.chat.tools import TOOL_DEFINITIONS, TOOL_EXECUTORS
@@ -30,11 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChatService:
-    """Orchestrates LLM provider <-> SmarTaste tool bridge with streaming output.
-
-    Dispatches to ClaudeProvider or OpenAIProvider based on the model parameter,
-    manages conversation state, and yields SSE events.
-    """
+    """Orchestrates OpenAI <-> SmarTaste tool bridge with streaming output."""
 
     CONTEXT_WINDOW_MESSAGES = 20  # max messages to include in context
 
@@ -47,70 +40,20 @@ class ChatService:
         user_id: str,
         conversation_id: str | None,
         message: str,
-        model: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Send a message and yield SSE events as the response streams.
+        """Send a message and yield SSE events as the response streams."""
+        api_key = getattr(settings, "openai_api_key", None)
+        if not api_key:
+            logger.error("MUSICMIND_OPENAI_API_KEY is not configured")
+            yield {
+                "event": "error",
+                "data": {
+                    "message": "Chat is temporarily unavailable.",
+                },
+            }
+            yield {"event": "done", "data": {}}
+            return
 
-        Args:
-            engine: SQLAlchemy async engine.
-            encryption: EncryptionService for key decryption.
-            settings: Application settings.
-            user_id: Current user's ID.
-            conversation_id: Existing conversation ID or None for new.
-            message: User message text.
-            model: LLM provider: 'claude' or 'openai'. Defaults to 'claude'.
-
-        Yields:
-            Dict with "event" and "data" keys representing SSE events:
-            - conversation_id: {id} -- first event for new conversations
-            - text: {text} -- streamed text content
-            - tool_start: {tool, input} -- tool invocation started
-            - tool_end: {tool, result} -- tool invocation completed
-            - error: {message} -- API or execution error
-            - done: {} -- response complete
-        """
-        # 1. Determine provider
-        provider_name = model or "claude"
-        provider: LLMProvider
-
-        if provider_name == "openai":
-            from musicmind.api.openai.service import (
-                get_decrypted_api_key as get_openai_key,
-            )
-            api_key = await get_openai_key(engine, encryption, user_id=user_id)
-            if api_key is None:
-                yield {
-                    "event": "error",
-                    "data": {
-                        "message": (
-                            "No OpenAI API key configured. "
-                            "Please add your OpenAI API key in settings."
-                        )
-                    },
-                }
-                yield {"event": "done", "data": {}}
-                return
-            provider = OpenAIProvider()
-        else:
-            from musicmind.api.claude.service import (
-                get_decrypted_api_key as get_claude_key,
-            )
-            api_key = await get_claude_key(engine, encryption, user_id=user_id)
-            if api_key is None:
-                yield {
-                    "event": "error",
-                    "data": {
-                        "message": (
-                            "No API key configured. "
-                            "Please add your Anthropic API key in settings."
-                        )
-                    },
-                }
-                yield {"event": "done", "data": {}}
-                return
-            provider = ClaudeProvider()
-
-        # 2. Conversation load/create
         conversation_messages: list[dict[str, Any]] = []
         if conversation_id is None:
             conversation_id = str(_uuid7())
@@ -122,17 +65,13 @@ class ChatService:
                 engine, conversation_id
             )
 
-        # 3. Context window management
         context_messages = conversation_messages[-self.CONTEXT_WINDOW_MESSAGES :]
         context_messages.append({"role": "user", "content": message})
 
-        # 4. Build system prompt
         system_prompt = await build_system_prompt(engine, user_id)
-
-        # 5. Convert to provider message format
         provider_messages = self._to_anthropic_messages(context_messages)
 
-        # 6. Stream from provider
+        provider = OpenAIProvider()
         has_error = False
 
         async for event in provider.stream_response(
@@ -150,16 +89,12 @@ class ChatService:
             if event.get("event") == "error":
                 has_error = True
 
-        # 7. Conversation persistence (skip if errors occurred)
         if not has_error:
-            # The provider mutated provider_messages in-place with assistant/tool msgs
-            # Extract the new messages added by the provider
             new_messages = provider_messages[len(context_messages):]
             await self._persist_messages(
                 engine, conversation_id, context_messages, new_messages
             )
 
-        # 8. Yield "done" event
         yield {"event": "done", "data": {}}
 
     async def _create_conversation(
@@ -215,13 +150,10 @@ class ChatService:
         """Persist messages to both JSON blob (backward compat) and normalized table."""
         all_messages = context_messages + response_messages
 
-        serializable_messages = []
-        for msg in all_messages:
-            serializable_messages.append(self._serialize_message(msg))
+        serializable_messages = [self._serialize_message(m) for m in all_messages]
 
         now = datetime.now(UTC)
         async with engine.begin() as conn:
-            # Backward compat: update JSON blob
             await conn.execute(
                 chat_conversations.update()
                 .where(chat_conversations.c.id == conversation_id)
@@ -231,8 +163,6 @@ class ChatService:
                 )
             )
 
-            # Normalized: write new messages to chat_messages table
-            # Only write response messages (context was already persisted)
             for msg in response_messages:
                 serialized = self._serialize_message(msg)
                 tool_data = None
@@ -252,18 +182,13 @@ class ChatService:
                         )
                     )
                 except Exception:
-                    # Don't fail the whole flow if normalized write fails
                     logger.warning(
                         "Failed to write to chat_messages for conversation %s",
                         conversation_id,
                     )
 
     def _serialize_message(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Serialize a message dict for JSON storage.
-
-        Handles both simple string content and complex content block arrays
-        from the Anthropic API format.
-        """
+        """Serialize a message dict for JSON storage."""
         content = msg.get("content", "")
         role = msg.get("role", "user")
 
@@ -306,10 +231,9 @@ class ChatService:
         self,
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Convert stored messages to Anthropic API message format.
-
-        Handles both simple string content and stored messages with
-        tool_use/tool_result blocks.
+        """Convert stored messages to Anthropic-style blocks (the OpenAI
+        provider internally flattens to OpenAI format). Retained because
+        tool_use/tool_result blocks round-trip cleanly through this shape.
         """
         anthropic_messages: list[dict[str, Any]] = []
         for msg in messages:
