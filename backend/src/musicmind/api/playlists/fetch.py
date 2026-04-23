@@ -13,6 +13,37 @@ SPOTIFY_API = "https://api.spotify.com/v1"
 APPLE_MUSIC_API = "https://api.music.apple.com/v1"
 
 
+async def add_track_to_apple_music_playlist(
+    *,
+    developer_token: str,
+    music_user_token: str,
+    playlist_id: str,
+    catalog_song_id: str,
+) -> None:
+    """POST one catalog song to a user's Apple Music library playlist.
+
+    V 6.470 — powers the "+ Apple" button on brief suggestions.
+
+    Raises:
+        RuntimeError: non-2xx from Apple; message contains the Apple error
+            body for surfacing back to the UI.
+    """
+    url = f"{APPLE_MUSIC_API}/me/library/playlists/{playlist_id}/tracks"
+    body = {"data": [{"id": catalog_song_id, "type": "songs"}]}
+    headers = {
+        "Authorization": f"Bearer {developer_token}",
+        "Music-User-Token": music_user_token,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(url, headers=headers, json=body)
+    if resp.status_code >= 300:
+        raise RuntimeError(
+            f"Apple Music add-to-playlist failed ({resp.status_code}): "
+            f"{resp.text[:500]}"
+        )
+
+
 async def fetch_spotify_playlists(
     access_token: str,
     *,

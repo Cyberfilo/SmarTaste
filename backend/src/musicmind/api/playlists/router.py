@@ -7,6 +7,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from musicmind.api.playlists.schemas import (
+    AddTrackRequest,
+    AddTrackResponse,
     BriefResponse,
     CreateBriefRequest,
     PlaylistListResponse,
@@ -161,6 +163,59 @@ async def get_playlist_recommendations(
         )
 
     return result
+
+
+# ── Add track to playlist (V 6.470 — Apple Music only) ─────────────────────
+
+
+@router.post("/{playlist_id}/tracks")
+@limiter.limit(PLAYLISTS_LIMIT)
+async def add_track_to_playlist(
+    request: Request,
+    playlist_id: str,
+    body: AddTrackRequest,
+    current_user: dict = Depends(get_current_user),
+) -> AddTrackResponse:
+    """Add a catalog song to the user's Apple Music playlist.
+
+    V 6.470 — powers the "+ Apple" button on brief suggestions.
+    Backend-proxied: uses the music_user_token stored at connect time,
+    so the frontend doesn't need to re-authorize MusicKit per click.
+    """
+    service = body.service.lower()
+    if service != "apple_music":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only apple_music is supported for now",
+        )
+    try:
+        await playlist_service.add_track(
+            request.app.state.engine,
+            request.app.state.encryption,
+            request.app.state.settings,
+            user_id=current_user["user_id"],
+            service=service,
+            playlist_id=playlist_id,
+            catalog_id=body.catalog_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to add track to playlist")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc)[:500],
+        ) from exc
+
+    return AddTrackResponse(
+        playlist_id=playlist_id,
+        catalog_id=body.catalog_id,
+        service=service,
+        added=True,
+    )
 
 
 # ── Playlist brief (V 6.440 — chat-driven target data) ──────────────────────

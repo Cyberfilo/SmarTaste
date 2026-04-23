@@ -9,6 +9,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from musicmind.api.playlists.fetch import (
+    add_track_to_apple_music_playlist,
     fetch_apple_music_playlist_tracks,
     fetch_apple_music_playlists,
     fetch_spotify_playlist_tracks,
@@ -193,6 +194,44 @@ class PlaylistService:
                             )
 
         return access_token
+
+    # ── Add to playlist (V 6.470 — Apple Music only) ────────────────
+
+    async def add_track(
+        self,
+        engine,
+        encryption: EncryptionService,
+        settings,
+        *,
+        user_id: str,
+        service: str,
+        playlist_id: str,
+        catalog_id: str,
+    ) -> None:
+        """Add a catalog song to the user's playlist via service API.
+
+        Apple Music only for now — Spotify would need a separate path
+        (POST /playlists/{id}/tracks with the spotify:track:… URI).
+        """
+        if service != "apple_music":
+            raise ValueError("Only apple_music is supported for now")
+
+        music_user_token = await self._get_access_token(
+            engine, encryption, settings,
+            user_id=user_id, service="apple_music",
+        )
+        developer_token = generate_apple_developer_token(
+            settings.apple_team_id,
+            settings.apple_key_id,
+            settings.apple_private_key_path,
+            private_key_b64=settings.apple_private_key_b64,
+        )
+        await add_track_to_apple_music_playlist(
+            developer_token=developer_token,
+            music_user_token=music_user_token,
+            playlist_id=playlist_id,
+            catalog_song_id=catalog_id,
+        )
 
     # ── Playlist brief (V 6.440 — chat-driven target data) ──────────
 

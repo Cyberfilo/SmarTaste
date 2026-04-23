@@ -7,6 +7,30 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.470 — 2026-04-23
+
+### Feature: "+ Apple" add-to-playlist wiring (Phase 6b)
+
+The final piece of the playlist-chat product loop. The "+ Apple" button on each brief-driven suggestion was a no-op stub in V 6.450; this turns it into a real round-trip into Apple Music.
+
+**Architecture decision — backend proxy instead of in-browser MusicKit call**:
+Going via the backend (vs. MusicKit JS directly on the click handler) means:
+- The music_user_token stays on the server (where it was encrypted at connect time), never touches the browser at add-to-playlist time.
+- No need to load and configure MusicKit JS on the playlist page — it only has to live on settings where the connect flow needs it.
+- No user-activation-window popup concerns (MusicKit.authorize requires a click, but add-to-library doesn't need a fresh authorize since we already hold the user token).
+- Uniform `POST /api/playlists/{id}/tracks` surface that can add a Spotify path later without changing the frontend contract.
+
+**New backend pieces**:
+- `add_track_to_apple_music_playlist` in `playlists/fetch.py` — hits `POST /v1/me/library/playlists/{id}/tracks` with `Authorization: Bearer <developer_token>` + `Music-User-Token: <user_token>` headers, body `{"data": [{"id": catalog_song_id, "type": "songs"}]}`.
+- `PlaylistService.add_track` — pulls the user's stored Apple Music token via `_get_access_token`, generates a fresh developer token via `generate_apple_developer_token`, calls the helper.
+- `POST /api/playlists/{playlist_id}/tracks` endpoint with `AddTrackRequest` / `AddTrackResponse` schemas. 400 for non-Apple service requests, 502 for Apple API failures (with Apple's error body surfaced up to 500 chars for UI display).
+
+**Frontend**:
+- `useAddTrackToPlaylist()` mutation hook in `use-playlists.ts`.
+- `SuggestionCard` now has `idle | adding | added | failed` button states, toast notifications on both success and failure, 3s cooldown before re-enabling after a failed attempt. `+ Apple` → `Adding…` (with spinner) → `✓ Added` (green) or `Retry` (on failure).
+
+---
+
 ## V 6.460 — 2026-04-23
 
 ### Perf: persistent artist-artwork cache (unblocks /taste/profile cold-start)

@@ -112,3 +112,33 @@ export function useCreateBrief() {
     },
   });
 }
+
+// ── Add track to playlist (V 6.470, Apple Music only) ───
+
+interface AddTrackInput {
+  playlistId: string;
+  catalogId: string;
+  service: string;
+}
+
+interface AddTrackResponse {
+  playlist_id: string;
+  catalog_id: string;
+  service: string;
+  added: boolean;
+}
+
+export function useAddTrackToPlaylist() {
+  return useMutation<AddTrackResponse, Error, AddTrackInput>({
+    mutationFn: async (input) => {
+      const body = JSON.stringify({
+        service: input.service,
+        catalog_id: input.catalogId,
+      });
+      return apiFetch<AddTrackResponse>(
+        `/api/playlists/${input.playlistId}/tracks`,
+        { method: "POST", body },
+      );
+    },
+  });
+}

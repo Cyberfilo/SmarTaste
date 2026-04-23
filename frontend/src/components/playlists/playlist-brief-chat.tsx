@@ -33,7 +33,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { toast } from "sonner";
 import {
+  useAddTrackToPlaylist,
   useCreateBrief,
   usePlaylistRecommendations,
   useSongAutocomplete,
@@ -59,6 +61,9 @@ interface Props {
   playlistId: string;
   service: string;
 }
+
+// V 6.470 — "+ Apple" button states per suggestion catalog_id.
+type AddState = "idle" | "adding" | "added" | "failed";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -291,6 +296,7 @@ export function PlaylistBriefChat({ playlistId, service }: Props) {
           loading={suggestions.isLoading}
           data={suggestions.data}
           service={service}
+          playlistId={playlistId}
         />
       )}
     </div>
@@ -511,10 +517,12 @@ function SuggestionsList({
   loading,
   data,
   service,
+  playlistId,
 }: {
   loading: boolean;
   data: ReturnType<typeof usePlaylistRecommendations>["data"];
   service: string;
+  playlistId: string;
 }) {
   if (loading) {
     return (
@@ -550,7 +558,12 @@ function SuggestionsList({
       </p>
       <div className="grid gap-2 sm:grid-cols-2">
         {data.items.map((item) => (
-          <SuggestionCard key={item.catalog_id} item={item} service={service} />
+          <SuggestionCard
+            key={item.catalog_id}
+            item={item}
+            service={service}
+            playlistId={playlistId}
+          />
         ))}
       </div>
     </div>
@@ -560,13 +573,51 @@ function SuggestionsList({
 function SuggestionCard({
   item,
   service,
+  playlistId,
 }: {
   item: NonNullable<
     ReturnType<typeof usePlaylistRecommendations>["data"]
   >["items"][number];
   service: string;
+  playlistId: string;
 }) {
+  const [addState, setAddState] = useState<AddState>("idle");
+  const addTrack = useAddTrackToPlaylist();
   const canAdd = service === "apple_music";
+
+  async function handleAdd() {
+    if (!canAdd || addState === "adding" || addState === "added") return;
+    setAddState("adding");
+    try {
+      await addTrack.mutateAsync({
+        playlistId,
+        catalogId: item.catalog_id,
+        service: "apple_music",
+      });
+      setAddState("added");
+      toast.success("Added to playlist", {
+        description: `${item.name} — ${item.artist_name}`,
+      });
+    } catch (err) {
+      setAddState("failed");
+      toast.error("Couldn't add to playlist", {
+        description:
+          err instanceof Error
+            ? err.message.slice(0, 120)
+            : "Apple Music rejected the request.",
+      });
+      // Allow retry after a moment
+      setTimeout(() => setAddState("idle"), 3000);
+    }
+  }
+
+  const addBtnLabel = {
+    idle: "+ Apple",
+    adding: "Adding…",
+    added: "✓ Added",
+    failed: "Retry",
+  }[addState];
+
   return (
     <Card className="transition-colors hover:bg-muted/50">
       <CardContent className="flex items-center gap-3 pt-3">
@@ -602,12 +653,17 @@ function SuggestionCard({
           {canAdd ? (
             <Button
               size="sm"
-              variant="outline"
-              className="h-6 px-2 text-[10px]"
-              disabled
-              title="MusicKit JS wiring lands in V 6.451"
+              variant={addState === "added" ? "ghost" : "outline"}
+              className={`h-6 px-2 text-[10px] ${
+                addState === "added" ? "text-green-400" : ""
+              }`}
+              onClick={handleAdd}
+              disabled={addState === "adding" || addState === "added"}
             >
-              + Apple
+              {addState === "adding" && (
+                <Loader2 className="mr-1 h-2.5 w-2.5 animate-spin" />
+              )}
+              {addBtnLabel}
             </Button>
           ) : (
             <span className="text-[10px] text-muted-foreground/60">

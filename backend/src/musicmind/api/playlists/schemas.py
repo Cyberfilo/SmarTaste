@@ -89,3 +89,20 @@ class BriefResponse(BaseModel):
     synthesis_error: str | None = None
     created_at: str
     updated_at: str
+
+
+# ── Add-to-playlist (V 6.470) ───────────────────────────────────────────────
+
+
+class AddTrackRequest(BaseModel):
+    """POST /api/playlists/{id}/tracks body."""
+
+    service: str = Field(description="apple_music (spotify not yet supported)")
+    catalog_id: str = Field(description="Service-specific catalog song ID")
+
+
+class AddTrackResponse(BaseModel):
+    playlist_id: str
+    catalog_id: str
+    service: str
+    added: bool
