@@ -7,6 +7,26 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.460 — 2026-04-23
+
+### Perf: persistent artist-artwork cache (unblocks /taste/profile cold-start)
+
+`get_artist_artworks` previously only had a process-local Python dict for caching. Every Railway deploy / scale-out / process restart wiped it, triggering a full Apple catalog fan-out (3 storefronts × up to 4s timeout × 10-20 artists) on the next `/taste/profile` call. That's the cold-start burn showing up as 5.5s in prod logs.
+
+**Fix** (alembic 032 + `db/schema.py`): new `artist_artwork_cache(artist_name_lower PK, artwork_url, fetched_at)` table. Persistent across deploys.
+
+**Resolution order** in `get_artist_artworks` is now:
+0. Persistent DB cache (new — seeds the in-memory cache too)
+1. In-memory Python dict (same)
+2. User's library album art (same — now also persisted to DB)
+3. Apple catalog search (same — now also persisted to DB, including empty results as negative cache)
+
+**Upsert**: single `INSERT … ON CONFLICT DO UPDATE` at the end of the function writes all newly-found entries in one round trip, including negatives (empty `artwork_url` means "Apple has no portrait for this artist; don't keep asking"). Best-effort — DB write failure doesn't break the request.
+
+**Expected impact**: cold-start `/taste/profile` drops from ~5.5s to ~200ms on the second Railway boot after any given user's first request. Subsequent requests within the same process remain in-memory-cache-fast.
+
+---
+
 ## V 6.450 — 2026-04-23
 
 ### Feature: playlist chat UI with song-mention autocomplete (Phase 6a)

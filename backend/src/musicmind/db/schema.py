@@ -699,6 +699,25 @@ playlist_brief_songs = sa.Table(
     sa.PrimaryKeyConstraint("brief_id", "position"),
 )
 
+# ── Artist artwork cache (V 6.460 — persistent /taste/profile fast-path) ────
+# Maps artist_name_lower → artwork URL. Persistent across deploys so the
+# Apple-catalog fan-out in get_artist_artworks doesn't re-fire on every
+# cold start. Empty artwork_url means "tried Apple and got nothing" —
+# negative-cache so we don't keep retrying.
+
+artist_artwork_cache = sa.Table(
+    "artist_artwork_cache",
+    metadata,
+    sa.Column("artist_name_lower", sa.Text, primary_key=True),
+    sa.Column("artwork_url", sa.Text, nullable=False, server_default=""),
+    sa.Column(
+        "fetched_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+)
+
 # ── Performance Indexes ─────────────────────────────────────────────────────
 # Composite PK tables index only the first column; queries filtering by
 # user_id alone need explicit indexes to avoid full table scans.

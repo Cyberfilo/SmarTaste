@@ -22,6 +22,7 @@ import httpx
 import sqlalchemy as sa
 
 from musicmind.db.schema import (
+    artist_artwork_cache,
     audio_embeddings_global,
     audio_features_cache,
     global_song_cache,
@@ -122,11 +123,13 @@ async def get_artist_artworks(
 ) -> dict[str, str]:
     """Return {artist_name_lower: artwork_url} for the supplied artists.
 
-    Resolution order per artist:
-      1) In-memory cache (fast path for repeat requests within process)
+    Resolution order per artist (V 6.460 — persistent DB cache added):
+      0) Persistent `artist_artwork_cache` table (survives deploys)
+      1) In-memory cache (process-local fast path)
       2) User's own library song artwork (album cover for a representative song)
       3) Apple Music catalog search for the artist's portrait
-    Empty string when nothing is found.
+    Empty string when nothing is found; negative results are still cached
+    so we don't keep re-querying Apple for artists that have no portrait.
     """
     if not artist_names:
         return {}
@@ -135,12 +138,36 @@ async def get_artist_artworks(
         return {}
 
     result: dict[str, str] = {}
+
+    # Step 0: persistent DB cache. Seeds the in-memory cache too so
+    # subsequent calls within the same process skip the DB round-trip.
+    lower_targets = [n.lower() for n in targets]
+    try:
+        async with engine.begin() as conn:
+            db_rows = await conn.execute(
+                sa.select(
+                    artist_artwork_cache.c.artist_name_lower,
+                    artist_artwork_cache.c.artwork_url,
+                ).where(
+                    artist_artwork_cache.c.artist_name_lower.in_(lower_targets)
+                )
+            )
+            for row in db_rows:
+                _ARTIST_ARTWORK_CACHE[row.artist_name_lower] = row.artwork_url
+                if row.artwork_url:
+                    result[row.artist_name_lower] = row.artwork_url
+    except Exception:
+        logger.debug(
+            "artist_artwork_cache read failed; falling back to live lookup",
+            exc_info=True,
+        )
+
     to_fetch: list[str] = []
 
-    # Step 1: in-memory cache
+    # Step 1: in-memory cache (also catches the negative rows from Step 0)
     for name in targets:
         key = name.lower()
-        if key in _ARTIST_ARTWORK_CACHE:
+        if key in _ARTIST_ARTWORK_CACHE and key not in result:
             cached = _ARTIST_ARTWORK_CACHE[key]
             if cached:
                 result[key] = cached
@@ -189,6 +216,9 @@ async def get_artist_artworks(
         for k in to_fetch:
             _ARTIST_ARTWORK_CACHE[k] = result[k]
 
+    # Accumulator for new rows to persist to the DB cache.
+    new_db_entries: list[tuple[str, str]] = [(k, result[k]) for k in to_fetch]
+
     # Step 3: Apple Music catalog search for still-missing artists
     still_missing = [
         n for n in targets
@@ -212,8 +242,35 @@ async def get_artist_artworks(
                 continue
             key, url = entry
             _ARTIST_ARTWORK_CACHE[key] = url  # cache both hits and misses ("")
+            new_db_entries.append((key, url))  # persist even negatives
             if url:
                 result[key] = url
+
+    # Persist new entries to artist_artwork_cache. Best-effort — if the
+    # write fails the in-memory cache still saves this request; we'll
+    # retry on the next deploy-cold-start.
+    if new_db_entries:
+        try:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            async with engine.begin() as conn:
+                stmt = pg_insert(artist_artwork_cache).values([
+                    {"artist_name_lower": k, "artwork_url": v}
+                    for k, v in new_db_entries
+                ])
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["artist_name_lower"],
+                    set_={
+                        "artwork_url": stmt.excluded.artwork_url,
+                        "fetched_at": sa.func.now(),
+                    },
+                )
+                await conn.execute(stmt)
+        except Exception:
+            logger.debug(
+                "artist_artwork_cache write failed; next cold start will re-fetch",
+                exc_info=True,
+            )
 
     return result
 
