@@ -16,7 +16,117 @@ logger = logging.getLogger(__name__)
 
 
 class SearchService:
-    """CLAP-powered semantic music search."""
+    """CLAP-powered semantic music search + text autocomplete (V 6.420)."""
+
+    async def songs_autocomplete(
+        self,
+        engine,
+        *,
+        query: str,
+        limit: int = 10,
+        service: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Text autocomplete over global_song_cache with joined enrichment.
+
+        Used by the playlist-chat song-mention dropdown. Returns trimmed
+        payload optimized for inline rendering: artwork + enrichment tags.
+
+        Args:
+            engine: SQLAlchemy async engine.
+            query: Raw user text (>=1 char).
+            limit: Max rows (1-25).
+            service: Optional 'apple_music' or 'spotify' filter.
+        """
+        q = query.strip()
+        if not q:
+            return []
+
+        # ILIKE patterns for fuzzy match. We rank in SQL via a CASE
+        # expression so the top-N are the relevant ones, not arbitrary.
+        pattern = f"%{q}%"
+        prefix = f"{q}%"
+
+        service_clause = ""
+        params: dict[str, Any] = {
+            "q": q.lower(),
+            "prefix": prefix.lower(),
+            "pattern": pattern.lower(),
+            "lim": limit,
+        }
+        if service:
+            service_clause = "AND g.service_source = :service"
+            params["service"] = service
+
+        sql = sa.text(f"""
+            SELECT
+                g.catalog_id, g.isrc, g.name, g.artist_name,
+                g.album_name, g.genre_names, g.artwork_url,
+                g.preview_url, g.service_source, g.mood_tags,
+                afg.tempo, afg.energy, afg.valence_proxy, afg.danceability
+            FROM global_song_cache g
+            LEFT JOIN audio_features_global afg ON afg.isrc = g.isrc
+            WHERE (
+                LOWER(g.name) ILIKE :pattern
+                OR LOWER(g.artist_name) ILIKE :pattern
+            )
+            AND g.name IS NOT NULL AND g.name <> ''
+            AND g.artist_name IS NOT NULL AND g.artist_name <> ''
+            {service_clause}
+            ORDER BY
+                CASE
+                    WHEN LOWER(g.name) = :q THEN 1
+                    WHEN LOWER(g.name) ILIKE :prefix THEN 2
+                    WHEN LOWER(g.artist_name) = :q THEN 3
+                    WHEN LOWER(g.artist_name) ILIKE :prefix THEN 4
+                    WHEN LOWER(g.name) ILIKE :pattern THEN 5
+                    ELSE 6
+                END,
+                g.fetched_at DESC
+            LIMIT :lim
+        """)
+
+        async with engine.begin() as conn:
+            rows = (await conn.execute(sql, params)).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            genres = r.genre_names
+            if isinstance(genres, str):
+                try:
+                    genres = json.loads(genres)
+                except (json.JSONDecodeError, TypeError):
+                    genres = []
+            moods = r.mood_tags
+            if isinstance(moods, str):
+                try:
+                    moods = json.loads(moods)
+                except (json.JSONDecodeError, TypeError):
+                    moods = []
+            out.append({
+                "catalog_id": r.catalog_id,
+                "isrc": r.isrc,
+                "name": r.name,
+                "artist_name": r.artist_name,
+                "album_name": r.album_name or "",
+                "genre_names": genres or [],
+                "artwork_url": r.artwork_url or "",
+                "preview_url": r.preview_url or "",
+                "service_source": r.service_source or "",
+                "enrichment": {
+                    "mood_tags": moods or [],
+                    "tempo": float(r.tempo) if r.tempo is not None else None,
+                    "energy": float(r.energy) if r.energy is not None else None,
+                    "valence": (
+                        float(r.valence_proxy)
+                        if r.valence_proxy is not None else None
+                    ),
+                    "danceability": (
+                        float(r.danceability)
+                        if r.danceability is not None else None
+                    ),
+                },
+            })
+        return out
 
     async def semantic_search(
         self,

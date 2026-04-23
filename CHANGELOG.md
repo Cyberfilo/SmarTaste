@@ -7,6 +7,42 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.420 — 2026-04-23
+
+### Feature: text song autocomplete endpoint (`GET /api/search/songs`)
+
+Backbone for the upcoming playlist-chat song-mention dropdown. The existing `/api/search` is CLAP-semantic ("aggressive drill energy" → audio-similar matches); this new endpoint is plain text autocomplete over `global_song_cache`, with enrichment (mood_tags, tempo, energy, valence, danceability, genres) joined from `audio_features_global` so the chat UI can render inline artwork-as-character cards with signal tags without a second round trip.
+
+**Relevance ranking** (SQL CASE-expression):
+1. exact title match
+2. title prefix match
+3. exact artist match
+4. artist prefix match
+5. title substring match
+6. anything else (artist substring match)
+
+Ties broken by `fetched_at DESC` (most recently cached wins).
+
+**Query params**: `q` (required, 1-120 chars), `limit` (default 10, max 25), `service` (optional filter: `apple_music` | `spotify`).
+
+**Response shape** (per item):
+```json
+{
+  "catalog_id": "...", "isrc": "...",
+  "name": "...", "artist_name": "...", "album_name": "...",
+  "genre_names": [...], "artwork_url": "...",
+  "preview_url": "...", "service_source": "apple_music",
+  "enrichment": {
+    "mood_tags": [...], "tempo": 132.0, "energy": 0.83,
+    "valence": 0.61, "danceability": 0.77
+  }
+}
+```
+
+No frontend wiring yet — that lands with Phase 5 (playlist chat UI).
+
+---
+
 ## V 6.411 — 2026-04-23
 
 ### Observability: per-step `[PERF]` breakdown for `/recommendations` and `/taste/profile`
