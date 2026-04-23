@@ -7,6 +7,29 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.440 — 2026-04-23
+
+### Feature: playlist brief endpoint + DB schema for chat-driven target data
+
+Step 5a of the playlist-chat rework. Users can now persist a freeform "what kind of music do you want for this playlist" brief, plus the specific songs they referenced inline (with optional "why I like it" reasons per song). The brief becomes the seed the follow-up synthesis commit (5b) will turn into an audio-trait + mood target vector via gpt-5.4, which will then steer `/api/playlists/{id}/recommendations` instead of relying purely on the playlist's existing-song centroid.
+
+**DB** (alembic 031):
+- `playlist_briefs` — id, user_id, playlist_id, service, brief_text, target_vector JSONB (nullable), synthesis_error, timestamps. Indexed on `(user_id, playlist_id, created_at)` for "latest brief for this playlist" reads.
+- `playlist_brief_songs` — brief_id FK (CASCADE), position (stable order), catalog_id, isrc, role (`referenced | target_example | anti_example`), reason_text.
+
+**Endpoints** (`/api/playlists/{id}/…`):
+- `POST /brief` — body: `{service, brief_text, mentioned_songs: [{catalog_id, role, reason_text}]}`. Returns the persisted brief; `target_vector` comes back `null` until synthesis lands. 201 on create.
+- `GET /briefs` — returns the user's briefs for this playlist, newest first, with mentioned songs attached.
+
+**Why split storage from synthesis**: the frontend (Phase 6) can build the chat UI against a stable persistence contract while the OpenAI synthesis call + prompt template are iterated separately. Also lets us retry failed syntheses idempotently.
+
+Design notes:
+- target_vector is JSONB so schema can evolve (mood tags → tempo range → danceability targets → eventually CLAP seed) without migrations.
+- `role` is a free-text column (not an ENUM) for the same forward-compatibility reason — new role types don't require a migration.
+- `(brief_id, position)` composite PK on mentioned songs preserves the user's mention order exactly, which matters when the synthesis prompt iterates songs as "song 1, song 2, …".
+
+---
+
 ## V 6.430 — 2026-04-23
 
 ### Feature: playlist-scoped recommendations with 0.8/0.2 centroid blending

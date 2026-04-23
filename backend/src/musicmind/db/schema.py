@@ -642,6 +642,63 @@ recommendation_candidates = sa.Table(
     sa.Index("ix_rc_user_fetched", "user_id", "fetched_at"),
 )
 
+# ── Playlist brief (V 6.440 — chat-driven target data) ──────────────────────
+# Stores a user's freeform "what kind of music do you want here" brief per
+# playlist, plus the specific songs they mentioned inline as referenced /
+# target / anti examples. target_vector is synthesized from brief_text +
+# mentioned-song enrichment via gpt-5.4 (populated in a follow-up commit).
+
+playlist_briefs = sa.Table(
+    "playlist_briefs",
+    metadata,
+    sa.Column("id", sa.Text, primary_key=True),
+    sa.Column(
+        "user_id",
+        sa.Text,
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("playlist_id", sa.Text, nullable=False),
+    sa.Column("service", sa.Text, nullable=False),
+    sa.Column("brief_text", sa.Text, nullable=False),
+    sa.Column("target_vector", sa.JSON, nullable=True),
+    sa.Column("synthesis_error", sa.Text, nullable=True),
+    sa.Column(
+        "created_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Column(
+        "updated_at",
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    ),
+    sa.Index(
+        "ix_playlist_briefs_user_playlist",
+        "user_id", "playlist_id", "created_at",
+    ),
+)
+
+playlist_brief_songs = sa.Table(
+    "playlist_brief_songs",
+    metadata,
+    sa.Column(
+        "brief_id",
+        sa.Text,
+        sa.ForeignKey("playlist_briefs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("position", sa.Integer, nullable=False),
+    sa.Column("catalog_id", sa.Text, nullable=False),
+    sa.Column("isrc", sa.Text, nullable=True),
+    # role: referenced | target_example | anti_example
+    sa.Column("role", sa.Text, nullable=False, server_default="referenced"),
+    sa.Column("reason_text", sa.Text, nullable=True),
+    sa.PrimaryKeyConstraint("brief_id", "position"),
+)
+
 # ── Performance Indexes ─────────────────────────────────────────────────────
 # Composite PK tables index only the first column; queries filtering by
 # user_id alone need explicit indexes to avoid full table scans.

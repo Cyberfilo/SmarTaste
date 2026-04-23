@@ -7,6 +7,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from musicmind.api.playlists.schemas import (
+    BriefResponse,
+    CreateBriefRequest,
     PlaylistListResponse,
     PlaylistOut,
     PlaylistTrackOut,
@@ -150,3 +152,64 @@ async def get_playlist_recommendations(
         )
 
     return result
+
+
+# ── Playlist brief (V 6.440 — chat-driven target data) ──────────────────────
+
+
+@router.post("/{playlist_id}/brief", status_code=status.HTTP_201_CREATED)
+@limiter.limit(PLAYLISTS_LIMIT)
+async def create_playlist_brief(
+    request: Request,
+    playlist_id: str,
+    body: CreateBriefRequest,
+    current_user: dict = Depends(get_current_user),
+) -> BriefResponse:
+    """Persist a playlist brief (freeform 'what music for here' + mentions).
+
+    V 6.440 step 5a — storage only. The gpt-5.4 target_vector synthesis
+    that turns brief_text + mentioned-song enrichment into an audio-trait
+    + mood target vector lands in a follow-up commit (5b); until then,
+    `target_vector` comes back `null`.
+    """
+    if body.service.lower() not in {"apple_music", "spotify"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="service must be one of: apple_music, spotify",
+        )
+
+    try:
+        created = await playlist_service.create_brief(
+            request.app.state.engine,
+            user_id=current_user["user_id"],
+            playlist_id=playlist_id,
+            service=body.service.lower(),
+            brief_text=body.brief_text,
+            mentioned_songs=[s.model_dump() for s in body.mentioned_songs],
+        )
+    except Exception:
+        logger.exception("Failed to create playlist brief")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create brief",
+        )
+
+    return BriefResponse(**created)
+
+
+@router.get("/{playlist_id}/briefs")
+@limiter.limit(PLAYLISTS_LIMIT)
+async def list_playlist_briefs(
+    request: Request,
+    playlist_id: str,
+    limit: int = Query(default=10, ge=1, le=50),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Return the authenticated user's briefs for this playlist, newest first."""
+    briefs = await playlist_service.list_briefs(
+        request.app.state.engine,
+        user_id=current_user["user_id"],
+        playlist_id=playlist_id,
+        limit=limit,
+    )
+    return {"items": briefs, "total": len(briefs)}

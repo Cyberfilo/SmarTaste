@@ -20,8 +20,16 @@ from musicmind.api.services.service import (
     refresh_spotify_token,
     upsert_service_connection,
 )
-from musicmind.db.schema import service_connections
+from musicmind.db.schema import (
+    playlist_brief_songs,
+    playlist_briefs,
+    service_connections,
+)
 from musicmind.security.encryption import EncryptionService
+
+import uuid as _uuid
+
+_uuid7 = getattr(_uuid, "uuid7", _uuid.uuid4)
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +193,128 @@ class PlaylistService:
                             )
 
         return access_token
+
+    # ── Playlist brief (V 6.440 — chat-driven target data) ──────────
+
+    async def create_brief(
+        self,
+        engine,
+        *,
+        user_id: str,
+        playlist_id: str,
+        service: str,
+        brief_text: str,
+        mentioned_songs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Persist a new playlist brief + the songs the user mentioned.
+
+        target_vector stays NULL here — a follow-up commit (5b) adds the
+        gpt-5.4 synthesis that turns brief_text + mentioned songs'
+        enrichment into an audio-trait + mood target vector. Separating
+        storage from synthesis lets the frontend build against a stable
+        endpoint while synthesis is iterated.
+        """
+        brief_id = str(_uuid7())
+        now = datetime.now(UTC)
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                playlist_briefs.insert().values(
+                    id=brief_id,
+                    user_id=user_id,
+                    playlist_id=playlist_id,
+                    service=service,
+                    brief_text=brief_text,
+                    target_vector=None,
+                    synthesis_error=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            for idx, song in enumerate(mentioned_songs):
+                cid = song.get("catalog_id")
+                if not cid:
+                    continue
+                role = song.get("role") or "referenced"
+                if role not in ("referenced", "target_example", "anti_example"):
+                    role = "referenced"
+                await conn.execute(
+                    playlist_brief_songs.insert().values(
+                        brief_id=brief_id,
+                        position=idx,
+                        catalog_id=cid,
+                        isrc=song.get("isrc"),
+                        role=role,
+                        reason_text=song.get("reason_text"),
+                    )
+                )
+
+        return {
+            "id": brief_id,
+            "playlist_id": playlist_id,
+            "service": service,
+            "brief_text": brief_text,
+            "mentioned_songs": mentioned_songs,
+            "target_vector": None,
+            "synthesis_error": None,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+
+    async def list_briefs(
+        self,
+        engine,
+        *,
+        user_id: str,
+        playlist_id: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Return the user's briefs for this playlist, newest first."""
+        async with engine.begin() as conn:
+            brief_rows = (await conn.execute(
+                sa.select(playlist_briefs).where(
+                    sa.and_(
+                        playlist_briefs.c.user_id == user_id,
+                        playlist_briefs.c.playlist_id == playlist_id,
+                    )
+                ).order_by(playlist_briefs.c.created_at.desc()).limit(limit)
+            )).fetchall()
+            if not brief_rows:
+                return []
+
+            brief_ids = [r.id for r in brief_rows]
+            song_rows = (await conn.execute(
+                sa.select(playlist_brief_songs).where(
+                    playlist_brief_songs.c.brief_id.in_(brief_ids)
+                ).order_by(
+                    playlist_brief_songs.c.brief_id,
+                    playlist_brief_songs.c.position,
+                )
+            )).fetchall()
+
+        songs_by_brief: dict[str, list[dict[str, Any]]] = {}
+        for s in song_rows:
+            songs_by_brief.setdefault(s.brief_id, []).append({
+                "catalog_id": s.catalog_id,
+                "isrc": s.isrc,
+                "role": s.role,
+                "reason_text": s.reason_text,
+            })
+
+        return [
+            {
+                "id": b.id,
+                "playlist_id": b.playlist_id,
+                "service": b.service,
+                "brief_text": b.brief_text,
+                "mentioned_songs": songs_by_brief.get(b.id, []),
+                "target_vector": b.target_vector,
+                "synthesis_error": b.synthesis_error,
+                "created_at": b.created_at.isoformat() if b.created_at else "",
+                "updated_at": b.updated_at.isoformat() if b.updated_at else "",
+            }
+            for b in brief_rows
+        ]
 
     async def get_playlist_recommendations(
         self,

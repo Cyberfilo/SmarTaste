@@ -43,3 +43,49 @@ class PlaylistTracksResponse(BaseModel):
     service: str = Field(description="Source service")
     items: list[PlaylistTrackOut] = Field(description="Tracks in order")
     total: int = Field(description="Total tracks")
+
+
+# ── Playlist brief (V 6.440) ────────────────────────────────────────────────
+
+
+class BriefMentionedSong(BaseModel):
+    """A song the user mentioned in their playlist brief."""
+
+    catalog_id: str = Field(description="Service-specific track ID")
+    isrc: str | None = Field(default=None, description="ISRC if known")
+    role: str = Field(
+        default="referenced",
+        description="referenced | target_example | anti_example",
+    )
+    reason_text: str | None = Field(
+        default=None,
+        description="User's freeform 'why I like/dislike this' note",
+    )
+
+
+class CreateBriefRequest(BaseModel):
+    """POST /api/playlists/{id}/brief body."""
+
+    service: str = Field(description="apple_music | spotify")
+    brief_text: str = Field(
+        min_length=1, max_length=4000,
+        description="Freeform 'what kind of music for this playlist' text",
+    )
+    mentioned_songs: list[BriefMentionedSong] = Field(
+        default_factory=list,
+        description="Songs the user referenced inline in the brief",
+    )
+
+
+class BriefResponse(BaseModel):
+    """Persisted playlist brief (target_vector populated once synthesized)."""
+
+    id: str
+    playlist_id: str
+    service: str
+    brief_text: str
+    mentioned_songs: list[BriefMentionedSong]
+    target_vector: dict | None = None
+    synthesis_error: str | None = None
+    created_at: str
+    updated_at: str
