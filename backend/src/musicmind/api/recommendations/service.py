@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import sqlalchemy as sa
@@ -142,10 +143,23 @@ class RecommendationService:
         Raises:
             ValueError: If no connected service or invalid mood.
         """
+        # V 6.411 — per-step perf instrumentation. Emits one [PERF] log line
+        # per request with a millisecond breakdown of each pipeline stage.
+        _perf: dict[str, float] = {}
+        _t_start = time.perf_counter()
+        _t_last = _t_start
+
+        def _lap(step: str) -> None:
+            nonlocal _t_last
+            now = time.perf_counter()
+            _perf[step] = (now - _t_last) * 1000.0
+            _t_last = now
+
         # Step 1: Get taste profile via TasteService
         profile = await _taste_service.get_profile(
             engine, encryption, settings, user_id=user_id,
         )
+        _lap("taste_profile")
 
         # Step 2: Resolve service + credentials (only used for cold-start fallback)
         all_creds: list[tuple[str, str, str | None, str]] = []
@@ -176,6 +190,7 @@ class RecommendationService:
         candidates = await self._load_candidates_from_db(
             engine, user_id=user_id, strategy=strategy,
         )
+        _lap("load_candidates")
 
         # Step 4.5: Mode-specific filter + augment (V 6.378)
         # mode = "your_artists" → tracks where ANY artist (primary or feat)
@@ -298,8 +313,11 @@ class RecommendationService:
                 )
             )
 
+        _lap("mode_filter")
+
         # Step 5: Deduplicate candidates across services and strategies
         unique = self._deduplicate_candidates(candidates)
+        _lap("dedup")
 
         # Apply cross-service dedup via ISRC + fuzzy match if multiple services
         if len(all_creds) > 1:
@@ -315,11 +333,13 @@ class RecommendationService:
         unique = await self._filter_library_songs(
             engine, unique, user_id=user_id,
         )
+        _lap("filter_library")
 
         # Step 6: Load calibration artist weights
         calibration_artists = await self._load_calibration_artists(
             engine, user_id=user_id,
         )
+        _lap("calibration")
 
         user_audio_centroid = profile.get("audio_centroid") or None
         user_clap_centroid = profile.get("clap_centroid") or None
@@ -330,6 +350,7 @@ class RecommendationService:
         user_tag_profile, collaborative_matches = await self._load_lastfm_data(
             engine, user_id=user_id,
         )
+        _lap("lastfm")
 
         # Step 7: Apply mood filter
         resolved_mood: str | None = None
@@ -375,10 +396,12 @@ class RecommendationService:
         audio_features_map = await self._load_audio_features(
             engine, unique, user_id=user_id,
         )
+        _lap("audio_features")
 
         clap_map, mert_map, embedding_map = await self._load_embeddings(
             engine, unique, user_id=user_id,
         )
+        _lap("embeddings")
 
         # Load user library CLAP embeddings for contextual explanations.
         # V 6.390: restrict to top-30 artists by affinity so the "Similar
@@ -394,6 +417,7 @@ class RecommendationService:
             user_id=user_id,
             known_artist_names=top_artist_names or None,
         )
+        _lap("library_claps")
 
         ranked = rank_candidates(
             unique, profile, count=limit, weights=weights,
@@ -408,6 +432,7 @@ class RecommendationService:
             calibration_artists=calibration_artists,
             user_library_claps=user_library_claps or None,
         )
+        _lap("score")
 
         # Step 9: Build response
         items = []
@@ -427,6 +452,16 @@ class RecommendationService:
                 "genre_names": result.get("genre_names", []),
                 "mood_tags": result.get("mood_tags", []),
             })
+
+        total_ms = (time.perf_counter() - _t_start) * 1000.0
+        breakdown = " ".join(f"{k}={v:.0f}ms" for k, v in _perf.items())
+        logger.info(
+            "[PERF] recs user=%s strat=%s mode=%s cands=%d→%d "
+            "total=%.0fms | %s",
+            user_id[:8], strategy, mode,
+            len(candidates), len(items),
+            total_ms, breakdown,
+        )
 
         return {
             "items": items,

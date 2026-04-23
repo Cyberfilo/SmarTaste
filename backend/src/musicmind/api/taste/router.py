@@ -124,6 +124,18 @@ async def get_profile(
     a background refresh so the next request gets fresh data.
     Never blocks the user waiting for API re-fetch.
     """
+    # V 6.411 — per-step perf instrumentation.
+    import time as _time
+    _perf: dict[str, float] = {}
+    _t_start = _time.perf_counter()
+    _t_last = _t_start
+
+    def _lap(step: str) -> None:
+        nonlocal _t_last
+        now = _time.perf_counter()
+        _perf[step] = (now - _t_last) * 1000.0
+        _t_last = now
+
     try:
         profile = await taste_service.get_profile(
             request.app.state.engine,
@@ -133,6 +145,7 @@ async def get_profile(
             service=service,
             force_refresh=refresh,
         )
+        _lap("profile")
 
         # If profile is stale (>24h), trigger background refresh
         if not refresh:
@@ -193,6 +206,7 @@ async def get_profile(
             "artist artwork will fall back to library-only lookup"
         )
 
+    _lap("token")
     try:
         artworks = await get_artist_artworks(
             request.app.state.engine,
@@ -203,6 +217,7 @@ async def get_profile(
     except Exception:
         logger.debug("Artist artwork lookup failed; returning profile without artwork")
         artworks = {}
+    _lap("artworks")
 
     top_artists = [
         ArtistEntry(
@@ -223,6 +238,14 @@ async def get_profile(
     breadth_raw = compute_breadth_metrics(
         genre_vector=cleaned_genres,
         top_artists=raw_artists if isinstance(raw_artists, list) else [],
+    )
+
+    total_ms = (_time.perf_counter() - _t_start) * 1000.0
+    breakdown = " ".join(f"{k}={v:.0f}ms" for k, v in _perf.items())
+    logger.info(
+        "[PERF] taste_profile user=%s artists=%d total=%.0fms | %s",
+        current_user["user_id"][:8], len(artist_names),
+        total_ms, breakdown,
     )
 
     return TasteProfileResponse(

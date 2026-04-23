@@ -7,6 +7,24 @@ When A reaches 10 → Z+1 (A resets to 0). When Z reaches 10 → Y+1. Etc.
 
 ---
 
+## V 6.411 — 2026-04-23
+
+### Observability: per-step `[PERF]` breakdown for `/recommendations` and `/taste/profile`
+
+Prod logs currently show `/api/recommendations` at 5-22s and `/api/taste/profile` at 5.5s, but only as a single `[SLOW]` line — no way to tell which pipeline phase burns the wall clock. This patch adds a `time.perf_counter()` lap helper at each major step and emits one `[PERF]` info line per request with millisecond deltas for every phase, so the next batch of prod logs tells us exactly where to cut.
+
+**Recommendations** (`api/recommendations/service.py:get_recommendations`) — lap points: `taste_profile`, `load_candidates`, `mode_filter`, `dedup`, `filter_library`, `calibration`, `lastfm`, `audio_features`, `embeddings`, `library_claps`, `score`. Log line format:
+
+```
+[PERF] recs user=abc12345 strat=all mode=discover cands=200→20 total=4731ms | taste_profile=530ms load_candidates=180ms ... score=2100ms
+```
+
+**Taste profile** (`api/taste/router.py:get_profile`) — lap points: `profile`, `token`, `artworks`. The `artworks` step is the prime suspect (in-memory cache resets on every process restart; Apple catalog fan-out re-fires on cold start).
+
+No behavior change; next prod hit shows where to fix.
+
+---
+
 ## V 6.410 — 2026-04-23
 
 ### Feature: BYOK removed — chat uses the globally-configured OpenAI key
