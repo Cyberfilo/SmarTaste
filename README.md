@@ -361,6 +361,3 @@ cd backend && uv run python -m pytest tests/ -v
 
 Tests cover: auth, service connections, taste profiles, stats, recommendations, multi-service unification, OpenAI chat, genre normalization, track deduplication, audio pipeline, scoring dimensions.
 
-## License
-
-MIT — Copyright 2026 [Filippo Mattia Menghi](https://github.com/Cyberfilo)
